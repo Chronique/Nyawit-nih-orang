@@ -86,10 +86,15 @@ export const VaultView = () => {
 
       if (isEth) {
         const currentBal = parseEther(ethBalance);
-        const gasBuffer = parseEther("0.00005"); 
+        
+        // --- PERBAIKAN BUFFER GAS ---
+        // 0.0002 ETH (Sekitar $0.60)
+        // Kita butuh buffer agak besar untuk "Prefund" (Jaminan Gas)
+        // Sisa uang yang tidak terpakai akan otomatis tetap ada di wallet, tidak hilang.
+        const gasBuffer = parseEther("0.0002"); 
         
         if (currentBal <= gasBuffer) {
-           throw new Error("Saldo ETH terlalu kecil (habis untuk gas).");
+           throw new Error("Saldo ETH tidak cukup untuk cover gas fee (Butuh min 0.0002 ETH).");
         }
 
         const amountToSend = currentBal - gasBuffer;
@@ -125,9 +130,12 @@ export const VaultView = () => {
 
     } catch (e: any) {
       console.error(e);
-      const msg = e.message.includes("Saldo ETH") 
-        ? "Saldo tidak cukup untuk bayar gas fee."
-        : "Withdraw Gagal. Cek console.";
+      // Parsing pesan error agar user paham
+      let msg = "Withdraw Gagal.";
+      if (e.message.includes("Saldo ETH")) msg = e.message;
+      else if (e.message.includes("preverification gas")) msg = "Gas fee sedang tinggi, coba lagi nanti.";
+      else if (e.message.includes("UserOperation reverted")) msg = "Transaksi ditolak (Mungkin saldo kurang untuk gas).";
+      
       alert(msg);
     } finally {
       setActionLoading(null); 
@@ -163,7 +171,8 @@ export const VaultView = () => {
                 {parseFloat(ethBalance).toFixed(5)} <span className="text-sm font-normal text-zinc-400">ETH</span>
             </div>
             
-            {parseFloat(ethBalance) > 0.00005 && (
+            {/* Tombol Withdraw ETH hanya muncul jika saldo cukup aman */}
+            {parseFloat(ethBalance) > 0.0002 && (
                <button onClick={() => handleWithdraw()} className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-full border border-zinc-700 flex items-center gap-1 transition-all">
                  Withdraw All <ArrowRight className="w-3 h-3" />
                </button>
