@@ -10,9 +10,8 @@ import { RefreshDouble, Coins } from "iconoir-react";
 // KONFIGURASI
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
 const NATIVE_ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
-// Ganti dengan Wallet penerima fee kamu
 const DEV_WALLET = "0x40F29D1365aBC82134fB43c877511082D8B8fcD1"; 
-const MIN_VALUE_USD = 0.01; // Filter: Token di bawah $0.01 dianggap sampah
+const MIN_VALUE_USD = 0.01; 
 
 type OutputToken = "USDC" | "ETH";
 
@@ -21,7 +20,7 @@ interface SwappableToken {
   symbol: string;
   balance: bigint;
   formattedBalance: string;
-  estimatedValueUsd: number; // Estimasi nilai dalam USD
+  estimatedValueUsd: number;
   decimals: number;
 }
 
@@ -46,25 +45,25 @@ export const SwapView = () => {
       
       try {
         const client = await getSmartAccountClient(walletClient);
+        
+        // FIX: Pastikan account ada
+        if (!client.account) return; 
+
         const address = client.account.address;
         setSaAddress(address);
         
-        // A. Ambil Saldo dari Alchemy
         const balances = await alchemy.core.getTokenBalances(address);
         const nonZero = balances.tokenBalances.filter(t => t.tokenBalance && BigInt(t.tokenBalance) > 0n);
         
         const validTokens: SwappableToken[] = [];
         let totalUsd = 0;
 
-        // B. Cek Harga/Likuiditas ke 0x API satu per satu
         for (const t of nonZero) {
-          // Skip jika tokennya adalah target output (USDC)
           if (t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase() && outputToken === "USDC") continue;
 
           try {
             const rawBalance = BigInt(t.tokenBalance || "0");
             
-            // Panggil 0x Price untuk cek value estimasi
             const params = new URLSearchParams({
               sellToken: t.contractAddress,
               buyToken: USDC_ADDRESS, 
@@ -75,12 +74,11 @@ export const SwapView = () => {
               headers: { '0x-api-key': process.env.NEXT_PUBLIC_0X_API_KEY || '' }
             });
 
-            if (!res.ok) continue; // Skip jika error
+            if (!res.ok) continue; 
 
             const data = await res.json();
-            const buyAmountUsdc = parseFloat(data.buyAmount) / 1000000; // USDC 6 decimals
+            const buyAmountUsdc = parseFloat(data.buyAmount) / 1000000; 
 
-            // C. Filter: Hanya ambil yang nilainya > $0.01
             if (buyAmountUsdc > MIN_VALUE_USD) {
               const metadata = await alchemy.core.getTokenMetadata(t.contractAddress);
               
@@ -95,9 +93,7 @@ export const SwapView = () => {
               
               totalUsd += buyAmountUsdc;
             }
-          } catch (e) {
-            // Ignore error per token
-          }
+          } catch (e) { }
         }
 
         setSwappableTokens(validTokens);
@@ -123,9 +119,12 @@ export const SwapView = () => {
 
     try {
       const client = await getSmartAccountClient(walletClient);
+      
+      // FIX: Cek account lagi sebelum transaksi
+      if (!client.account) throw new Error("Akun tidak ditemukan.");
+
       const batchCalls = [];
 
-      // Loop semua token VALID
       for (const token of swappableTokens) {
         const buyTokenAddr = outputToken === "USDC" ? USDC_ADDRESS : NATIVE_ETH_ADDRESS;
 
@@ -186,7 +185,11 @@ export const SwapView = () => {
 
       setStatus("Signing & Executing Bundle...");
       
-      const userOpHash = await client.sendUserOperation({ calls: batchCalls });
+      // FIX: Pass 'account' secara eksplisit
+      const userOpHash = await client.sendUserOperation({
+        account: client.account,
+        calls: batchCalls 
+      });
       
       setStatus(`Success! Tx Hash: ${userOpHash}`);
       setSwappableTokens([]); 
@@ -226,7 +229,7 @@ export const SwapView = () => {
         </div>
       </div>
 
-      {/* 3. TOKEN LIST (FILTERED) */}
+      {/* 3. TOKEN LIST */}
       <div className="space-y-1">
         <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider ml-1">Assets to Sweep ({">"}$0.01)</h3>
         {scanning ? (

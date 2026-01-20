@@ -15,7 +15,6 @@ export const VaultView = () => {
   const [ethBalance, setEthBalance] = useState("0");
   const [tokens, setTokens] = useState<any[]>([]);
   
-  // State UX
   const [loading, setLoading] = useState(false); 
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
 
@@ -24,6 +23,10 @@ export const VaultView = () => {
     setLoading(true);
     try {
       const client = await getSmartAccountClient(walletClient);
+      
+      // FIX: Cek account
+      if (!client.account) return;
+
       const address = client.account.address;
       setVaultAddress(address);
 
@@ -75,24 +78,21 @@ export const VaultView = () => {
       setActionLoading(`Withdrawing ${symbol}...`); 
 
       const client = await getSmartAccountClient(walletClient);
+      
+      // FIX: Cek account lagi sebelum transaksi
+      if (!client.account) throw new Error("Akun tidak ditemukan");
+
       let callData: any;
 
       if (isEth) {
-        // --- LOGIC BARU: WITHDRAW MAX (SISAIN DIKIT AJA) ---
         const currentBal = parseEther(ethBalance);
-        
-        // Buffer Gas: 0.00005 ETH (~$0.15). 
-        // Ini aman untuk cover biaya eksekusi UserOp di Base.
         const gasBuffer = parseEther("0.00005"); 
         
         if (currentBal <= gasBuffer) {
            throw new Error("Saldo ETH terlalu kecil (habis untuk gas).");
         }
 
-        // Hitung: Saldo Sekarang - Buffer Gas = Yang Dikirim
         const amountToSend = currentBal - gasBuffer;
-
-        console.log(`Withdraw ETH: Total ${formatEther(currentBal)} - Buffer ${formatEther(gasBuffer)} = Send ${formatEther(amountToSend)}`);
 
         callData = {
           to: ownerAddress,
@@ -100,7 +100,6 @@ export const VaultView = () => {
           data: "0x"
         };
       } else {
-        // Withdraw ERC20 Token (Tarik Semua - Gak perlu mikir gas di tokennya)
         callData = {
           to: token.contractAddress as Address,
           value: 0n,
@@ -112,21 +111,20 @@ export const VaultView = () => {
         };
       }
 
-      // Kirim UserOp
-      const hash = await client.sendUserOperation({ calls: [callData] });
+      // FIX: Pass 'account' secara eksplisit
+      const hash = await client.sendUserOperation({
+        account: client.account,
+        calls: [callData]
+      });
       console.log("Withdraw Tx:", hash);
 
       setActionLoading("Confirming...");
       
-      // Tunggu 4 Detik (Estimasi block time Base)
       await new Promise(resolve => setTimeout(resolve, 4000));
-      
-      // Refresh Data
       await fetchVaultData();
 
     } catch (e: any) {
       console.error(e);
-      // Alert yang lebih ramah user
       const msg = e.message.includes("Saldo ETH") 
         ? "Saldo tidak cukup untuk bayar gas fee."
         : "Withdraw Gagal. Cek console.";
@@ -165,7 +163,6 @@ export const VaultView = () => {
                 {parseFloat(ethBalance).toFixed(5)} <span className="text-sm font-normal text-zinc-400">ETH</span>
             </div>
             
-            {/* Tombol Withdraw ETH: Muncul jika saldo > Buffer Gas */}
             {parseFloat(ethBalance) > 0.00005 && (
                <button onClick={() => handleWithdraw()} className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-full border border-zinc-700 flex items-center gap-1 transition-all">
                  Withdraw All <ArrowRight className="w-3 h-3" />

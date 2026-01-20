@@ -5,7 +5,6 @@ import { useAccount, useWriteContract, useWalletClient } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatEther, erc20Abi, type Address } from "viem";
-// PERBAIKAN DI SINI: Ganti Sparkles jadi Sparks
 import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks } from "iconoir-react";
 
 // Token yang di-exclude (Tidak dianggap dust)
@@ -51,6 +50,10 @@ export const DustDepositView = () => {
       if (!walletClient) return;
       try {
         const client = await getSmartAccountClient(walletClient);
+        
+        // FIX: Pastikan account ada sebelum akses
+        if (!client.account) return; 
+
         const vAddr = client.account.address;
         setVaultAddress(vAddr);
         const bal = await publicClient.getBalance({ address: vAddr });
@@ -64,7 +67,7 @@ export const DustDepositView = () => {
   const scanOwnerWallet = async () => {
       if (!ownerAddress) return;
       setLoading(true);
-      setPotentialValue(0); // Reset value saat scan ulang
+      setPotentialValue(0); 
       try {
         const balances = await alchemy.core.getTokenBalances(ownerAddress);
         
@@ -108,7 +111,7 @@ export const DustDepositView = () => {
     if (ownerAddress) scanOwnerWallet();
   }, [ownerAddress]);
 
-  // 3. CALCULATE POTENTIAL VALUE (BACKGROUND PROCESS)
+  // 3. CALCULATE POTENTIAL VALUE
   useEffect(() => {
     const calculateValue = async () => {
       if (tokens.length === 0) return;
@@ -232,17 +235,15 @@ export const DustDepositView = () => {
         </div>
       </div>
 
-      {/* LIST HEADER with POTENTIAL VALUE */}
+      {/* LIST HEADER */}
       <div className="flex items-end justify-between mb-3 px-1">
         <div>
            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
              Wallet Assets <span className="text-xs font-normal text-zinc-400">({tokens.length})</span>
            </h3>
            
-           {/* FITUR BARU: TOTAL ESTIMATED VALUE */}
            {tokens.length > 0 && (
              <div className="text-xs font-medium text-green-600 mt-0.5 flex items-center gap-1 animate-in fade-in slide-in-from-left-2">
-               {/* PERBAIKAN: Ganti Sparkles jadi Sparks */}
                <Sparks className="w-3 h-3" />
                Potential Value: 
                {calculatingValue ? (
@@ -285,7 +286,6 @@ export const DustDepositView = () => {
                     : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-300"
                 }`}
               >
-                {/* ICON TOKEN */}
                 <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center overflow-hidden shrink-0 mr-3 border border-zinc-100 dark:border-zinc-700">
                   {token.logo ? (
                     <img src={token.logo} alt={token.symbol} className="w-full h-full object-cover" />
@@ -293,12 +293,10 @@ export const DustDepositView = () => {
                     <span className="text-xs font-bold text-zinc-400">{token.symbol[0]}</span>
                   )}
                 </div>
-
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-sm truncate">{token.name}</div>
                   <div className="text-xs text-zinc-500">{token.balance} {token.symbol}</div>
                 </div>
-
                 <div className="pl-3">
                   {isSelected ? (
                     <CheckCircle className="w-6 h-6 text-blue-600 fill-blue-600/10" />
@@ -312,7 +310,7 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* PAGINATION & BUTTON */}
+      {/* PAGINATION */}
       {totalPages > 1 && (
         <div className="flex justify-center items-center gap-4 mt-6">
           <button 
