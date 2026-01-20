@@ -23,20 +23,18 @@ export async function GET() {
         "ogImageUrl": METADATA.bannerImageUrl,
         "primaryCategory": "finance",
         "requiredCapabilities": [
-          "actions.ready",
-          "actions.signin", 
-          "actions.open-miniApp",
-          "actions.add-miniApp",
-          "actions.openurl",
-          "actions.send-token",
-          "actions.view-token", 
-          "actions.compose-cast",
-          "actions.view-profile",
-          "actions.swap-token",
-          "actions.close-miniapp",
-          "actions.view-cast",
-          "wallet.wallet-connect-prompt"
-        ],
+      "actions.ready",
+      "actions.signIn",          
+      "actions.addMiniApp",       
+      "actions.openUrl",          
+      "actions.sendToken",        
+      "actions.viewToken",        
+      "actions.composeCast",      
+      "actions.viewProfile",      
+      "actions.swapToken",        
+      "actions.close",            
+      "actions.viewCast"          
+    ],
         "requiredChains": [
           "eip155:8453",
           "eip155:10"
