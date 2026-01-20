@@ -5,7 +5,7 @@ import { useWalletClient, useAccount } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatEther, parseEther, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { Copy, Wallet, ArrowRight, Refresh } from "iconoir-react";
+import { Copy, Wallet, ArrowRight, Refresh, Rocket, Check } from "iconoir-react";
 
 export const VaultView = () => {
   const { data: walletClient } = useWalletClient();
@@ -14,6 +14,7 @@ export const VaultView = () => {
   const [vaultAddress, setVaultAddress] = useState<string | null>(null);
   const [ethBalance, setEthBalance] = useState("0");
   const [tokens, setTokens] = useState<any[]>([]);
+  const [isDeployed, setIsDeployed] = useState(false); // Status Deployment
   
   const [loading, setLoading] = useState(false); 
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
@@ -24,15 +25,22 @@ export const VaultView = () => {
     try {
       const client = await getSmartAccountClient(walletClient);
       
-      // Cek account
       if (!client.account) return;
 
       const address = client.account.address;
       setVaultAddress(address);
 
+      // 1. Cek Balance
       const bal = await publicClient.getBalance({ address });
       setEthBalance(formatEther(bal));
 
+      // 2. Cek Status Deployment (Get Bytecode)
+      // Jika bytecode ada isinya, berarti sudah deployed. Jika null/undefined, belum.
+      const code = await publicClient.getBytecode({ address });
+      const deployedStatus = code !== undefined && code !== null && code !== "0x";
+      setIsDeployed(deployedStatus);
+
+      // 3. Cek Token
       const balances = await alchemy.core.getTokenBalances(address);
       const nonZeroTokens = balances.tokenBalances.filter(t => 
           t.tokenBalance && BigInt(t.tokenBalance) > 0n
@@ -67,6 +75,48 @@ export const VaultView = () => {
     fetchVaultData();
   }, [walletClient]);
 
+  // --- MANUAL DEPLOY FUNCTION ---
+  const handleDeploy = async () => {
+    if (!walletClient || !vaultAddress) return;
+    
+    try {
+      setActionLoading("Activating Vault...");
+      const client = await getSmartAccountClient(walletClient);
+      if (!client.account) throw new Error("Akun tidak ditemukan");
+
+      // Cek Saldo Minimaal untuk Deploy (~$1 - $2 aman)
+      const currentBal = parseEther(ethBalance);
+      if (currentBal < parseEther("0.0002")) {
+        throw new Error("Saldo ETH kurang untuk biaya aktivasi (Min 0.0002 ETH).");
+      }
+
+      // TRICK: Kirim 0 ETH ke diri sendiri.
+      // Karena ini transaksi pertama, Smart Account otomatis akan men-deploy dirinya sendiri.
+      const hash = await client.sendUserOperation({
+        account: client.account,
+        calls: [{
+          to: vaultAddress as Address,
+          value: 0n,
+          data: "0x"
+        }]
+      });
+
+      console.log("Deploy Hash:", hash);
+      setActionLoading("Finalizing Deployment...");
+      
+      // Tunggu agak lamaan untuk deployment
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      await fetchVaultData(); // Refresh status
+
+    } catch (e: any) {
+      console.error(e);
+      alert(`Gagal Aktivasi: ${e.message}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // --- WITHDRAW FUNCTION (Hanya Jalan Jika Sudah Deployed) ---
   const handleWithdraw = async (token?: any) => {
     if (!walletClient || !ownerAddress) return;
 
@@ -74,37 +124,21 @@ export const VaultView = () => {
       const isEth = !token; 
       const symbol = isEth ? "ETH" : token.symbol;
       
-      setActionLoading(isEth 
-        ? "Deploying & Withdrawing..." 
-        : `Withdrawing ${symbol}...`
-      ); 
-
+      setActionLoading(`Withdrawing ${symbol}...`); 
       const client = await getSmartAccountClient(walletClient);
-      
       if (!client.account) throw new Error("Akun tidak ditemukan");
 
       let callData: any;
 
       if (isEth) {
         const currentBal = parseEther(ethBalance);
+        // Karena sudah deployed, buffer gas bisa lebih kecil (murah)
+        const gasBuffer = parseEther("0.00005"); 
         
-        // --- BUFFER AMAN UNTUK DEPLOYMENT ---
-        // 0.0005 ETH (~$1.50)
-        // Kita butuh buffer agak besar karena ini mungkin transaksi pertama
-        // yang sekaligus menanggung biaya Deploy Contract.
-        const gasBuffer = parseEther("0.0005"); 
-        
-        if (currentBal <= gasBuffer) {
-           throw new Error("Saldo tidak cukup untuk Biaya Deploy + Gas (Min sisa 0.0005 ETH).");
-        }
-
+        if (currentBal <= gasBuffer) throw new Error("Sisa ETH tidak cukup untuk gas fee.");
         const amountToSend = currentBal - gasBuffer;
 
-        callData = {
-          to: ownerAddress,
-          value: amountToSend, 
-          data: "0x"
-        };
+        callData = { to: ownerAddress, value: amountToSend, data: "0x" };
       } else {
         callData = {
           to: token.contractAddress as Address,
@@ -117,27 +151,18 @@ export const VaultView = () => {
         };
       }
 
-      // Pass 'account' eksplisit
       const hash = await client.sendUserOperation({
         account: client.account,
         calls: [callData]
       });
-      console.log("Withdraw Tx:", hash);
 
       setActionLoading("Confirming...");
-      
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Tunggu agak lamaan dikit
+      await new Promise(resolve => setTimeout(resolve, 4000));
       await fetchVaultData();
 
     } catch (e: any) {
       console.error(e);
-      let msg = "Withdraw Gagal.";
-      // Pesan error yang lebih jelas
-      if (e.message.includes("Saldo")) msg = e.message;
-      else if (e.message.includes("UserOperation reverted")) msg = "Gagal Deploy/Withdraw. Pastikan sisa ETH cukup untuk gas deployment.";
-      else if (e.message.includes("AA21")) msg = "Perlu deposit ETH dulu untuk biaya gas.";
-      
-      alert(msg);
+      alert(`Withdraw Gagal: ${e.message}`);
     } finally {
       setActionLoading(null); 
     }
@@ -157,27 +182,48 @@ export const VaultView = () => {
       )}
 
       {/* HEADER CARD */}
-      <div className="p-5 bg-zinc-900 text-white rounded-2xl shadow-lg">
-        <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-            <Wallet className="w-3 h-3" /> Smart Vault Active
+      <div className="p-5 bg-zinc-900 text-white rounded-2xl shadow-lg relative overflow-hidden">
+        {/* Status Badge */}
+        <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-orange-500/20 border-orange-500 text-orange-400"}`}>
+           {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
+           {isDeployed ? "Active Vault" : "Not Activated"}
         </div>
-        <div className="flex items-center justify-between">
-            <code className="text-sm truncate max-w-[200px]">{vaultAddress || "Loading..."}</code>
+
+        <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+            <Wallet className="w-3 h-3" /> Smart Vault Address
+        </div>
+        <div className="flex items-center justify-between mb-4">
+            <code className="text-sm truncate max-w-[180px] opacity-80">{vaultAddress || "Loading..."}</code>
             <button onClick={() => vaultAddress && navigator.clipboard.writeText(vaultAddress)}>
                <Copy className="w-4 h-4 hover:text-blue-400" />
             </button>
         </div>
-        <div className="mt-4 flex items-end justify-between">
+
+        <div className="mt-2">
             <div className="text-2xl font-bold">
                 {parseFloat(ethBalance).toFixed(5)} <span className="text-sm font-normal text-zinc-400">ETH</span>
             </div>
             
-            {/* Tombol Withdraw muncul jika saldo > 0.0005 */}
-            {parseFloat(ethBalance) > 0.0005 && (
-               <button onClick={() => handleWithdraw()} className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-full border border-zinc-700 flex items-center gap-1 transition-all">
-                 Withdraw All <ArrowRight className="w-3 h-3" />
-               </button>
-            )}
+            <div className="mt-4">
+              {!isDeployed ? (
+                // --- TOMBOL MANUAL DEPLOY ---
+                <button 
+                  onClick={handleDeploy}
+                  disabled={parseFloat(ethBalance) < 0.0002}
+                  className="w-full bg-orange-600 hover:bg-orange-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg shadow-orange-900/20 flex items-center justify-center gap-2 transition-all"
+                >
+                  <Rocket className="w-4 h-4" /> 
+                  {parseFloat(ethBalance) < 0.0002 ? "Deposit min 0.0002 ETH" : "Activate Vault Now"}
+                </button>
+              ) : (
+                // --- TOMBOL WITHDRAW (Jika sudah deployed) ---
+                 parseFloat(ethBalance) > 0.00005 && (
+                   <button onClick={() => handleWithdraw()} className="w-full bg-zinc-800 hover:bg-zinc-700 px-4 py-2.5 rounded-xl border border-zinc-700 flex items-center justify-center gap-2 transition-all text-sm font-medium">
+                     Withdraw All ETH <ArrowRight className="w-3 h-3" />
+                   </button>
+                 )
+              )}
+            </div>
         </div>
       </div>
 
@@ -209,11 +255,17 @@ export const VaultView = () => {
                         </div>
                     </div>
                     
+                    {/* Tombol Withdraw Token hanya aktif jika vault sudah deployed */}
                     <button 
                       onClick={() => handleWithdraw(token)}
-                      className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                      disabled={!isDeployed}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                        !isDeployed 
+                          ? "bg-zinc-100 text-zinc-400 cursor-not-allowed" 
+                          : "text-blue-600 bg-blue-50 hover:bg-blue-100"
+                      }`}
                     >
-                      Withdraw
+                      {!isDeployed ? "Locked" : "Withdraw"}
                     </button>
                 </div>
             ))}
