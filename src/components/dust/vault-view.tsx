@@ -5,7 +5,7 @@ import { useWalletClient, useAccount } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatEther, parseEther, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { Copy, Wallet, ArrowRight, Refresh, Sparks } from "iconoir-react";
+import { Copy, Wallet, ArrowRight, Refresh } from "iconoir-react";
 
 export const VaultView = () => {
   const { data: walletClient } = useWalletClient();
@@ -64,7 +64,7 @@ export const VaultView = () => {
     fetchVaultData();
   }, [walletClient]);
 
-  // --- FITUR WITHDRAW (PERBAIKAN LOGIC ETH) ---
+  // --- FITUR WITHDRAW ---
   const handleWithdraw = async (token?: any) => {
     if (!walletClient || !ownerAddress) return;
 
@@ -78,24 +78,29 @@ export const VaultView = () => {
       let callData: any;
 
       if (isEth) {
-        // PERBAIKAN: HITUNG MAX WITHDRAW AMAN
-        // Kita harus menyisakan 'dust' untuk membayar gas eksekusi internal Smart Account
+        // --- LOGIC BARU: WITHDRAW MAX (SISAIN DIKIT AJA) ---
         const currentBal = parseEther(ethBalance);
-        const gasBuffer = parseEther("0.00005"); // ~ $0.15 Buffer
+        
+        // Buffer Gas: 0.00005 ETH (~$0.15). 
+        // Ini aman untuk cover biaya eksekusi UserOp di Base.
+        const gasBuffer = parseEther("0.00005"); 
         
         if (currentBal <= gasBuffer) {
-           throw new Error("Saldo ETH terlalu kecil untuk menutupi biaya gas.");
+           throw new Error("Saldo ETH terlalu kecil (habis untuk gas).");
         }
 
+        // Hitung: Saldo Sekarang - Buffer Gas = Yang Dikirim
         const amountToSend = currentBal - gasBuffer;
+
+        console.log(`Withdraw ETH: Total ${formatEther(currentBal)} - Buffer ${formatEther(gasBuffer)} = Send ${formatEther(amountToSend)}`);
 
         callData = {
           to: ownerAddress,
-          value: amountToSend, // Kirim Sisa (Max - Buffer)
+          value: amountToSend, 
           data: "0x"
         };
       } else {
-        // Withdraw ERC20 Token (Tarik Semua)
+        // Withdraw ERC20 Token (Tarik Semua - Gak perlu mikir gas di tokennya)
         callData = {
           to: token.contractAddress as Address,
           value: 0n,
@@ -111,9 +116,9 @@ export const VaultView = () => {
       const hash = await client.sendUserOperation({ calls: [callData] });
       console.log("Withdraw Tx:", hash);
 
-      setActionLoading("Confirming Transaction...");
+      setActionLoading("Confirming...");
       
-      // Tunggu 4 Detik
+      // Tunggu 4 Detik (Estimasi block time Base)
       await new Promise(resolve => setTimeout(resolve, 4000));
       
       // Refresh Data
@@ -121,7 +126,11 @@ export const VaultView = () => {
 
     } catch (e: any) {
       console.error(e);
-      alert(`Withdraw Gagal: ${e.message || "Unknown error"}`);
+      // Alert yang lebih ramah user
+      const msg = e.message.includes("Saldo ETH") 
+        ? "Saldo tidak cukup untuk bayar gas fee."
+        : "Withdraw Gagal. Cek console.";
+      alert(msg);
     } finally {
       setActionLoading(null); 
     }
@@ -153,11 +162,11 @@ export const VaultView = () => {
         </div>
         <div className="mt-4 flex items-end justify-between">
             <div className="text-2xl font-bold">
-                {parseFloat(ethBalance).toFixed(4)} <span className="text-sm font-normal text-zinc-400">ETH</span>
+                {parseFloat(ethBalance).toFixed(5)} <span className="text-sm font-normal text-zinc-400">ETH</span>
             </div>
             
-            {/* Tombol Withdraw ETH (Hanya muncul jika saldo > 0.0001) */}
-            {parseFloat(ethBalance) > 0.0001 && (
+            {/* Tombol Withdraw ETH: Muncul jika saldo > Buffer Gas */}
+            {parseFloat(ethBalance) > 0.00005 && (
                <button onClick={() => handleWithdraw()} className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-full border border-zinc-700 flex items-center gap-1 transition-all">
                  Withdraw All <ArrowRight className="w-3 h-3" />
                </button>
