@@ -37,6 +37,7 @@ const TokenLogo = ({ token }: { token: any }) => {
   );
 };
 
+// 🔥 PASTIKAN NAMA EXPORT INI ADALAH 'VaultView'
 export const VaultView = () => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress } = useAccount(); 
@@ -216,7 +217,7 @@ export const VaultView = () => {
           {/* NOTICE IF NOT DEPLOYED */}
           {!isDeployed && (
              <div className="text-[10px] text-orange-400 text-center mt-2 bg-orange-900/20 p-2 rounded-lg border border-orange-500/20">
-               ⚠️ Vault is not active. Please go to tab <b>Deposit</b> for activation.
+               ⚠️ Vault belum aktif. Silakan ke tab <b>Deposit</b> untuk aktivasi gratis.
              </div>
           )}
         </div>
@@ -232,7 +233,7 @@ export const VaultView = () => {
       {/* ASSET LIST WITH PAGINATION */}
       <div className="space-y-2 min-h-[300px]">
         {tokens.length === 0 ? (
-           <div className="text-center py-10 text-zinc-400 text-sm">Empty vault.</div>
+           <div className="text-center py-10 text-zinc-400 text-sm">Vault kosong.</div>
         ) : (
           currentTokens.map((token, i) => (
             <div key={i} className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm animate-in slide-in-from-bottom-2">

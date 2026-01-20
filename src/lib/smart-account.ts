@@ -9,9 +9,11 @@ const ENTRYPOINT_ADDRESS_V06 = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
 /* =======================
    PUBLIC CLIENT
 ======================= */
+const alchemyApiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
 export const publicClient = createPublicClient({
   chain: base,
-  transport: http("https://mainnet.base.org"),
+  // Pakai RPC Alchemy biar ngebut & gak kena limit
+  transport: http(`https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}`), 
 });
 
 /* =======================

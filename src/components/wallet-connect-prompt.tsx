@@ -29,14 +29,19 @@ export const WalletConnectPrompt = () => {
   return (
     <div className="flex flex-col items-center justify-center min-h-[50vh] p-6 text-center animate-fade-in">
        {/* Header / Logo */}
-       <div className="bg-blue-600 p-4 rounded-full text-white mb-6 shadow-lg shadow-blue-200">
-         <Wallet className="w-8 h-8" />
+       {/* Hapus class bg-blue-600 p-4 jika gambarmu sudah bulat/bagus */}
+       <div className="mb-6 drop-shadow-xl">
+          <img 
+            src="/nyawit.png"  // <-- Ganti dengan path gambarmu (misal: /base-logo.png)
+            alt="App Logo" 
+            className="w-20 h-20 rounded-2xl object-cover" // Atur ukuran di sini
+          />
        </div>
        
        <div className="mb-8">
-         <h2 className="text-xl font-bold mb-2 text-zinc-800 dark:text-white">Connect Wallet</h2>
+         <h2 className="text-xl font-bold mb-2 text-zinc-800 dark:text-white">Nyawit Nih Orang</h2>
          <p className="text-sm text-zinc-500 max-w-[250px] mx-auto leading-relaxed">
-           Hubungkan wallet untuk mulai menyapu token dust.
+           Connect your wallet to start earning.
          </p>
        </div>
 
