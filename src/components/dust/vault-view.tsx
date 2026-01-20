@@ -68,7 +68,7 @@ export const VaultView = () => {
     fetchVaultData();
   }, [walletClient]);
 
-  // --- MANUAL DEPLOY ---
+  // --- MANUAL DEPLOY (MODIFIED FOR GASLESS) ---
   const handleDeploy = async () => {
     if (!walletClient || !vaultAddress) return;
     try {
@@ -76,11 +76,9 @@ export const VaultView = () => {
       const client = await getSmartAccountClient(walletClient);
       if (!client.account) throw new Error("Akun tidak ditemukan");
 
-      // Cek Saldo Fresh
-      const balance = await publicClient.getBalance({ address: client.account.address });
-      if (balance < parseEther("0.0002")) {
-        throw new Error("Saldo ETH kurang untuk biaya aktivasi (Min 0.0002 ETH).");
-      }
+      // Cek Saldo: Tidak perlu ketat 0.0002 karena sekarang Gasless
+      // Cukup pastikan koneksi aman.
+      console.log("Mengirim transaksi deploy (Sponsored)...");
 
       const hash = await client.sendUserOperation({
         account: client.account,
@@ -94,7 +92,8 @@ export const VaultView = () => {
 
     } catch (e: any) {
       console.error(e);
-      alert(`Gagal Aktivasi: ${e.message}`);
+      // Tampilkan error RPC yang lebih jelas jika ada
+      alert(`Gagal Aktivasi: ${e.shortMessage || e.message}`);
     } finally {
       setActionLoading(null);
     }
