@@ -7,6 +7,62 @@ import { alchemy } from "~/lib/alchemy";
 import { formatEther, parseEther, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { Copy, Wallet, ArrowRight, Refresh, Rocket, Check } from "iconoir-react";
 
+// --- KOMPONEN PINTAR: TOKEN LOGO HYBRID ---
+const TokenLogo = ({ token }: { token: any }) => {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    // Reset state saat token berubah
+    setSrc(token.logo || null);
+    setError(false);
+  }, [token]);
+
+  // Daftar Sumber Gambar (Prioritas 1 -> 3)
+  const sources = [
+    token.logo, // 1. Dari Alchemy
+    `https://tokens.1inch.io/${token.contractAddress}.png`, // 2. Dari 1inch (Lengkap bgt)
+    `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/${token.contractAddress}/logo.png` // 3. TrustWallet
+  ].filter(Boolean); // Hapus yang null/undefined
+
+  const handleError = (e: any) => {
+    // Jika gambar error, coba sumber berikutnya atau fallback ke Text
+    e.target.style.display = 'none'; 
+    setError(true);
+  };
+
+  // Jika semua gambar gagal / tidak ada source
+  if (error || !src && sources.length === 0) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-blue-100 text-blue-600 font-bold text-xs">
+        {token.symbol?.[0] || "?"}
+      </div>
+    );
+  }
+
+  return (
+    <img 
+      src={src || sources[1] || sources[2]} // Coba fallback langsung jika src null
+      alt={token.symbol}
+      className="w-full h-full object-cover"
+      onError={(e) => {
+        // Logika Fallback Sederhana di level DOM
+        const target = e.target as HTMLImageElement;
+        const currentSrc = target.src;
+        
+        // Cek index source saat ini
+        if (currentSrc === sources[0] && sources[1]) {
+           target.src = sources[1]; // Ganti ke 1inch
+        } else if (currentSrc === sources[1] && sources[2]) {
+           target.src = sources[2]; // Ganti ke TrustWallet
+        } else {
+           handleError(e); // Menyerah, tampilkan huruf
+        }
+      }}
+    />
+  );
+};
+
 export const VaultView = () => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress } = useAccount(); 
@@ -19,7 +75,6 @@ export const VaultView = () => {
   const [loading, setLoading] = useState(false); 
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
 
-  // --- FETCH DATA (Tetap sama untuk tampilan UI) ---
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
@@ -54,7 +109,8 @@ export const VaultView = () => {
               ...t,
               name: meta.name,
               symbol: meta.symbol,
-              logo: meta.logo,
+              logo: meta.logo, // Alchemy logo (bisa null)
+              contractAddress: t.contractAddress, // Penting buat fetch gambar lain
               decimals: decimals,
               rawBalance: raw,
               formattedBal: val.toLocaleString('en-US', { maximumFractionDigits: 4 })
@@ -68,17 +124,13 @@ export const VaultView = () => {
     fetchVaultData();
   }, [walletClient]);
 
-  // --- MANUAL DEPLOY (MODIFIED FOR GASLESS) ---
-  // --- MANUAL DEPLOY (GASLESS VERSION) ---
+  // --- MANUAL DEPLOY (GASLESS) ---
   const handleDeploy = async () => {
     if (!walletClient || !vaultAddress) return;
     try {
       setActionLoading("Activating Vault...");
       const client = await getSmartAccountClient(walletClient);
       if (!client.account) throw new Error("Akun tidak ditemukan");
-
-      // 🔥 TIDAK PERLU CEK SALDO LAGI (Karena dibayari Pimlico)
-      console.log("Mengirim transaksi deploy (Sponsored)...");
 
       const hash = await client.sendUserOperation({
         account: client.account,
@@ -98,9 +150,11 @@ export const VaultView = () => {
     }
   };
 
-  // --- WITHDRAW FUNCTION (LOGIKA BARU KAMU) ---
   const handleWithdraw = async (token?: any) => {
     if (!walletClient || !ownerAddress) return;
+    
+    // Konfirmasi Sederhana
+    if (!window.confirm(`Withdraw ${token ? token.symbol : "ETH"} ke wallet utama?`)) return;
 
     try {
       const isEth = !token; 
@@ -113,25 +167,11 @@ export const VaultView = () => {
       let callData: any;
 
       if (isEth) {
-        // 🔥 INI LOGIKA BARU KAMU: FRESH BALANCE CHECK
-        const balance = await publicClient.getBalance({ 
-          address: client.account.address 
-        });
-
-        const gasBuffer = parseEther("0.00005");
-        
-        if (balance <= gasBuffer) {
-           throw new Error("Saldo ETH tidak cukup untuk bayar gas.");
-        }
-
-        const amountToSend = balance - gasBuffer;
-
-        callData = { 
-          to: ownerAddress, 
-          value: amountToSend, 
-          data: "0x" 
-        };
+        // Logic ETH Withdraw (Gasless: Kirim Semua)
+        const balance = await publicClient.getBalance({ address: client.account.address });
+        callData = { to: ownerAddress, value: balance, data: "0x" };
       } else {
+        // Logic Token Withdraw
         callData = {
           to: token.contractAddress as Address,
           value: 0n,
@@ -148,6 +188,7 @@ export const VaultView = () => {
         calls: [callData]
       });
 
+      console.log("WD Hash:", hash);
       setActionLoading("Confirming...");
       await new Promise(resolve => setTimeout(resolve, 4000));
       await fetchVaultData();
@@ -198,14 +239,13 @@ export const VaultView = () => {
               {!isDeployed ? (
                 <button 
                   onClick={handleDeploy}
-                  
-                  className="w-full bg-orange-600 hover:bg-orange-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg shadow-orange-900/20 flex items-center justify-center gap-2 transition-all"
+                  className="w-full bg-orange-600 hover:bg-orange-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg shadow-orange-900/20 flex items-center justify-center gap-2 transition-all"
                 >
                   <Rocket className="w-4 h-4" /> 
-                  {parseFloat(ethBalance) < 0.0002 ? "Deposit min 0.0002 ETH" : "Activate Vault Now"}
+                  Activate Vault (Free)
                 </button>
               ) : (
-                 parseFloat(ethBalance) > 0.00005 && (
+                 parseFloat(ethBalance) > 0.00001 && (
                    <button onClick={() => handleWithdraw()} className="w-full bg-zinc-800 hover:bg-zinc-700 px-4 py-2.5 rounded-xl border border-zinc-700 flex items-center justify-center gap-2 transition-all text-sm font-medium">
                      Withdraw All ETH <ArrowRight className="w-3 h-3" />
                    </button>
@@ -234,8 +274,9 @@ export const VaultView = () => {
             {tokens.map((token, i) => (
                 <div key={i} className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm">
                     <div className="flex items-center gap-3 overflow-hidden">
+                        {/* 🔥 PAKAI KOMPONEN HYBRID DI SINI 🔥 */}
                         <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
-                            {token.logo ? <img src={token.logo} className="w-full" /> : token.symbol?.[0]}
+                            <TokenLogo token={token} />
                         </div>
                         <div>
                             <div className="font-semibold text-sm">{token.name}</div>
