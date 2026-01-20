@@ -69,6 +69,7 @@ export const VaultView = () => {
   }, [walletClient]);
 
   // --- MANUAL DEPLOY (MODIFIED FOR GASLESS) ---
+  // --- MANUAL DEPLOY (GASLESS VERSION) ---
   const handleDeploy = async () => {
     if (!walletClient || !vaultAddress) return;
     try {
@@ -76,8 +77,7 @@ export const VaultView = () => {
       const client = await getSmartAccountClient(walletClient);
       if (!client.account) throw new Error("Akun tidak ditemukan");
 
-      // Cek Saldo: Tidak perlu ketat 0.0002 karena sekarang Gasless
-      // Cukup pastikan koneksi aman.
+      // 🔥 TIDAK PERLU CEK SALDO LAGI (Karena dibayari Pimlico)
       console.log("Mengirim transaksi deploy (Sponsored)...");
 
       const hash = await client.sendUserOperation({
@@ -92,7 +92,6 @@ export const VaultView = () => {
 
     } catch (e: any) {
       console.error(e);
-      // Tampilkan error RPC yang lebih jelas jika ada
       alert(`Gagal Aktivasi: ${e.shortMessage || e.message}`);
     } finally {
       setActionLoading(null);
@@ -199,7 +198,7 @@ export const VaultView = () => {
               {!isDeployed ? (
                 <button 
                   onClick={handleDeploy}
-                  disabled={parseFloat(ethBalance) < 0.0002}
+                  
                   className="w-full bg-orange-600 hover:bg-orange-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg shadow-orange-900/20 flex items-center justify-center gap-2 transition-all"
                 >
                   <Rocket className="w-4 h-4" /> 
