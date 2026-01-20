@@ -52,8 +52,8 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     chain: base,
     bundlerTransport: http(PIMLICO_URL),
     
-    // 🔥 FITUR GASLESS (SPONSORED)
-    // Ini menghilangkan error "undefined to BigInt" karena gas diurus Pimlico
+    // 🔥 PENTING: HAPUS 'middleware' block yang lama!
+    // Ganti dengan ini agar Paymaster yang mengisi gas:
     sponsorUserOperation: pimlicoClient.sponsorUserOperation,
     
   } as any) as SmartAccountClient<Transport, Chain, typeof simpleAccount>;
