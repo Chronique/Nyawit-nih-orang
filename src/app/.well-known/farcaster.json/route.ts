@@ -7,7 +7,7 @@ export async function GET() {
       "payload": "eyJkb21haW4iOiJkdXN0LXN3ZWVwZXItdGhldGEudmVyY2VsLmFwcCJ9",
       "signature": "2wqRxDh0kDbp/88fTK5RUlznwuff4Rf5b7MQ1+7yz5dVwD1D+9MjeAzinKBBQlbOv4e5xJLJrNIHMq049YmYVhs="
     },
-    
+
       "frame": {
         "version": "1",
         "name": METADATA.name,
@@ -21,7 +21,7 @@ export async function GET() {
         "ogTitle": METADATA.name,
         "ogDescription": METADATA.description,
         "ogImageUrl": METADATA.bannerImageUrl,
-        "primaryCategory": "dex",
+        "primaryCategory": "finance",
         "requiredCapabilities": [
           "actions.ready",
           "actions.signIn", 
