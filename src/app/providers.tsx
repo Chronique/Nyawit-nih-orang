@@ -1,12 +1,11 @@
 "use client";
 
 import dynamic from "next/dynamic";
-
 import FrameProvider from "~/components/providers/frame-provider";
 
-
+// 🔥 FIX: Ambil 'mod.Providers' (karena export-nya bernama Providers)
 const WagmiProvider = dynamic(
-  () => import("~/components/providers/wagmi-provider"),
+  () => import("~/components/providers/wagmi-provider").then((mod) => mod.Providers),
   {
     ssr: false,
   }
