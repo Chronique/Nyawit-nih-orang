@@ -32,9 +32,12 @@ export async function generateMetadata(): Promise<Metadata> {
     other: {
       "fc:frame": JSON.stringify(frame),
       "fc:miniapp": JSON.stringify(frame),
+      'base:app_id': '6970aac385045b1333e7bae2',
+  },
     }
   };
-}
+
+
 
 export default function Home() {
   return (<App />);

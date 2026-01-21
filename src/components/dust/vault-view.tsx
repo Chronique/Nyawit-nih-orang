@@ -109,12 +109,12 @@ export const VaultView = () => {
   const handleWithdraw = async (token?: any) => {
     if (!walletClient || !ownerAddress) return;
     const name = !token ? "ETH" : token.symbol;
-    if (!window.confirm(`Withdraw ${name} ke wallet utama?`)) return;
+    if (!window.confirm(`Withdraw ${name} to main wallet?`)) return;
 
     try {
       setActionLoading(`Withdrawing ${name}...`); 
       const client = await getSmartAccountClient(walletClient);
-      if (!client.account) throw new Error("Akun error");
+      if (!client.account) throw new Error("Account error");
 
       let callData: any;
       if (!token) {
@@ -139,7 +139,7 @@ export const VaultView = () => {
 
       await new Promise(resolve => setTimeout(resolve, 5000));
       await fetchVaultData();
-    } catch (e: any) { alert(`Gagal: ${e.message}`); } finally { setActionLoading(null); }
+    } catch (e: any) { alert(`Failed: ${e.message}`); } finally { setActionLoading(null); }
   };
 
   const totalPages = Math.ceil(tokens.length / ITEMS_PER_PAGE);
@@ -217,7 +217,7 @@ export const VaultView = () => {
           {/* NOTICE IF NOT DEPLOYED */}
           {!isDeployed && (
              <div className="text-[10px] text-orange-400 text-center mt-2 bg-orange-900/20 p-2 rounded-lg border border-orange-500/20">
-               ⚠️ Vault belum aktif. Silakan ke tab <b>Deposit</b> untuk aktivasi gratis.
+               ⚠️ Vault is not active yet. Please go to the tab <b>Blusukan</b> to activate .
              </div>
           )}
         </div>
@@ -233,7 +233,7 @@ export const VaultView = () => {
       {/* ASSET LIST WITH PAGINATION */}
       <div className="space-y-2 min-h-[300px]">
         {tokens.length === 0 ? (
-           <div className="text-center py-10 text-zinc-400 text-sm">Vault kosong.</div>
+           <div className="text-center py-10 text-zinc-400 text-sm">Vault is empty.</div>
         ) : (
           currentTokens.map((token, i) => (
             <div key={i} className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm animate-in slide-in-from-bottom-2">
