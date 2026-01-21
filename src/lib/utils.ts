@@ -4,10 +4,10 @@ import { twMerge } from "tailwind-merge"
 export const METADATA = {
   name: "Nyawit Nih Orang",
   description: "Earn Eth or Usdc from dust token",
-  bannerImageUrl: 'https://dust-sweeper-theta.vercel.app/banner.png',
-  iconImageUrl: 'https://dust-sweeper-theta.vercel.app/icon.png',
+  bannerImageUrl: 'https://nyawit-nih-orang.vercel.app/banner.png',
+  iconImageUrl: 'https://nyawit-nih-orang.vercel.app/icon.png',
   // homeUrl: process.env.NEXT_PUBLIC_URL ?? "https://frames-v2-demo-lilac.vercel.app",
-  homeUrl: "https://dust-sweeper-theta.vercel.app",
+  homeUrl: "https://nyawit-nih-orang.vercel.app",
   splashBackgroundColor: "#FFFFFF"
 }
 
