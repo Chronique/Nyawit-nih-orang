@@ -38,19 +38,23 @@ const coinbasePaymasterClient = createPaymasterClient({
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("Wallet tidak terdeteksi");
 
-  // Custom Owner Wrapper (Bungkam Error TS Strict)
+  // 🔥 SOLUSI FINAL: Custom Owner untuk EOA (MetaMask)
   const customOwner = {
     address: walletClient.account.address,
+    
+    // Smart Account cuma butuh signMessage/TypedData untuk UserOp
     async signMessage({ message }: { message: any }) {
       return walletClient.signMessage({ message, account: walletClient.account! });
     },
     async signTypedData(params: any) {
       return walletClient.signTypedData({ ...params, account: walletClient.account! });
     },
-    async signTransaction(params: any) {
-      return walletClient.signTransaction({ ...params, chain: base, account: walletClient.account! });
-    },
-    type: "local", 
+
+    // ❌ HAPUS signTransaction! (Ini penyebab error "does not support raw sign")
+    // MetaMask tidak bisa raw sign, dan Smart Account tidak butuh ini.
+    
+    // ✅ GANTI type jadi "json-rpc" (Remote Signer)
+    type: "json-rpc", 
     source: "custom",
     publicKey: walletClient.account.address
   } as any; 
@@ -59,8 +63,7 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   const coinbaseAccount = await toCoinbaseSmartAccount({
     client: publicClient,
     owners: [customOwner],
-    // 🔥 FIX: Tambahkan version "1.1" (Wajib di Viem terbaru)
-    version: "1.1", 
+    version: "1.1", // Versi terbaru
   });
 
   // 5. Setup Smart Account Client
