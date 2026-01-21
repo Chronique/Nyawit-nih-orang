@@ -6,14 +6,20 @@ import { base } from "viem/chains";
 
 const ENTRYPOINT_ADDRESS_V06 = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
 
-// 🔥 FIX 1: GANTI KE ALCHEMY RPC (Biar gak kena Rate Limit)
+// 🔥 1. AMBIL API KEY DARI ENV
 const alchemyApiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+const pimlicoApiKey = process.env.NEXT_PUBLIC_PIMLICO_API_KEY;
+
+// 🔥 2. VALIDASI API KEY (Biar ketahuan kalau kosong)
+if (!alchemyApiKey) throw new Error("Alchemy API Key missing!");
+if (!pimlicoApiKey) throw new Error("Pimlico API Key missing!");
+
+// 🔥 3. GUNAKAN TRANSPORT HTTP YANG BENAR
 export const publicClient = createPublicClient({
   chain: base,
   transport: http(`https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}`),
 });
 
-const pimlicoApiKey = process.env.NEXT_PUBLIC_PIMLICO_API_KEY;
 const PIMLICO_URL = `https://api.pimlico.io/v2/8453/rpc?apikey=${pimlicoApiKey}`;
 
 export const pimlicoClient = createPimlicoClient({
@@ -38,8 +44,6 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     account: simpleAccount,
     chain: base,
     bundlerTransport: http(PIMLICO_URL),
-    
-    // Mode Self-Pay (Bayar Sendiri) -> User harus deposit ETH dulu
     userOperation: {
       estimateFeesPerGas: async () => {
         return (await pimlicoClient.getUserOperationGasPrice()).fast;
