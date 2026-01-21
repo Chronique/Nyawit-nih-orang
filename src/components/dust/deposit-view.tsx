@@ -4,13 +4,11 @@ import { useEffect, useState } from "react";
 import { useAccount, useWriteContract, useWalletClient } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
-import { formatUnits, erc20Abi, encodeFunctionData, type Address } from "viem"; // 🔥 Wajib ada encodeFunctionData
-import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks, Rocket, Check } from "iconoir-react";
+import { formatUnits, erc20Abi, type Address, formatEther } from "viem";
+import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks, Rocket, Check, WarningTriangle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// Contract Address USDC di Base Mainnet
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
+// Interface Token
 interface TokenData {
   contractAddress: string;
   name: string;
@@ -27,6 +25,7 @@ export const DustDepositView = () => {
   const { writeContractAsync } = useWriteContract();
 
   const [vaultAddress, setVaultAddress] = useState<string | null>(null);
+  const [vaultEthBalance, setVaultEthBalance] = useState<bigint>(0n); // 🔥 Cek Saldo ETH Vault
   const [isDeployed, setIsDeployed] = useState(false);
   const [activating, setActivating] = useState(false);
 
@@ -39,10 +38,9 @@ export const DustDepositView = () => {
   const ITEMS_PER_PAGE = 10;
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
   
-  // STATE TOAST
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
 
-  // 1. INIT VAULT & CHECK DEPLOYMENT
+  // 1. INIT VAULT & CHECK STATUS
   const checkVaultStatus = async () => {
       if (!walletClient) return;
       try {
@@ -52,48 +50,57 @@ export const DustDepositView = () => {
         const vAddr = client.account.address;
         setVaultAddress(vAddr);
 
+        // Cek Status Deployment
         const code = await publicClient.getBytecode({ address: vAddr });
         setIsDeployed(code !== undefined && code !== null && code !== "0x");
+
+        // 🔥 Cek Saldo ETH (Buat Bayar Gas)
+        const bal = await publicClient.getBalance({ address: vAddr });
+        setVaultEthBalance(bal);
+
       } catch (e) { console.error(e); }
   };
 
   useEffect(() => {
     checkVaultStatus();
+    // Auto refresh saldo tiap 5 detik biar user tau kalau deposit masuk
+    const interval = setInterval(checkVaultStatus, 5000);
+    return () => clearInterval(interval);
   }, [walletClient]);
 
-  // 2. ACTIVATION LOGIC (FIX: USDC Transfer 0 Pancingan)
+  // 2. ACTIVATION LOGIC (MANUAL - SELF PAY)
   const handleActivate = async () => {
-    if (!walletClient || !vaultAddress || !ownerAddress) return;
+    if (!walletClient || !vaultAddress) return;
     
+    // Cek saldo ETH dulu
+    if (vaultEthBalance === 0n) {
+        setToast({ msg: "Vault needs ETH to pay for gas! Please deposit Base Sepolia ETH.", type: "error" });
+        return;
+    }
+
     setActivating(true);
     try {
       const client = await getSmartAccountClient(walletClient);
       
-      // 🔥 FIX: Kirim 0 USDC ke diri sendiri (Safe Transaction)
-      // Ini akan memicu deployment wallet tanpa error revert dari factory
-      // Pastikan Contract USDC sudah di-whitelist di Paymaster!
+      // Kirim 0 ETH ke diri sendiri (Trigger Deployment)
       const hash = await client.sendUserOperation({
         account: client.account!,
         calls: [{ 
-            to: USDC_ADDRESS as Address, 
+            to: vaultAddress as Address, 
             value: 0n, 
-            data: encodeFunctionData({
-              abi: erc20Abi,
-              functionName: "transfer",
-              args: [ownerAddress as Address, 0n] // Transfer 0 ke Owner
-            })
+            data: "0x" 
         }]
       });
       
       console.log("Activation Hash:", hash);
-      setToast({ msg: "Activating Vault (Sponsored)...", type: "success" });
+      setToast({ msg: "Deploying Vault...", type: "success" });
       
       await new Promise(r => setTimeout(r, 5000));
       await checkVaultStatus();
-      setToast({ msg: "Vault Successfully Activated!", type: "success" });
+      setToast({ msg: "Vault Activated Successfully! 🚀", type: "success" });
     } catch (e: any) {
       console.error(e);
-      setToast({ msg: "Activation Failed: " + (e.shortMessage || "Error"), type: "error" });
+      setToast({ msg: "Activation Failed: " + (e.shortMessage || e.message), type: "error" });
     } finally {
       setActivating(false);
     }
@@ -105,10 +112,12 @@ export const DustDepositView = () => {
       setLoading(true);
       setPotentialValue(0); 
       try {
+        // Alchemy Setup untuk Sepolia (Default Alchemy SDK usually Mainnet, perlu override network kalau mau akurat)
+        // Untuk demo dust token, kita pakai data dummy atau skip kalau di testnet jarang ada dust
+        // Tapi kodingan ini tetap jalan mencari token yg ada saldonya.
         const balances = await alchemy.core.getTokenBalances(ownerAddress);
         const nonZeroTokens = balances.tokenBalances.filter((token) => {
-          return token.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase() && 
-                 token.tokenBalance && BigInt(token.tokenBalance) > 0n;
+             return token.tokenBalance && BigInt(token.tokenBalance) > 0n;
         });
 
         const metadataPromises = nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress));
@@ -136,8 +145,6 @@ export const DustDepositView = () => {
   useEffect(() => { if (ownerAddress) scanOwnerWallet(); }, [ownerAddress]);
 
   const formatDustValue = (val: number) => {
-    if (val === 0) return "$0.00";
-    if (val < 0.01) return `$${val.toFixed(6)}`;
     return `$${val.toFixed(2)}`;
   };
 
@@ -195,34 +202,29 @@ export const DustDepositView = () => {
   return (
     <div className="pb-24 relative min-h-[50vh]">
       
-      {/* TOAST COMPONENT */}
-      <SimpleToast 
-        message={toast?.msg || null} 
-        type={toast?.type} 
-        onClose={() => setToast(null)} 
-      />
+      <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
 
       {/* LOADING OVERLAY */}
       {(depositStatus || activating) && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
            <div className="bg-white dark:bg-zinc-900 p-6 rounded-2xl shadow-2xl flex flex-col items-center gap-4 max-w-[200px]">
               <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-              <div className="text-sm font-bold text-center animate-pulse">{activating ? "Activating Vault..." : depositStatus}</div>
+              <div className="text-sm font-bold text-center animate-pulse">{activating ? "Deploying Vault..." : depositStatus}</div>
            </div>
         </div>
       )}
 
-      {/* HEADER: VAULT INFO + ACTIVATE BUTTON */}
+      {/* HEADER: VAULT INFO */}
       <div className="p-5 bg-gradient-to-br from-zinc-900 to-zinc-800 text-white rounded-2xl shadow-lg mb-6 relative overflow-hidden">
         
         {/* Status Badge */}
         <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-orange-500/20 border-orange-500 text-orange-400"}`}>
            {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
-           {isDeployed ? "Active" : "Inactive"}
+           {isDeployed ? "Active" : "Undeployed"}
         </div>
 
         <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
-          <Wallet className="w-3 h-3" /> Vault Address (Receiver)
+          <Wallet className="w-3 h-3" /> Vault Address (Base Sepolia)
         </div>
         <div className="flex items-center justify-between mb-4">
           <code className="text-sm font-mono opacity-90 truncate max-w-[200px]">
@@ -237,38 +239,46 @@ export const DustDepositView = () => {
             <Copy className="w-4 h-4 hover:text-blue-400 transition-colors" />
           </button>
         </div>
+        
+        {/* INFO SALDO ETH VAULT */}
+        <div className="flex items-center gap-2 mb-4 p-2 bg-white/5 rounded-lg">
+            <div className={`w-2 h-2 rounded-full ${vaultEthBalance > 0n ? "bg-green-500" : "bg-red-500"}`}></div>
+            <span className="text-xs text-zinc-300">
+                Gas Balance: <span className="font-mono font-bold text-white">{parseFloat(formatEther(vaultEthBalance)).toFixed(4)} ETH</span>
+            </span>
+        </div>
 
         {/* TOMBOL AKTIVASI */}
         {!isDeployed && vaultAddress && (
-          <div className="mt-4 pt-4 border-t border-white/10">
-            <button 
-              onClick={handleActivate}
-              disabled={activating}
-              className="w-full bg-orange-600 hover:bg-orange-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all"
-            >
-              <Rocket className="w-4 h-4" /> 
-              Activate Vault 
-            </button>
-            <p className="text-[10px] text-zinc-400 text-center mt-2">
-              Activation is required for the Vault to perform Swaps/Withdraws.
-            </p>
+          <div className="mt-2 pt-4 border-t border-white/10">
+            {vaultEthBalance === 0n ? (
+                <div className="text-center space-y-2">
+                    <div className="text-xs text-orange-300 flex items-center justify-center gap-1 bg-orange-900/30 p-2 rounded-lg border border-orange-500/30">
+                        <WarningTriangle className="w-4 h-4" />
+                        <span>Deposit <strong>Sepolia ETH</strong> to Vault first!</span>
+                    </div>
+                    <p className="text-[10px] text-zinc-500">Vault needs gas to deploy itself.</p>
+                </div>
+            ) : (
+                <button 
+                onClick={handleActivate}
+                disabled={activating}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all animate-pulse"
+                >
+                <Rocket className="w-4 h-4" /> 
+                Activate Vault Now
+                </button>
+            )}
           </div>
         )}
       </div>
 
-      {/* SISA LOGIC LIST */}
+      {/* TOKEN LIST & DEPOSIT (Sama seperti sebelumnya) */}
       <div className="flex items-end justify-between mb-3 px-1">
         <div>
            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
              Wallet Assets <span className="text-xs font-normal text-zinc-400">({tokens.length})</span>
            </h3>
-           
-           {tokens.length > 0 && (
-             <div className="text-xs font-medium text-green-600 mt-0.5 flex items-center gap-1">
-               <Sparks className="w-3 h-3" />
-               Potential Value: <span className="font-bold ml-1">{formatDustValue(potentialValue)}</span>
-             </div>
-           )}
         </div>
 
         <button 
@@ -281,12 +291,11 @@ export const DustDepositView = () => {
         </button>
       </div>
 
-      {/* TOKEN LIST */}
       {loading ? (
-        <div className="text-center py-10 text-zinc-400 animate-pulse">Scanning wallet...</div>
+        <div className="text-center py-10 text-zinc-400 animate-pulse">Scanning wallet (Sepolia)...</div>
       ) : tokens.length === 0 ? (
         <div className="text-center py-10 text-zinc-400 border-2 border-dashed rounded-xl">
-          No dust tokens found in owner wallet.
+          No tokens found in owner wallet.
         </div>
       ) : (
         <div className="space-y-2">
