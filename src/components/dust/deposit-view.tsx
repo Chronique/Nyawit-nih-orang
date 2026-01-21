@@ -6,11 +6,11 @@ import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, erc20Abi, type Address } from "viem";
 import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks, Rocket, Check } from "iconoir-react";
-// Import Toast & Price
 import { SimpleToast } from "~/components/ui/simple-toast";
-// import { fetchTokenPrices } from "~/lib/price"; // Aktifkan jika mau pakai GeckoTerminal
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+// Alamat Factory V1.1 (Yang sudah di-whitelist di Paymaster)
+const COINBASE_FACTORY_V1 = "0xba5ed110efdba3d005bfc882d75358acbbb85842";
 
 interface TokenData {
   contractAddress: string;
@@ -33,15 +33,14 @@ export const DustDepositView = () => {
 
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [loading, setLoading] = useState(false);
-  const [calculatingValue, setCalculatingValue] = useState(false);
   const [potentialValue, setPotentialValue] = useState(0); 
   
   const [depositStatus, setDepositStatus] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const ITEMS_PER_PAGE = 10;
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
-
-  // 🔥 STATE UNTUK TOAST (PENGGANTI ALERT)
+  
+  // STATE TOAST
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
 
   // 1. INIT VAULT & CHECK DEPLOYMENT
@@ -63,21 +62,22 @@ export const DustDepositView = () => {
     checkVaultStatus();
   }, [walletClient]);
 
-  // 2. ACTIVATION LOGIC
+  // 2. ACTIVATION LOGIC (GASLESS - FIX DUPLIKAT)
   const handleActivate = async () => {
     if (!walletClient || !vaultAddress) return;
     
-    // 2. ACTIVATION LOGIC (GASLESS)
-  const handleActivate = async () => {
-    if (!walletClient || !vaultAddress) return;
-    
-    // Langsung gas aktivasi tanpa cek saldo!
     setActivating(true);
     try {
       const client = await getSmartAccountClient(walletClient);
+      
+      // Kirim transaksi dummy ke Factory agar disponsori Paymaster
       const hash = await client.sendUserOperation({
         account: client.account!,
-        calls: [{ to: vaultAddress as Address, value: 0n, data: "0x" }]
+        calls: [{ 
+            to: COINBASE_FACTORY_V1, 
+            value: 0n, 
+            data: "0x" 
+        }]
       });
       
       console.log("Activation Hash:", hash);
@@ -94,28 +94,7 @@ export const DustDepositView = () => {
     }
   };
 
-    setActivating(true);
-    try {
-      const client = await getSmartAccountClient(walletClient);
-      const hash = await client.sendUserOperation({
-        account: client.account!,
-        calls: [{ to: vaultAddress as Address, value: 0n, data: "0x" }]
-      });
-      
-      console.log("Activation Hash:", hash);
-      await new Promise(r => setTimeout(r, 5000));
-      await checkVaultStatus();
-      // 🔥 GANTI ALERT -> TOAST SUCCESS
-      setToast({ msg: "Vault Successfully Activated!", type: "success" });
-    } catch (e: any) {
-      console.error(e);
-      setToast({ msg: "Activation Failed: " + (e.shortMessage || "Error"), type: "error" });
-    } finally {
-      setActivating(false);
-    }
-  };
-
-  // 3. SCAN WALLET (Sama seperti sebelumnya)
+  // 3. SCAN WALLET
   const scanOwnerWallet = async () => {
       if (!ownerAddress) return;
       setLoading(true);
@@ -157,9 +136,6 @@ export const DustDepositView = () => {
     return `$${val.toFixed(2)}`;
   };
 
-  // 4. CALCULATE VALUE (Bisa diganti GeckoTerminal kalau mau, tapi yg skrg udah aman rate limit)
-  // ... (Kode Calculate Value tetap sama atau pakai fetchTokenPrices import) ...
-
   // UI HELPERS
   const totalPages = Math.ceil(tokens.length / ITEMS_PER_PAGE);
   const currentTokens = tokens.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
@@ -198,7 +174,6 @@ export const DustDepositView = () => {
         });
       } catch (e) {
         setDepositStatus(null);
-        // 🔥 GANTI ALERT -> TOAST ERROR
         setToast({ msg: "Deposit Failed/Cancelled", type: "error" });
         return; 
       }
@@ -209,14 +184,13 @@ export const DustDepositView = () => {
     await scanOwnerWallet();
     setSelectedTokens(new Set());
     setDepositStatus(null);
-    // 🔥 GANTI ALERT -> TOAST SUCCESS
     setToast({ msg: "Deposit Successful! 🧹", type: "success" });
   };
 
   return (
     <div className="pb-24 relative min-h-[50vh]">
       
-      {/* 🔥 RENDER TOAST COMPONENT */}
+      {/* TOAST COMPONENT */}
       <SimpleToast 
         message={toast?.msg || null} 
         type={toast?.type} 
@@ -277,7 +251,7 @@ export const DustDepositView = () => {
         )}
       </div>
 
-      {/* SISA LOGIC LIST (Sama persis) */}
+      {/* SISA LOGIC LIST */}
       <div className="flex items-end justify-between mb-3 px-1">
         <div>
            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
