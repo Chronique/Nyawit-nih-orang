@@ -4,10 +4,10 @@ import { useEffect, useState } from "react";
 import { useAccount, useWriteContract, useWalletClient } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
-import { formatEther, formatUnits, erc20Abi, type Address } from "viem";
+import { formatUnits, erc20Abi, type Address } from "viem";
 import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks, Rocket, Check } from "iconoir-react";
 
-// AERODROME CONSTANTS
+// AERODROME CONSTANTS (Untuk Cek Harga)
 const ROUTER_ADDRESS = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
@@ -34,6 +34,7 @@ interface TokenData {
   logo: string | null;
 }
 
+// 🔥 NAMA EXPORT HARUS 'DustDepositView'
 export const DustDepositView = () => {
   const { address: ownerAddress } = useAccount(); 
   const { data: walletClient } = useWalletClient();
@@ -72,9 +73,17 @@ export const DustDepositView = () => {
     checkVaultStatus();
   }, [walletClient]);
 
-  // 2. ACTIVATION LOGIC (Gasless)
+  // 2. ACTIVATION LOGIC (SELF PAY)
   const handleActivate = async () => {
     if (!walletClient || !vaultAddress) return;
+    
+    // Cek Saldo Dulu (Karena Self-Pay)
+    const balance = await publicClient.getBalance({ address: vaultAddress as Address });
+    if (balance < 200000000000000n) { // 0.0002 ETH
+      alert("❌ Saldo ETH Kurang!\n\nVault butuh sedikit ETH untuk biaya aktivasi (Gas Fee).\nSilakan deposit minimal 0.0002 ETH ke Vault Address di atas.");
+      return;
+    }
+
     setActivating(true);
     try {
       const client = await getSmartAccountClient(walletClient);
@@ -84,11 +93,12 @@ export const DustDepositView = () => {
       });
       
       console.log("Activation Hash:", hash);
-      await new Promise(r => setTimeout(r, 5000)); // Wait for block
+      await new Promise(r => setTimeout(r, 5000));
       await checkVaultStatus();
-      alert("Vault Activated Successfully!");
+      alert("✅ Vault Berhasil Diaktivasi!");
     } catch (e: any) {
-      alert("Activation Failed: " + e.message);
+      console.error(e);
+      alert("Activation Failed: " + (e.shortMessage || e.message));
     } finally {
       setActivating(false);
     }
@@ -102,7 +112,6 @@ export const DustDepositView = () => {
       try {
         const balances = await alchemy.core.getTokenBalances(ownerAddress);
         const nonZeroTokens = balances.tokenBalances.filter((token) => {
-          // Exclude USDC & WETH from list (kita mau deposit dust/micin)
           return token.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase() && 
                  token.tokenBalance && BigInt(token.tokenBalance) > 0n;
         });
@@ -131,23 +140,24 @@ export const DustDepositView = () => {
 
   useEffect(() => { if (ownerAddress) scanOwnerWallet(); }, [ownerAddress]);
 
-  /// 4. CALCULATE POTENTIAL VALUE (WITH SMART ROUTING)
+  // 4. CALCULATE POTENTIAL VALUE (SEQUENTIAL & SMART ROUTING)
   useEffect(() => {
     const calculateValue = async () => {
       if (tokens.length === 0) return;
       setCalculatingValue(true);
       let totalUsd = 0;
 
+      // Ambil 10 token pertama aja biar gak kelamaan
       const sampleTokens = tokens.slice(0, 10); 
 
-      await Promise.all(sampleTokens.map(async (token) => {
+      // Loop Sequential agar tidak kena Rate Limit
+      for (const token of sampleTokens) {
          try {
             const tokenIn = token.contractAddress as Address;
             const WETH = "0x4200000000000000000000000000000000000006"; // WETH Base
             
             // 1. Coba Direct: Token -> USDC
             const pathDirect = [tokenIn, USDC_ADDRESS as Address];
-            
             let bestOut = 0n;
 
             try {
@@ -158,7 +168,7 @@ export const DustDepositView = () => {
                bestOut = res[res.length - 1];
             } catch (e) {}
 
-            // 2. Jika direct gagal/kecil, Coba Hop: Token -> WETH -> USDC
+            // 2. Jika Direct gagal, Coba Hop: Token -> WETH -> USDC
             if (bestOut === 0n) {
                const pathHop = [tokenIn, WETH as Address, USDC_ADDRESS as Address];
                try {
@@ -172,8 +182,11 @@ export const DustDepositView = () => {
             
             const usdcVal = parseFloat(formatUnits(bestOut, 6)); // USDC 6 decimals
             totalUsd += usdcVal;
+            
+            // Jeda dikit biar sopan ke RPC
+            await new Promise(r => setTimeout(r, 50)); 
          } catch (e) { }
-      }));
+      }
       
       setPotentialValue(totalUsd);
       setCalculatingValue(false);
@@ -265,7 +278,7 @@ export const DustDepositView = () => {
           </button>
         </div>
 
-        {/* 🔥 TOMBOL AKTIVASI PINDAH KE SINI 🔥 */}
+        {/* TOMBOL AKTIVASI */}
         {!isDeployed && vaultAddress && (
           <div className="mt-4 pt-4 border-t border-white/10">
             <button 
@@ -274,10 +287,10 @@ export const DustDepositView = () => {
               className="w-full bg-orange-600 hover:bg-orange-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all"
             >
               <Rocket className="w-4 h-4" /> 
-              Activate Vault 
+              Activate Vault (Free)
             </button>
             <p className="text-[10px] text-zinc-400 text-center mt-2">
-              Activation is required for Vault to perform Swaps/Withdrawals.
+              Aktivasi diperlukan agar Vault bisa melakukan Swap/Withdraw.
             </p>
           </div>
         )}
