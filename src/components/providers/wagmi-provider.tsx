@@ -1,9 +1,9 @@
 "use client";
 
 import { createConfig, http, WagmiProvider } from "wagmi";
-import { base, baseSepolia } from "wagmi/chains"; // 🔥 Import baseSepolia
+import { base, baseSepolia } from "wagmi/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { coinbaseWallet } from "wagmi/connectors";
+import { coinbaseWallet, injected } from "wagmi/connectors"; // 🔥 Tambah 'injected'
 import type { ReactNode } from "react";
 
 // Setup QueryClient
@@ -11,17 +11,21 @@ const queryClient = new QueryClient();
 
 // Setup Wagmi Config
 const config = createConfig({
-  // 🔥 Masukkan baseSepolia ke dalam array chains
-  chains: [base, baseSepolia], 
+  // 🔥 FIX 1: Taruh baseSepolia PALING ATAS (Jadi Default)
+  chains: [baseSepolia, base], 
+  
   transports: {
-    [base.id]: http(),
     [baseSepolia.id]: http(),
+    [base.id]: http(),
   },
   connectors: [
+    // 🔥 FIX 2: Ubah preference ke 'all' (Lebih stabil, tidak maksa popup)
     coinbaseWallet({
       appName: "Nyawit",
-      preference: "smartWalletOnly",
+      preference: "all", 
     }),
+    // 🔥 FIX 3: Tambah opsi Injected (Buat jaga-jaga kalau Smart Wallet bengong)
+    injected(), 
   ],
 });
 
