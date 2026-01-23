@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useAccount, useWriteContract, useWalletClient } from "wagmi";
-import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
-// 🔥 Hapus import alchemy, ganti dengan fetchMoralisTokens
+// 👇 PASTIKAN INI MENGARAH KE FILE SIMPLE ACCOUNT YG BARU KITA BUAT
+import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher";
+import { publicClient } from "~/lib/simple-smart-account"; // Public client bisa pinjam dr mana aja
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, erc20Abi, type Address, formatEther } from "viem";
-import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Sparks, Rocket, Check, WarningTriangle } from "iconoir-react";
+import { Copy, Wallet, CheckCircle, Circle, NavArrowLeft, NavArrowRight, ArrowUp, Rocket, Check, WarningTriangle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
 // Interface Token
@@ -21,7 +22,7 @@ interface TokenData {
 }
 
 export const DustDepositView = () => {
-  const { address: ownerAddress } = useAccount(); 
+  const { address: ownerAddress, connector } = useAccount();
   const { data: walletClient } = useWalletClient();
   const { writeContractAsync } = useWriteContract();
 
@@ -32,7 +33,6 @@ export const DustDepositView = () => {
 
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [loading, setLoading] = useState(false);
-  const [potentialValue, setPotentialValue] = useState(0); 
   
   const [depositStatus, setDepositStatus] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -40,12 +40,13 @@ export const DustDepositView = () => {
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
   
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
+  
 
   // 1. INIT VAULT & CHECK STATUS
   const checkVaultStatus = async () => {
       if (!walletClient) return;
       try {
-        const client = await getSmartAccountClient(walletClient);
+        const client = await getUnifiedSmartAccountClient(walletClient, connector?.id);
         if (!client.account) return;
 
         const vAddr = client.account.address;
@@ -62,22 +63,21 @@ export const DustDepositView = () => {
 
   useEffect(() => {
     checkVaultStatus();
+    // Cek status setiap 5 detik
     const interval = setInterval(checkVaultStatus, 5000);
     return () => clearInterval(interval);
   }, [walletClient]);
 
-  // 2. ACTIVATION LOGIC (MANUAL - SELF PAY)
+  // 2. ACTIVATION LOGIC (SPONSORED BY PIMLICO)
   const handleActivate = async () => {
     if (!walletClient || !vaultAddress) return;
     
-    if (vaultEthBalance === 0n) {
-        setToast({ msg: "Vault needs ETH to pay for gas! Please deposit Base Sepolia ETH.", type: "error" });
-        return;
-    }
-
+    // ❌ KITA HAPUS PENGECEKAN SALDO DI SINI
+    // Karena pakai Paymaster, saldo 0 pun BISA activate (Gratis).
+    
     setActivating(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, connector?.id);
       
       const hash = await client.sendUserOperation({
         account: client.account!,
@@ -89,7 +89,7 @@ export const DustDepositView = () => {
       });
       
       console.log("Activation Hash:", hash);
-      setToast({ msg: "Deploying Vault...", type: "success" });
+      setToast({ msg: "Deploying Vault (Sponsored)...", type: "success" });
       
       await new Promise(r => setTimeout(r, 5000));
       await checkVaultStatus();
@@ -102,18 +102,15 @@ export const DustDepositView = () => {
     }
   };
 
-  // 3. SCAN WALLET (🔥 LOGIC BARU: PAKE MORALIS)
+  // 3. SCAN WALLET (MORALIS)
   const scanOwnerWallet = async () => {
       if (!ownerAddress) return;
       setLoading(true);
-      setPotentialValue(0); 
       try {
-        // Panggil helper Moralis kita
         const moralisData = await fetchMoralisTokens(ownerAddress);
 
-        // Filter & Format
         const formattedTokens: TokenData[] = moralisData
-          .filter(t => BigInt(t.balance) > 0n) // Hapus yang saldo 0
+          .filter(t => BigInt(t.balance) > 0n)
           .map((t) => {
             return {
               contractAddress: t.token_address,
@@ -122,7 +119,7 @@ export const DustDepositView = () => {
               balance: formatUnits(BigInt(t.balance), t.decimals),
               rawBalance: t.balance,
               decimals: t.decimals,
-              logo: t.thumbnail || t.logo || null // Moralis kasih thumbnail juga
+              logo: t.thumbnail || t.logo || null 
             };
           });
 
@@ -137,11 +134,7 @@ export const DustDepositView = () => {
 
   useEffect(() => { if (ownerAddress) scanOwnerWallet(); }, [ownerAddress]);
 
-  const formatDustValue = (val: number) => {
-    return `$${val.toFixed(2)}`;
-  };
-
-  // UI HELPERS (Pagination & Select)
+  // UI HELPERS
   const totalPages = Math.ceil(tokens.length / ITEMS_PER_PAGE);
   const currentTokens = tokens.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
 
@@ -162,6 +155,7 @@ export const DustDepositView = () => {
     setSelectedTokens(newSet);
   };
 
+  // 4. DEPOSIT LOGIC (WAGMI STANDARD - AMAN DARI RAW SIGN)
   const handleDeposit = async () => {
     if (!vaultAddress) return;
     setDepositStatus("Preparing Deposit...");
@@ -171,12 +165,15 @@ export const DustDepositView = () => {
       if (!token) continue;
       try {
         setDepositStatus(`Depositing ${token.symbol}...`);
+        
+        // Ini pakai wallet asli user (MetaMask) -> Standard Transaction
         await writeContractAsync({
           address: tokenAddr as Address,
           abi: erc20Abi,
           functionName: "transfer",
           args: [vaultAddress as Address, BigInt(token.rawBalance)],
         });
+        
       } catch (e) {
         setDepositStatus(null);
         setToast({ msg: "Deposit Failed/Cancelled", type: "error" });
@@ -210,7 +207,6 @@ export const DustDepositView = () => {
       {/* HEADER: VAULT INFO */}
       <div className="p-5 bg-gradient-to-br from-zinc-900 to-zinc-800 text-white rounded-2xl shadow-lg mb-6 relative overflow-hidden">
         
-        {/* Status Badge */}
         <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-orange-500/20 border-orange-500 text-orange-400"}`}>
            {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
            {isDeployed ? "Active" : "Undeployed"}
@@ -233,40 +229,23 @@ export const DustDepositView = () => {
           </button>
         </div>
         
-        {/* INFO SALDO ETH VAULT */}
-        <div className="flex items-center gap-2 mb-4 p-2 bg-white/5 rounded-lg">
-            <div className={`w-2 h-2 rounded-full ${vaultEthBalance > 0n ? "bg-green-500" : "bg-red-500"}`}></div>
-            <span className="text-xs text-zinc-300">
-                Gas Balance: <span className="font-mono font-bold text-white">{parseFloat(formatEther(vaultEthBalance)).toFixed(4)} ETH</span>
-            </span>
-        </div>
-
-        {/* TOMBOL AKTIVASI */}
+        {/* BUTTON AKTIVASI (Tanpa Warning Saldo karena Sponsored) */}
         {!isDeployed && vaultAddress && (
           <div className="mt-2 pt-4 border-t border-white/10">
-            {vaultEthBalance === 0n ? (
-                <div className="text-center space-y-2">
-                    <div className="text-xs text-orange-300 flex items-center justify-center gap-1 bg-orange-900/30 p-2 rounded-lg border border-orange-500/30">
-                        <WarningTriangle className="w-4 h-4" />
-                        <span>Deposit <strong>Sepolia ETH</strong> to Vault first!</span>
-                    </div>
-                    <p className="text-[10px] text-zinc-500">Vault needs gas to deploy itself.</p>
-                </div>
-            ) : (
-                <button 
+              <button 
                 onClick={handleActivate}
                 disabled={activating}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all animate-pulse"
-                >
+              >
                 <Rocket className="w-4 h-4" /> 
-                Activate Vault Now
-                </button>
-            )}
+                Activate Vault (Free)
+              </button>
+              <p className="text-[10px] text-center text-zinc-400 mt-2">Gas fees sponsored by Pimlico Paymaster</p>
           </div>
         )}
       </div>
 
-      {/* TOKEN LIST */}
+      {/* TOKEN LIST & PAGINATION (SAMA SEPERTI KODE ANDA) */}
       <div className="flex items-end justify-between mb-3 px-1">
         <div>
            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
@@ -327,7 +306,6 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* PAGINATION */}
       {totalPages > 1 && (
         <div className="flex justify-center items-center gap-4 mt-6">
           <button 

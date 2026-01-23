@@ -1,11 +1,9 @@
-// src/lib/hybrid-signer.ts
 import { type WalletClient, type Hex } from "viem";
 import { toAccount } from "viem/accounts";
 
 /**
- * HYBRID SIGNER (FINAL VERSION)
- * Menjembatani Wallet Asli (EOA) dengan Smart Account (Permissionless).
- * Menggunakan type: "local" untuk memuaskan validasi Viem.
+ * HYBRID SIGNER (FIXED)
+ * Tugas: Mengubah WalletClient (MetaMask/EOA) menjadi 'LocalAccount' yang valid.
  */
 export const getHybridSigner = (walletClient: WalletClient) => {
   if (!walletClient.account) {
@@ -14,16 +12,16 @@ export const getHybridSigner = (walletClient: WalletClient) => {
 
   const address = walletClient.account.address;
 
+  // Kita gunakan toAccount dari Viem untuk membuat custom wrapper
   return toAccount({
     address: address,
 
-    // 🔥🔥🔥 BAGIAN WAJIB (JANGAN DIHAPUS) 🔥🔥🔥
-    // Ini kuncinya! Tanpa ini, Viem mengira ini akun remote & minta raw sign.
+    // 🔥🔥🔥 BAGIAN PENTING YANG HILANG DI FILE ANDA 🔥🔥🔥
     type: "local",    
     source: "custom", 
-    // ----------------------------------------------
+    // 👆👆👆 WAJIB ADA. Tanpa ini, akan selalu error "Raw Sign".
 
-    // 1. SIGN MESSAGE (Dipakai untuk UserOperation)
+    // 1. SIGN MESSAGE (Wajib untuk UserOp)
     async signMessage({ message }) {
       return walletClient.signMessage({ 
         message, 
@@ -31,7 +29,7 @@ export const getHybridSigner = (walletClient: WalletClient) => {
       });
     },
 
-    // 2. SIGN TYPED DATA (Dipakai untuk protokol tertentu)
+    // 2. SIGN TYPED DATA (Wajib untuk protokol tertentu)
     async signTypedData(typedData) {
       return walletClient.signTypedData({ 
         ...typedData, 
@@ -39,10 +37,10 @@ export const getHybridSigner = (walletClient: WalletClient) => {
       } as any);
     },
 
-    // 3. SIGN TRANSACTION (Dummy)
-    // Fungsi ini membuat Viem "puas" dan tidak error, 
-    // meskipun Smart Account tidak akan pernah memanggilnya.
+    // 3. SIGN TRANSACTION (DUMMY / BYPASS)
+    // Fungsi ini wajib ada agar Viem tidak komplain saat validasi akun.
     async signTransaction(transaction) {
+      // Return signature kosong yang valid secara format hex
       return "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" as Hex;
     },
   });
