@@ -11,7 +11,7 @@ import { Copy, Wallet, Refresh, Flash, ArrowRight, WarningCircle, CheckCircle, C
 import { SimpleToast } from "~/components/ui/simple-toast";
 
 // ⚠️ PASTIKAN ALAMAT INI SESUAI DENGAN YANG DI DEPLOY DI REMIX
-const SWAPPER_ADDRESS = "0x.....PASTE_ALAMAT_MOCK_DUST_SWAPPER_DISINI....."; 
+const SWAPPER_ADDRESS = "0xdBe1e97FB92E6511351FB8d01B0521ea9135Af12"; 
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // MockUSDC di Sepolia
 
