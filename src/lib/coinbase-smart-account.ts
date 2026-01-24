@@ -1,6 +1,6 @@
 import { createSmartAccountClient, type SmartAccountClient } from "permissionless";
 import { createPimlicoClient } from "permissionless/clients/pimlico";
-import { createPublicClient, http, type WalletClient, type Transport, type Chain } from "viem";
+import { createPublicClient, http, type WalletClient, type Transport, type Chain, type LocalAccount } from "viem";
 import { baseSepolia } from "viem/chains"; 
 import { toCoinbaseSmartAccount } from "viem/account-abstraction";
 import { toAccount } from "viem/accounts"; 
@@ -40,11 +40,12 @@ export const getCoinbaseSmartAccountClient = async (walletClient: WalletClient) 
     throw new Error("Wallet not detected");
   }
 
-  // 🔥 CUSTOM OWNER ADAPTER (FIXED TYPES)
+  // 🔥 CUSTOM OWNER ADAPTER (FIXED)
+  // Kita gunakan toAccount untuk membuat LocalAccount yang valid.
   const owner = toAccount({
     address: walletClient.account.address,
     
-    // 1. Sign Message
+    // 1. Sign Message (Fallback)
     async signMessage({ message }) {
       return walletClient.signMessage({ 
         message, 
@@ -53,12 +54,13 @@ export const getCoinbaseSmartAccountClient = async (walletClient: WalletClient) 
     },
 
     // 2. Sign Typed Data (EIP-712) - FIX ERROR TYPESCRIPT
-    async signTypedData(typedData) {
-      // Kita cast ke 'any' agar TypeScript tidak rewel soal Generic mismatch.
-      // Secara runtime ini aman karena strukturnya pasti standar EIP-712.
+    // Masalah sebelumnya: TypeScript bingung mencocokkan Generic Types.
+    // Solusi: Kita spread 'parameters' dan cast ke 'any'.
+    // Ini memberi tahu TS: "Percaya saja, objek ini valid kok, kirim ke wallet!"
+    async signTypedData(parameters) {
       return walletClient.signTypedData({ 
-        ...(typedData as any), 
-        account: walletClient.account! 
+        account: walletClient.account!,
+        ...(parameters as any) // 👈 MAGIC FIX: Bypass Generic Checking
       });
     },
 
@@ -79,7 +81,7 @@ export const getCoinbaseSmartAccountClient = async (walletClient: WalletClient) 
     client: publicClient,
     owners: [owner], 
     nonce: 0n, // Deterministik
-    version: "1.1" // 👈 FIX ERROR 2: Versi wajib diisi sekarang
+    version: "1.1" // Wajib ada
   });
 
   console.log("✅ [Coinbase] Account Ready:", coinbaseAccount.address);
