@@ -2,11 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useBalance, useSwitchChain } from "wagmi";
-// 👇 Kita panggil switcher aja, logic UserOp ada di dalamnya
+
+// Libs
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, type Hex } from "viem";
 import { baseSepolia } from "viem/chains"; 
+
+// Icons & UI
 import { Copy, Refresh, Flash, ArrowRight, Check, Plus, Wallet } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
@@ -40,7 +43,7 @@ export const SwapView = () => {
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
-  // 1. FETCH DATA
+  // 1. FETCH VAULT DATA
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
@@ -92,9 +95,7 @@ export const SwapView = () => {
       try { await walletClient?.sendTransaction({ to: SWAPPER_ADDRESS as Address, value: parseEther(amount), chain: baseSepolia }); setToast({msg: "Topup Sent!", type: "success"}); } catch(e) { console.error(e); }
   };
 
-  // 🔥🔥🔥 UNIFIED USER OPERATION 🔥🔥🔥
-  // Kita pakai jalur ini untuk SEMUA WALLET (Coinbase & MetaMask).
-  // Karena hanya jalur ini yang terhubung ke Paymaster Pimlico.
+  // 🔥🔥🔥 PURE USER OPERATION (NO HYBRID) 🔥🔥🔥
   const handleBatchSwap = async () => {
     if (!vaultAddress || selectedTokens.size === 0) return;
     
@@ -103,13 +104,14 @@ export const SwapView = () => {
         return;
     }
 
-    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}\n(Gas Sponsored by Vault)`)) return;
+    // KONFIRMASI BAHWA INI GASLESS / SPONSORED
+    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}\n(Gas Paid by Paymaster 💸)`)) return;
 
     try {
         if (chainId !== baseSepolia.id) await switchChainAsync({ chainId: baseSepolia.id });
         setActionLoading("Building UserOp...");
 
-        // 1. DAPATKAN CLIENT (SDH DIPERBAIKI)
+        // 1. DAPATKAN CLIENT (Unified)
         const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
 
         // 2. SUSUN CALLS
@@ -136,9 +138,10 @@ export const SwapView = () => {
 
         setActionLoading(`Signing (${accountType})...`);
 
-        // 3. KIRIM USER OP (GAS SPONSORED)
-        // Coinbase Wallet sekarang akan menerima TypedData EIP-712
-        // Paymaster Pimlico akan aktif karena kita lewat jalur bundler.
+        // 3. KIRIM USER OPERATION (THE REAL MAGIC)
+        // Fungsi ini akan menggunakan Pimlico Paymaster yang sudah diset di library.
+        // EOA: Sign Personal -> Paymaster Bayar -> Gas Gratis.
+        // Coinbase: Sign TypedData -> Paymaster Bayar -> Gas Gratis.
         const userOpHash = await client.sendUserOperation({
             account: client.account!,
             calls: batchCalls
@@ -151,7 +154,7 @@ export const SwapView = () => {
         const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
         console.log("Receipt:", receipt);
 
-        if (!receipt.success) throw new Error("Transaction Reverted on Chain");
+        if (!receipt.success) throw new Error("UserOp Reverted on-chain");
         
         // Success
         setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
