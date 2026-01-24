@@ -2,18 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useBalance, useSwitchChain } from "wagmi";
-
-// Libs
+// 👇 Kita panggil switcher aja, logic UserOp ada di dalamnya
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
 import { alchemy } from "~/lib/alchemy";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, toHex, type Hex } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, type Hex } from "viem";
 import { baseSepolia } from "viem/chains"; 
-
-// Icons & UI
 import { Copy, Refresh, Flash, ArrowRight, Check, Plus, Wallet } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// ✅ CONFIG ADDRESS
+// Config
 const SWAPPER_ADDRESS = "0xdBe1e97FB92E6511351FB8d01B0521ea9135Af12"; 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
 
@@ -30,7 +27,6 @@ export const SwapView = () => {
   const { address: ownerAddress, connector, chainId } = useAccount(); 
   const { switchChainAsync } = useSwitchChain();
   
-  // Balance Checker
   const { data: swapperBalance, refetch: refetchSwapper } = useBalance({
     address: SWAPPER_ADDRESS as Address,
     chainId: baseSepolia.id
@@ -44,7 +40,7 @@ export const SwapView = () => {
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
-  // 1. FETCH DATA (Logic Sama untuk Keduanya)
+  // 1. FETCH DATA
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
@@ -55,12 +51,10 @@ export const SwapView = () => {
       if (!client.account) return;
       setVaultAddress(client.account.address);
 
-      // Deteksi UI
       // @ts-ignore
       const isCSW = client.account.source === "coinbaseSmartAccount" || client.account.type === "coinbaseSmartAccount";
       setAccountType(isCSW ? "Coinbase Smart Wallet" : "Simple Account (EOA)");
 
-      // Fetch Balances
       const balances = await alchemy.core.getTokenBalances(client.account.address);
       const nonZeroTokens = balances.tokenBalances.filter(t => t.tokenBalance && BigInt(t.tokenBalance) > 0n);
       const metadata = await Promise.all(nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress)));
@@ -84,7 +78,6 @@ export const SwapView = () => {
 
   useEffect(() => { if(walletClient) fetchVaultData(); }, [walletClient, connector?.id]); 
 
-  // Selection Logic
   const toggleSelect = (addr: string) => {
       const newSet = new Set(selectedTokens);
       if (newSet.has(addr)) newSet.delete(addr); else newSet.add(addr);
@@ -99,108 +92,68 @@ export const SwapView = () => {
       try { await walletClient?.sendTransaction({ to: SWAPPER_ADDRESS as Address, value: parseEther(amount), chain: baseSepolia }); setToast({msg: "Topup Sent!", type: "success"}); } catch(e) { console.error(e); }
   };
 
-  // 🔥🔥🔥 HYBRID BATCH SWAP (THE SOLUTION) 🔥🔥🔥
+  // 🔥🔥🔥 UNIFIED USER OPERATION 🔥🔥🔥
+  // Kita pakai jalur ini untuk SEMUA WALLET (Coinbase & MetaMask).
+  // Karena hanya jalur ini yang terhubung ke Paymaster Pimlico.
   const handleBatchSwap = async () => {
     if (!vaultAddress || selectedTokens.size === 0) return;
     
-    // Cek Bensin Swapper
     if (!swapperBalance || swapperBalance.value < parseEther("0.0001") * BigInt(selectedTokens.size)) {
         alert("⚠️ SWAPPER HABIS BENSIN! Isi ulang dulu.");
         return;
     }
 
-    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}`)) return;
+    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}\n(Gas Sponsored by Vault)`)) return;
 
     try {
         if (chainId !== baseSepolia.id) await switchChainAsync({ chainId: baseSepolia.id });
-        
-        const isCoinbase = connector?.id === 'coinbaseWalletSDK';
+        setActionLoading("Building UserOp...");
 
-        // ============================================
-        // 🛣️ JALUR 1: COINBASE (Logic Withdraw / Native Batch)
-        // ============================================
-        if (isCoinbase) {
-            setActionLoading("Sending to Coinbase...");
-            
-            const calls = [];
-            for (const addr of selectedTokens) {
-                const token = tokens.find(t => t.contractAddress === addr);
-                if (!token) continue;
+        // 1. DAPATKAN CLIENT (SDH DIPERBAIKI)
+        const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
 
-                // 1. Approve
-                calls.push({
-                    to: token.contractAddress as Address,
-                    data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] }),
-                    value: toHex(0n) // Wajib format Hex
-                });
+        // 2. SUSUN CALLS
+        const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
+        for (const addr of selectedTokens) {
+            const token = tokens.find(t => t.contractAddress === addr);
+            if (!token) continue;
 
-                // 2. Swap
-                const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
-                calls.push({
-                    to: SWAPPER_ADDRESS as Address,
-                    data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] }),
-                    value: toHex(0n)
-                });
-            }
-
-            // 🔥 TEMBAK LANGSUNG KE API WALLET (EIP-5792)
-            // Ini bypass error Raw Sign, karena Coinbase native batching support ini.
-            const id = await walletClient?.request({
-                method: 'wallet_sendCalls' as any,
-                params: [{
-                    version: '1.0',
-                    chainId: toHex(baseSepolia.id),
-                    from: ownerAddress as Address,
-                    calls: calls
-                }] as any
+            // Approve
+            batchCalls.push({
+                to: token.contractAddress as Address,
+                value: 0n,
+                data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] })
             });
-            console.log("Coinbase Batch ID:", id);
-            
-            // Tunggu sebentar (Manual delay karena wallet_sendCalls return ID, bukan receipt)
-            setActionLoading("Processing...");
-            await new Promise(r => setTimeout(r, 5000));
-        } 
-        
-        // ============================================
-        // 🛣️ JALUR 2: EOA / METAMASK (Logic UserOp / Permissionless)
-        // ============================================
-        else {
-            setActionLoading("Building UserOp...");
 
-            // Switcher akan kasih SimpleAccount Client
-            const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
-
-            const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
-            for (const addr of selectedTokens) {
-                const token = tokens.find(t => t.contractAddress === addr);
-                if (!token) continue;
-                // Approve
-                batchCalls.push({
-                    to: token.contractAddress as Address,
-                    value: 0n,
-                    data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] })
-                });
-                // Swap
-                const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
-                batchCalls.push({
-                    to: SWAPPER_ADDRESS as Address,
-                    value: 0n,
-                    data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] })
-                });
-            }
-
-            // Kirim via Bundler (Gas Sponsored)
-            const userOpHash = await client.sendUserOperation({
-                account: client.account!,
-                calls: batchCalls
+            // Swap
+            const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
+            batchCalls.push({
+                to: SWAPPER_ADDRESS as Address,
+                value: 0n,
+                data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] })
             });
-            
-            setActionLoading("Waiting for Bundler...");
-            const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
-            console.log("Receipt:", receipt);
         }
 
-        // --- SUCCESS STATE ---
+        setActionLoading(`Signing (${accountType})...`);
+
+        // 3. KIRIM USER OP (GAS SPONSORED)
+        // Coinbase Wallet sekarang akan menerima TypedData EIP-712
+        // Paymaster Pimlico akan aktif karena kita lewat jalur bundler.
+        const userOpHash = await client.sendUserOperation({
+            account: client.account!,
+            calls: batchCalls
+        });
+
+        console.log("UserOp Hash:", userOpHash);
+        setActionLoading("Waiting for Bundler...");
+
+        // 4. WAIT FOR RECEIPT
+        const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
+        console.log("Receipt:", receipt);
+
+        if (!receipt.success) throw new Error("Transaction Reverted on Chain");
+        
+        // Success
         setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
         setSelectedTokens(new Set()); 
         setToast({ msg: "Swap Success! 🚀", type: "success" });
@@ -208,7 +161,10 @@ export const SwapView = () => {
 
     } catch (e: any) {
         console.error("BATCH ERROR:", e);
-        setToast({ msg: "Failed: " + (e.shortMessage || e.message), type: "error" });
+        let msg = e.shortMessage || e.message;
+        if (msg.includes("paymaster")) msg = "Gas Sponsorship Failed / Vault Empty";
+        if (msg.includes("User rejected")) msg = "Rejected by User";
+        setToast({ msg: "Failed: " + msg, type: "error" });
     } finally {
         setActionLoading(null);
     }
@@ -223,7 +179,16 @@ export const SwapView = () => {
         <div className="absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border border-white/20 bg-black/20 font-medium flex items-center gap-1"><Wallet className="w-3 h-3" /> {accountType}</div>
         <div className="flex items-center gap-2 text-yellow-200 text-xs mb-1"><Flash className="w-3 h-3" /> Dust Sweeper</div>
         <h2 className="text-xl font-bold mb-2">Swap Dust to ETH</h2>
-        <div className="flex items-center justify-between mt-4"><code className="text-[10px] opacity-60 font-mono">{vaultAddress || "Connecting..."}</code></div>
+        <div className="flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/10 mb-2">
+           <div className="text-xs">
+              <span className="opacity-60 block">Swapper Pool:</span>
+              <span className={`font-mono font-bold ${!swapperBalance || swapperBalance.value === 0n ? "text-red-400" : "text-green-400"}`}>
+                {swapperBalance ? parseFloat(formatEther(swapperBalance.value)).toFixed(4) : "Loading..."} ETH
+              </span>
+           </div>
+           <button onClick={handleTopUpSwapper} className="px-3 py-1 bg-white/10 hover:bg-white/20 rounded-lg flex items-center gap-1 text-[10px] font-bold transition-colors"><Plus className="w-3 h-3" /> Fund</button>
+        </div>
+        <div className="flex items-center justify-between mt-2"><code className="text-[10px] opacity-60 font-mono">{vaultAddress || "Connecting..."}</code></div>
       </div>
 
       <div className="flex items-center justify-between px-1 mb-2">
