@@ -7,15 +7,15 @@ import { publicClient } from "~/lib/simple-smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { baseSepolia } from "viem/chains"; 
-import { Copy, Wallet, Refresh, Flash, ArrowRight, WarningCircle, CheckCircle, Circle, Check } from "iconoir-react";
+import { Copy, Wallet, Refresh, Flash, ArrowRight, WarningCircle, Check, CheckCircle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// ⚠️ PASTIKAN ALAMAT INI SESUAI DENGAN YANG DI DEPLOY DI REMIX
+// ✅ ALAMAT SWAPPER ANDA (SUDAH DIPASANG)
 const SWAPPER_ADDRESS = "0xdBe1e97FB92E6511351FB8d01B0521ea9135Af12"; 
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // MockUSDC di Sepolia
 
-// --- KOMPONEN LOGO (Kecil) ---
+// --- KOMPONEN LOGO ---
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => { setSrc(token.logo || null); }, [token]);
@@ -52,7 +52,6 @@ export const SwapView = () => {
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
 
-  // STATE UNTUK SELECT ALL
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
   // 1. FETCH DATA VAULT
@@ -107,105 +106,107 @@ export const SwapView = () => {
 
   const toggleSelectAll = () => {
       if (selectedTokens.size === tokens.length) {
-          setSelectedTokens(new Set()); // Deselect All
+          setSelectedTokens(new Set()); 
       } else {
           const all = new Set(tokens.map(t => t.contractAddress));
-          setSelectedTokens(all); // Select All
+          setSelectedTokens(all); 
       }
   };
 
-  // --- CORE SWAP FUNCTION (REUSABLE) ---
-  const executeSwapProcess = async (token: any, index: number, total: number) => {
-      // 1. Approve
-      setActionLoading(`(${index}/${total}) Approving ${token.symbol}...`);
-      
-      const executeAbi = [{
-        type: 'function',
-        name: 'execute',
-        inputs: [{ name: 'target', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'data', type: 'bytes' }],
-        outputs: [],
-        stateMutability: 'payable'
-      }] as const;
-
-      const approveData = encodeFunctionData({
-          abi: erc20Abi,
-          functionName: "approve",
-          args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)]
-      });
-
-      await writeContractAsync({
-          address: vaultAddress as Address,
-          abi: executeAbi,
-          functionName: 'execute',
-          args: [token.contractAddress as Address, 0n, approveData],
-          chainId: baseSepolia.id
-      });
-      
-      // Jeda simulasi (tunggu blok)
-      await new Promise(r => setTimeout(r, 4000)); 
-
-      // 2. Swap
-      setActionLoading(`(${index}/${total}) Swapping ${token.symbol}...`);
-
-      const swapperAbi = [{
-          name: "swapTokenForETH",
-          type: "function",
-          stateMutability: "nonpayable",
-          inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}],
-          outputs: []
-      }] as const;
-
-      const swapData = encodeFunctionData({
-          abi: swapperAbi,
-          functionName: "swapTokenForETH",
-          args: [token.contractAddress as Address, BigInt(token.rawBalance)]
-      });
-
-      await writeContractAsync({
-          address: vaultAddress as Address,
-          abi: executeAbi,
-          functionName: 'execute',
-          args: [SWAPPER_ADDRESS as Address, 0n, swapData],
-          chainId: baseSepolia.id
-      });
-  };
-
-  // --- BATCH SWAP HANDLER ---
+  // 🔥🔥🔥 GOD MODE: BATCH SWAP (EXECUTE BATCH) 🔥🔥🔥
   const handleBatchSwap = async () => {
     if (!vaultAddress || selectedTokens.size === 0) return;
     
-    // Validasi Address Swapper
-    if (!SWAPPER_ADDRESS || SWAPPER_ADDRESS.includes("PASTE")) {
-        alert("Harap pasang Address Contract Swapper di kodingan dulu!");
-        return;
-    }
-
-    if (!window.confirm(`Swap ${selectedTokens.size} assets?\n\nNote: You will need to confirm multiple transactions in MetaMask.`)) return;
+    if (!window.confirm(`Batch Swap ${selectedTokens.size} assets?\n\nThis will confirm 1 transaction to Approve & Swap all selected tokens.`)) return;
 
     try {
         if (chainId !== baseSepolia.id) await switchChainAsync({ chainId: baseSepolia.id });
+        setActionLoading("Preparing Bundle...");
 
-        let i = 1;
-        const total = selectedTokens.size;
-        
-        // LOOPING TRANSAKSI
+        // ARRAY UNTUK MENAMPUNG SEMUA PERINTAH
+        const dests: Address[] = [];
+        const values: bigint[] = [];
+        const funcs: `0x${string}`[] = [];
+
+        // LOOPING TOKEN YANG DIPILIH
         for (const addr of selectedTokens) {
             const token = tokens.find(t => t.contractAddress === addr);
-            if (token) {
-                await executeSwapProcess(token, i, total);
-                i++;
-            }
+            if (!token) continue;
+
+            // 1. MASUKKAN PERINTAH APPROVE KE ANTRIAN
+            dests.push(token.contractAddress as Address);
+            values.push(0n);
+            funcs.push(encodeFunctionData({
+                abi: erc20Abi,
+                functionName: "approve",
+                args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)]
+            }));
+
+            // 2. MASUKKAN PERINTAH SWAP KE ANTRIAN
+            const swapperAbi = [{
+                name: "swapTokenForETH",
+                type: "function",
+                stateMutability: "nonpayable",
+                inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}],
+                outputs: []
+            }] as const;
+
+            dests.push(SWAPPER_ADDRESS as Address);
+            values.push(0n);
+            funcs.push(encodeFunctionData({
+                abi: swapperAbi,
+                functionName: "swapTokenForETH",
+                args: [token.contractAddress as Address, BigInt(token.rawBalance)]
+            }));
         }
 
-        console.log("Batch Swap Done");
-        setToast({ msg: "All Swaps Completed! 🚀", type: "success" });
-        setSelectedTokens(new Set()); // Reset selection
-        await new Promise(r => setTimeout(r, 3000));
+        setActionLoading(`Signing 1 Bundle (${funcs.length} Actions)...`);
+
+        // ABI executeBatch (Standar SimpleAccount)
+        const batchAbi = [{
+            type: 'function',
+            name: 'executeBatch',
+            inputs: [
+                { name: 'dest', type: 'address[]' },
+                { name: 'value', type: 'uint256[]' },
+                { name: 'func', type: 'bytes[]' }
+            ],
+            outputs: [],
+            stateMutability: 'payable'
+        }] as const;
+
+        // 🔥 FIRE ONE SHOT!
+        const txHash = await writeContractAsync({
+            address: vaultAddress as Address,
+            abi: batchAbi,
+            functionName: 'executeBatch',
+            args: [dests, values, funcs],
+            chainId: baseSepolia.id
+        });
+
+        console.log("Batch Hash:", txHash);
+        
+        // 🚀 OPTIMISTIC UPDATE: Langsung hapus token dari layar!
+        setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
+        setSelectedTokens(new Set()); 
+        
+        setToast({ msg: "Batch Swap Submitted! 🚀", type: "success" });
+        setActionLoading("Waiting for Block...");
+
+        // Tunggu agak lama untuk Alchemy indexing
+        await new Promise(r => setTimeout(r, 8000));
         await fetchVaultData();
 
     } catch (e: any) {
         console.error(e);
-        setToast({ msg: "Process Interrupted: " + (e.shortMessage || e.message), type: "error" });
+        // Fallback: Jika wallet tidak support batch (sangat jarang), beri info
+        if (e.message?.includes("function selector")) {
+            setToast({ msg: "Smart Account version too old for batching.", type: "error" });
+        } else {
+            setToast({ msg: "Failed: " + (e.shortMessage || e.message), type: "error" });
+        }
+        // Kembalikan token jika gagal
+        fetchVaultData();
     } finally {
         setActionLoading(null);
     }
@@ -221,7 +222,7 @@ export const SwapView = () => {
            <div className="bg-white dark:bg-zinc-900 p-6 rounded-2xl shadow-2xl flex flex-col items-center gap-4">
               <div className="w-10 h-10 border-4 border-yellow-500 border-t-transparent rounded-full animate-spin"></div>
               <div className="text-sm font-bold text-center animate-pulse text-yellow-500">{actionLoading}</div>
-              <div className="text-xs text-zinc-500">Please confirm transactions in wallet</div>
+              <div className="text-xs text-zinc-500">Please confirm 1 Transaction in Wallet</div>
            </div>
         </div>
       )}
@@ -232,6 +233,7 @@ export const SwapView = () => {
           <Flash className="w-3 h-3" /> Dust Sweeper
         </div>
         <h2 className="text-xl font-bold mb-2">Swap Dust to ETH</h2>
+        
         <div className="flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/10">
           <code className="text-xs font-mono opacity-80 truncate max-w-[150px]">
             {vaultAddress || "Loading..."}
@@ -281,7 +283,7 @@ export const SwapView = () => {
                         }`}
                     >
                         <div className="flex items-center gap-3">
-                            <div className={`w-6 h-6 rounded-full border flex items-center justify-center ${isSelected ? "bg-yellow-500 border-yellow-500" : "bg-white border-zinc-300"}`}>
+                            <div className={`w-6 h-6 rounded-full border flex items-center justify-center transition-colors ${isSelected ? "bg-yellow-500 border-yellow-500" : "bg-white border-zinc-300"}`}>
                                 {isSelected && <Check className="w-4 h-4 text-white" />}
                             </div>
 
@@ -312,15 +314,18 @@ export const SwapView = () => {
                 className="w-full bg-yellow-500 hover:bg-yellow-600 text-white shadow-xl shadow-yellow-500/30 py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-transform active:scale-95"
             >
                 <Flash className="w-5 h-5" />
-                Swap {selectedTokens.size} Selected
+                Batch Swap {selectedTokens.size} Assets
             </button>
+            <div className="text-[10px] text-center mt-2 text-zinc-500 font-medium">
+                1 Bundle Transaction • Includes {selectedTokens.size * 2} Actions
+            </div>
           </div>
       )}
 
       <div className="mt-20 p-4 bg-blue-50 dark:bg-blue-900/10 rounded-xl flex gap-3 items-start">
          <WarningCircle className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
          <div className="text-xs text-blue-800 dark:text-blue-200">
-            <strong>Simulation Mode:</strong> EOA Wallet will require 2 confirmations per token (Approve + Swap).
+            <strong>Batch Power:</strong> This will bundle all Approvals and Swaps into a single on-chain transaction.
          </div>
       </div>
     </div>
