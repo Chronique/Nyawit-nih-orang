@@ -8,17 +8,17 @@ import { getCoinbaseSmartAccountClient } from "./coinbase-smart-account";
  */
 export const getUnifiedSmartAccountClient = async (
   walletClient: WalletClient, 
-  connectorId?: string
+  connectorId?: string, // 👈 Jangan lupa koma disini
+  accountIndex: bigint = 0n // 👈 Parameter baru (Default 0n)
 ) => {
-  // 1. Log untuk Debugging (Cek Console Browser Anda)
+  // 1. Log untuk Debugging
   console.log("🔍 [Switcher] Checking Wallet Type...");
   console.log("👉 Connector ID:", connectorId);
+  console.log("👉 Salt/Index:", accountIndex);
   
   // 2. DETEKSI AGRESIF
-  // Cek ID Connector (Standar Wagmi)
   const isCoinbaseID = connectorId === "coinbaseWalletSDK" || connectorId === "coinbaseWallet";
   
-  // Cek Internal Provider (Jaga-jaga kalau ID-nya beda, misal 'injected')
   // @ts-ignore
   const isCoinbaseProvider = walletClient.transport?.provider?.isCoinbaseWallet === true;
 
@@ -29,13 +29,14 @@ export const getUnifiedSmartAccountClient = async (
   // 3. LOGIKA PEMILIHAN
   if (isCoinbase) {
     console.log("✅ MODE: Coinbase Smart Wallet (Sub-Account)");
-    // Gunakan mesin khusus Coinbase yang sudah kita pasangi "Wrapper Anti-Raw Sign"
+    // Coinbase tidak butuh index (sudah permanen by default)
     return await getCoinbaseSmartAccountClient(walletClient);
   } 
   
   else {
     console.log("✅ MODE: Standard EOA (Simple Account)");
     // Default untuk MetaMask, TrustWallet, dll
-    return await getSimpleClient(walletClient);
+    // Kita kirim index agar alamatnya bisa diatur (Permanen/Baru)
+    return await getSimpleClient(walletClient, accountIndex);
   }
 };

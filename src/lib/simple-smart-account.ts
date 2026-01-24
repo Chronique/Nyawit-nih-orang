@@ -2,7 +2,7 @@ import { createSmartAccountClient, type SmartAccountClient } from "permissionles
 import { toSimpleSmartAccount } from "permissionless/accounts";
 import { createPimlicoClient } from "permissionless/clients/pimlico";
 import { createPublicClient, http, type WalletClient, type Transport, type Chain, type Account } from "viem";
-import { baseSepolia } from "viem/chains"; // 👈 Pakai Sepolia dulu biar aman testing
+import { baseSepolia } from "viem/chains"; 
 
 // EntryPoint v0.6 (Standard)
 const ENTRYPOINT_ADDRESS_V06 = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
@@ -37,7 +37,11 @@ export const pimlicoClient = createPimlicoClient({
 /* =======================
    3. SMART ACCOUNT CLIENT (LOGIC UTAMA)
 ======================= */
-export const getSmartAccountClient = async (walletClient: WalletClient) => {
+// Perubahan: Menerima 'accountIndex' (Salt)
+export const getSmartAccountClient = async (
+    walletClient: WalletClient, 
+    accountIndex: bigint = 0n // 👈 Default 0 biar permanen
+) => {
   if (!walletClient.account) {
     throw new Error("Wallet not detected");
   }
@@ -46,7 +50,6 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   const owner = walletClient as WalletClient<Transport, Chain, Account>;
 
   // A. Setup Simple Account (Standard ERC-4337)
-  // Ini otomatis handle signMessage untuk EOA (MetaMask), jadi GAK BAKAL error raw sign.
   const simpleAccount = await toSimpleSmartAccount({
     client: publicClient,
     owner: owner,
@@ -55,6 +58,9 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
       address: ENTRYPOINT_ADDRESS_V06,
       version: "0.6",
     },
+    // 🔥 PENTING: Index ini menentukan alamat wallet. 
+    // 0n = Permanen. Random = Baru terus.
+    index: accountIndex, 
   });
 
   // B. Setup Smart Account Client (Executor)
@@ -64,7 +70,6 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     bundlerTransport: http(PIMLICO_URL),
     
     // 🔥 SPONSORSHIP / PAYMASTER 🔥
-    // Dengan baris ini, gas fee dibayarin Pimlico (selama saldo Pimlico ada)
     paymaster: pimlicoClient, 
     
     // Estimasi Gas via Pimlico

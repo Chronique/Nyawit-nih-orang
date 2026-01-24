@@ -1,85 +1,67 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
+import { useWalletClient, useAccount, useBalance, useSwitchChain } from "wagmi";
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
 import { publicClient } from "~/lib/simple-smart-account"; 
 import { alchemy } from "~/lib/alchemy";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, type Hex } from "viem";
 import { baseSepolia } from "viem/chains"; 
-import { Copy, Wallet, Refresh, Flash, ArrowRight, WarningCircle, Check, CheckCircle } from "iconoir-react";
+import { Copy, Refresh, Flash, ArrowRight, WarningCircle, Check, Plus } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// ✅ ALAMAT SWAPPER ANDA
+// ✅ ALAMAT SWAPPER & TOKEN
 const SWAPPER_ADDRESS = "0xdBe1e97FB92E6511351FB8d01B0521ea9135Af12"; 
-
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // MockUSDC
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
 
 // --- KOMPONEN LOGO ---
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => { setSrc(token.logo || null); }, [token]);
-
   const sources = [
     token.logo,
     `https://tokens.1inch.io/${token.contractAddress}.png`,
     `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/${token.contractAddress}/logo.png`
   ].filter(Boolean);
-
   if (!src && sources.length === 0) return <div className="text-[10px] font-bold">?</div>;
-
   return (
-    <img 
-      src={src || sources[1] || sources[2]} 
-      className="w-full h-full object-cover"
-      onError={(e) => {
-        const t = e.target as HTMLImageElement;
-        t.style.display = 'none';
-      }}
-    />
+    <img src={src || sources[1] || sources[2]} className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
   );
 };
 
 export const SwapView = () => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress, connector, chainId } = useAccount(); 
-  const { writeContractAsync } = useWriteContract();
   const { switchChainAsync } = useSwitchChain();
   
+  // Cek Saldo Swapper (Sisi ETH)
+  const { data: swapperBalance, refetch: refetchSwapper } = useBalance({
+    address: SWAPPER_ADDRESS as Address,
+    chainId: baseSepolia.id
+  });
+
   const [vaultAddress, setVaultAddress] = useState<string | null>(null);
-  const [isDeployed, setIsDeployed] = useState(false); // Tambah state deploy check
   const [tokens, setTokens] = useState<any[]>([]);
   const [loading, setLoading] = useState(false); 
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
-
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
-  // 1. FETCH DATA VAULT & STATUS DEPLOY
+  // 1. FETCH DATA
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
+    refetchSwapper();
     try {
-      const client = await getUnifiedSmartAccountClient(walletClient, connector?.id);
+      // Index 0n = Permanent Wallet
+      const client = await getUnifiedSmartAccountClient(walletClient, connector?.id, 0n);
       if (!client.account) return;
-
       const address = client.account.address;
       setVaultAddress(address);
 
-      // Cek apakah sudah deploy?
-      const code = await publicClient.getBytecode({ address });
-      const deployed = code !== undefined && code !== null && code !== "0x";
-      setIsDeployed(deployed);
-
       const balances = await alchemy.core.getTokenBalances(address);
-      const nonZeroTokens = balances.tokenBalances.filter(t => 
-          t.tokenBalance && BigInt(t.tokenBalance) > 0n
-      );
-
-      const metadata = await Promise.all(
-          nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress))
-      );
-
+      const nonZeroTokens = balances.tokenBalances.filter(t => t.tokenBalance && BigInt(t.tokenBalance) > 0n);
+      const metadata = await Promise.all(nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress)));
       const formatted = nonZeroTokens.map((t, i) => {
           const meta = metadata[i];
           return {
@@ -93,66 +75,80 @@ export const SwapView = () => {
               formattedBal: formatUnits(BigInt(t.tokenBalance || 0), meta.decimals || 18)
           };
       });
-
       const dustTokens = formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());
       setTokens(dustTokens);
-
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
   useEffect(() => { fetchVaultData(); }, [walletClient, connector?.id]); 
 
-  // --- SELECTION LOGIC ---
+  // --- SELECTION ---
   const toggleSelect = (address: string) => {
       const newSet = new Set(selectedTokens);
       if (newSet.has(address)) newSet.delete(address);
       else newSet.add(address);
       setSelectedTokens(newSet);
   };
-
   const toggleSelectAll = () => {
-      if (selectedTokens.size === tokens.length) {
-          setSelectedTokens(new Set()); 
-      } else {
-          const all = new Set(tokens.map(t => t.contractAddress));
-          setSelectedTokens(all); 
-      }
+      if (selectedTokens.size === tokens.length) setSelectedTokens(new Set()); 
+      else setSelectedTokens(new Set(tokens.map(t => t.contractAddress))); 
   };
 
-  // 🔥🔥🔥 GOD MODE: BATCH SWAP (EXECUTE BATCH) 🔥🔥🔥
+  // 🔥 TOP UP SWAPPER
+  const handleTopUpSwapper = async () => {
+      if(!ownerAddress) return;
+      const amount = prompt("Isi saldo Swapper (ETH):", "0.01");
+      if(!amount) return;
+      try {
+        await walletClient?.sendTransaction({
+            to: SWAPPER_ADDRESS as Address,
+            value: parseEther(amount),
+            chain: baseSepolia
+        });
+        setToast({msg: "Topup Berhasil! Refreshing...", type: "success"});
+        setTimeout(refetchSwapper, 4000);
+      } catch(e) { console.error(e); }
+  };
+
+  // 🔥🔥🔥 REAL BATCH SWAP (USER OPERATION) 🔥🔥🔥
   const handleBatchSwap = async () => {
     if (!vaultAddress || selectedTokens.size === 0) return;
     
-    // SAFETY CHECK: VAULT MUST BE ACTIVE
-    if (!isDeployed) {
-        alert("⚠️ VAULT BELUM AKTIF!\n\nFitur Batch Swap butuh Smart Contract yang sudah aktif.\nSilakan ke Tab 'Deposit' dan klik tombol Activate dulu.");
+    // Cek Bensin Swapper
+    if (!swapperBalance || swapperBalance.value < parseEther("0.0001") * BigInt(selectedTokens.size)) {
+        alert("⚠️ SWAPPER HABIS BENSIN!\nKlik tombol (+) Fund untuk isi ulang ETH contract swapper.");
         return;
     }
 
-    if (!window.confirm(`Batch Swap ${selectedTokens.size} assets?`)) return;
+    if (!window.confirm(`Batch Swap ${selectedTokens.size} assets?\n(Gas dibayarin Paymaster 💸)`)) return;
 
     try {
         if (chainId !== baseSepolia.id) await switchChainAsync({ chainId: baseSepolia.id });
-        setActionLoading("Simulating Transaction...");
+        setActionLoading("Building Batch UserOp...");
 
-        const dests: Address[] = [];
-        const values: bigint[] = [];
-        const funcs: `0x${string}`[] = [];
+        // 1. DAPATKAN CLIENT SMART ACCOUNT
+        const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
+
+        // 2. SUSUN ARRAY CALLS (DAFTAR TUGAS)
+        // Kita tidak perlu encode 'executeBatch' manual. Library akan melakukannya otomatis.
+        const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
 
         for (const addr of selectedTokens) {
             const token = tokens.find(t => t.contractAddress === addr);
             if (!token) continue;
 
-            // 1. APPROVE
-            dests.push(token.contractAddress as Address);
-            values.push(0n);
-            funcs.push(encodeFunctionData({
-                abi: erc20Abi,
-                functionName: "approve",
-                args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)]
-            }));
+            // Tugas A: Approve
+            batchCalls.push({
+                to: token.contractAddress as Address,
+                value: 0n,
+                data: encodeFunctionData({
+                    abi: erc20Abi,
+                    functionName: "approve",
+                    args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)]
+                })
+            });
 
-            // 2. SWAP
+            // Tugas B: Swap
             const swapperAbi = [{
                 name: "swapTokenForETH",
                 type: "function",
@@ -161,192 +157,109 @@ export const SwapView = () => {
                 outputs: []
             }] as const;
 
-            dests.push(SWAPPER_ADDRESS as Address);
-            values.push(0n);
-            funcs.push(encodeFunctionData({
-                abi: swapperAbi,
-                functionName: "swapTokenForETH",
-                args: [token.contractAddress as Address, BigInt(token.rawBalance)]
-            }));
-        }
-
-        const batchAbi = [{
-            type: 'function',
-            name: 'executeBatch',
-            inputs: [
-                { name: 'dest', type: 'address[]' },
-                { name: 'value', type: 'uint256[]' },
-                { name: 'func', type: 'bytes[]' }
-            ],
-            outputs: [],
-            stateMutability: 'payable'
-        }] as const;
-
-        // 🔥 STEP 1: SIMULATE (PENTING BIAR GAK GHOSTING)
-        // Kita simulasikan dulu di level node. Kalau ini gagal, berarti ada error logic.
-        // Kalau sukses, baru kita kirim beneran.
-        try {
-            await publicClient.simulateContract({
-                address: vaultAddress as Address,
-                abi: batchAbi,
-                functionName: 'executeBatch',
-                args: [dests, values, funcs],
-                account: ownerAddress as Address,
+            batchCalls.push({
+                to: SWAPPER_ADDRESS as Address,
+                value: 0n,
+                data: encodeFunctionData({
+                    abi: swapperAbi,
+                    functionName: "swapTokenForETH",
+                    args: [token.contractAddress as Address, BigInt(token.rawBalance)]
+                })
             });
-        } catch (simError: any) {
-            console.error("Simulation Error:", simError);
-            // Coba tangkap pesan error yang manusiawi
-            let msg = "Transaction Simulation Failed.";
-            if (simError.message.includes("transfer amount exceeds balance")) msg = "Error: Token Balance Insufficient";
-            else if (simError.message.includes("Swapper kehabisan ETH")) msg = "Error: Swapper Contract Out of ETH";
-            else msg = "Error: " + (simError.shortMessage || simError.message);
-            
-            setToast({ msg: msg, type: "error" });
-            setActionLoading(null);
-            return; // Stop disini kalau simulasi gagal
         }
 
-        setActionLoading(`Signing Bundle...`);
+        setActionLoading(`Bundling ${batchCalls.length} Actions...`);
 
-        // 🔥 STEP 2: EXECUTE REAL
-        const txHash = await writeContractAsync({
-            address: vaultAddress as Address,
-            abi: batchAbi,
-            functionName: 'executeBatch',
-            args: [dests, values, funcs],
-            chainId: baseSepolia.id
+        // 3. KIRIM USER OPERATION (Sihir terjadi di sini ✨)
+        // sendUserOperation otomatis mendeteksi array dan membuatnya jadi Batch Transaction
+        const userOpHash = await client.sendUserOperation({
+            account: client.account!,
+            calls: batchCalls
         });
 
-        console.log("Batch Hash:", txHash);
+        console.log("UserOp Hash:", userOpHash);
+        setActionLoading("Waiting for Bundler...");
+
+        // 4. TUNGGU SAMPAI SUKSES
+        const txHash = await client.waitForUserOperationReceipt({ 
+            hash: userOpHash 
+        });
+
+        console.log("Receipt:", txHash);
         
-        // Optimistic Update
+        // Optimistic UI Update
         setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
         setSelectedTokens(new Set()); 
         
-        setToast({ msg: "Batch Swap Submitted! 🚀", type: "success" });
-        setActionLoading("Waiting for Block...");
+        setToast({ msg: "Batch Swap Success! 🚀", type: "success" });
 
-        await new Promise(r => setTimeout(r, 8000));
-        // fetchVaultData(); // Opsional: Matikan ini biar gak 'muncul lagi' kalau alchemy lemot
+        // Update saldo swapper di UI
+        refetchSwapper();
 
     } catch (e: any) {
-        console.error(e);
-        setToast({ msg: "Failed: " + (e.shortMessage || e.message), type: "error" });
-        fetchVaultData();
+        console.error("BATCH ERROR:", e);
+        let msg = e.shortMessage || e.message;
+        if (msg.includes("paymaster")) msg = "Paymaster Error (Gas Sponsorship Failed)";
+        setToast({ msg: "Failed: " + msg, type: "error" });
+        fetchVaultData(); // Refresh data asli jika gagal
     } finally {
         setActionLoading(null);
     }
   };
 
   return (
-    <div className="pb-32 relative min-h-[50vh]">
+    <div className="pb-32 relative min-h-[50vh] p-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
+      {actionLoading && ( <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm"><div className="bg-white dark:bg-zinc-900 p-6 rounded-2xl flex flex-col items-center gap-4"><div className="w-10 h-10 border-4 border-yellow-500 border-t-transparent rounded-full animate-spin"></div><div className="font-bold text-yellow-500">{actionLoading}</div></div></div> )}
 
-      {actionLoading && (
-        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
-           <div className="bg-white dark:bg-zinc-900 p-6 rounded-2xl shadow-2xl flex flex-col items-center gap-4">
-              <div className="w-10 h-10 border-4 border-yellow-500 border-t-transparent rounded-full animate-spin"></div>
-              <div className="text-sm font-bold text-center animate-pulse text-yellow-500">{actionLoading}</div>
-           </div>
-        </div>
-      )}
-
-      {/* HEADER */}
       <div className="p-5 bg-gradient-to-br from-yellow-900 to-amber-900 text-white rounded-2xl shadow-lg mb-6 relative overflow-hidden">
-        
-        {/* STATUS VAULT CHECKER */}
-        <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-red-500/20 border-red-500 text-red-400"}`}>
-           {isDeployed ? <Check className="w-3 h-3" /> : <WarningCircle className="w-3 h-3" />}
-           {isDeployed ? "Ready" : "Not Active"}
-        </div>
-
-        <div className="flex items-center gap-2 text-yellow-200 text-xs mb-1">
-          <Flash className="w-3 h-3" /> Dust Sweeper
-        </div>
+        <div className="flex items-center gap-2 text-yellow-200 text-xs mb-1"><Flash className="w-3 h-3" /> Dust Sweeper</div>
         <h2 className="text-xl font-bold mb-2">Swap Dust to ETH</h2>
         
-        <div className="flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/10">
-          <code className="text-xs font-mono opacity-80 truncate max-w-[150px]">
-            {vaultAddress || "Loading..."}
-          </code>
-          <button onClick={() => { if (vaultAddress) { navigator.clipboard.writeText(vaultAddress); setToast({ msg: "Address Copied!", type: "success" }); } }}>
-            <Copy className="w-4 h-4 hover:text-yellow-400 transition-colors" />
-          </button>
+        {/* SWAPPER INFO */}
+        <div className="flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/10 mb-2">
+           <div className="text-xs">
+              <span className="opacity-60 block">Swapper Pool:</span>
+              <span className={`font-mono font-bold ${!swapperBalance || swapperBalance.value === 0n ? "text-red-400" : "text-green-400"}`}>
+                {swapperBalance ? parseFloat(formatEther(swapperBalance.value)).toFixed(4) : "Loading..."} ETH
+              </span>
+           </div>
+           <button onClick={handleTopUpSwapper} className="px-3 py-1 bg-white/10 hover:bg-white/20 rounded-lg flex items-center gap-1 text-[10px] font-bold transition-colors">
+              <Plus className="w-3 h-3" /> Fund
+           </button>
         </div>
       </div>
 
-      {/* CONTROLS (Select All) */}
       <div className="flex items-center justify-between px-1 mb-2">
         <div className="flex items-center gap-3">
-            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300">Dust Assets ({tokens.length})</h3>
-            {tokens.length > 0 && (
-                <button 
-                    onClick={toggleSelectAll}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-700"
-                >
-                    {selectedTokens.size === tokens.length ? "Deselect All" : "Select All"}
-                </button>
-            )}
+            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300">Assets ({tokens.length})</h3>
+            {tokens.length > 0 && ( <button onClick={toggleSelectAll} className="text-xs font-bold text-blue-600 hover:text-blue-700">{selectedTokens.size === tokens.length ? "Deselect All" : "Select All"}</button> )}
         </div>
-        <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
-           <Refresh className="w-4 h-4 text-zinc-500" />
-        </button>
+        <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500"><Refresh className="w-4 h-4 text-zinc-500" /></button>
       </div>
 
       <div className="space-y-3">
-        {loading ? (
-            <div className="text-center py-10 text-zinc-400 animate-pulse">Scanning Vault...</div>
-        ) : tokens.length === 0 ? (
-            <div className="text-center py-10 bg-zinc-50 dark:bg-zinc-900 rounded-xl border border-zinc-100 dark:border-zinc-800">
-               <div className="text-zinc-400 text-sm mb-1">No dust tokens found.</div>
-            </div>
-        ) : (
+        {loading ? ( <div className="text-center py-10 text-zinc-400 animate-pulse">Scanning Vault...</div> ) : tokens.length === 0 ? ( <div className="text-center py-10 bg-zinc-50 dark:bg-zinc-900 rounded-xl border border-zinc-100 dark:border-zinc-800 text-zinc-400 text-sm">No dust tokens found.</div> ) : (
             tokens.map((token, i) => {
                 const isSelected = selectedTokens.has(token.contractAddress);
                 return (
-                    <div 
-                        key={i} 
-                        onClick={() => toggleSelect(token.contractAddress)}
-                        className={`flex items-center justify-between p-4 border rounded-2xl shadow-sm cursor-pointer transition-all ${
-                            isSelected 
-                            ? "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/10 dark:border-yellow-800" 
-                            : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-300"
-                        }`}
-                    >
+                    <div key={i} onClick={() => toggleSelect(token.contractAddress)} className={`flex items-center justify-between p-4 border rounded-2xl shadow-sm cursor-pointer ${isSelected ? "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/10 dark:border-yellow-800" : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800"}`}>
                         <div className="flex items-center gap-3">
-                            <div className={`w-6 h-6 rounded-full border flex items-center justify-center transition-colors ${isSelected ? "bg-yellow-500 border-yellow-500" : "bg-white border-zinc-300"}`}>
-                                {isSelected && <Check className="w-4 h-4 text-white" />}
-                            </div>
-
-                            <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center overflow-hidden border border-zinc-200">
-                                <TokenLogo token={token} />
-                            </div>
-                            <div>
-                                <div className="font-bold text-sm">{token.symbol}</div>
-                                <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(6)}</div>
-                            </div>
+                            <div className={`w-6 h-6 rounded-full border flex items-center justify-center ${isSelected ? "bg-yellow-500 border-yellow-500" : "bg-white border-zinc-300"}`}>{isSelected && <Check className="w-4 h-4 text-white" />}</div>
+                            <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center overflow-hidden border border-zinc-200"><TokenLogo token={token} /></div>
+                            <div><div className="font-bold text-sm">{token.symbol}</div><div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(6)}</div></div>
                         </div>
-
-                        <div className="flex items-center gap-2 opacity-50">
-                            <ArrowRight className="w-4 h-4 text-zinc-300" />
-                            <div className="text-xs font-bold text-zinc-400">ETH</div>
-                        </div>
+                        <div className="flex items-center gap-2 opacity-50"><ArrowRight className="w-4 h-4 text-zinc-300" /><div className="text-xs font-bold text-zinc-400">ETH</div></div>
                     </div>
                 );
             })
         )}
       </div>
 
-      {/* FLOATING ACTION BUTTON */}
       {selectedTokens.size > 0 && (
           <div className="fixed bottom-24 left-4 right-4 z-40 animate-in slide-in-from-bottom-5">
-            <button 
-                onClick={handleBatchSwap}
-                disabled={!isDeployed}
-                className={`w-full text-white shadow-xl shadow-yellow-500/30 py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-transform active:scale-95 ${isDeployed ? "bg-yellow-500 hover:bg-yellow-600" : "bg-zinc-400 cursor-not-allowed"}`}
-            >
-                <Flash className="w-5 h-5" />
-                {isDeployed ? `Batch Swap ${selectedTokens.size} Assets` : "Vault Not Active (Check Deposit Tab)"}
+            <button onClick={handleBatchSwap} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white shadow-xl shadow-yellow-500/30 py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2">
+                <Flash className="w-5 h-5" /> Batch Swap {selectedTokens.size} Assets
             </button>
           </div>
       )}
