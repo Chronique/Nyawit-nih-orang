@@ -2,14 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useBalance, useSwitchChain } from "wagmi";
+
+// Libs
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
 import { alchemy } from "~/lib/alchemy";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, type Hex } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther, formatEther, toHex, type Hex } from "viem";
 import { baseSepolia } from "viem/chains"; 
+
+// Icons & UI
 import { Copy, Refresh, Flash, ArrowRight, Check, Plus, Wallet } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// Config
+// ✅ CONFIG ADDRESS
 const SWAPPER_ADDRESS = "0xdBe1e97FB92E6511351FB8d01B0521ea9135Af12"; 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
 
@@ -40,20 +44,18 @@ export const SwapView = () => {
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
-  // 1. FETCH VAULT DATA
+  // 1. FETCH DATA (Logic Sama untuk Keduanya)
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
     refetchSwapper();
 
     try {
-      // Ambil Client (Bisa SimpleAccount / CoinbaseSmartAccount)
       const client = await getUnifiedSmartAccountClient(walletClient, connector?.id, 0n);
-      
       if (!client.account) return;
       setVaultAddress(client.account.address);
 
-      // Deteksi Tipe Akun
+      // Deteksi UI
       // @ts-ignore
       const isCSW = client.account.source === "coinbaseSmartAccount" || client.account.type === "coinbaseSmartAccount";
       setAccountType(isCSW ? "Coinbase Smart Wallet" : "Simple Account (EOA)");
@@ -97,71 +99,108 @@ export const SwapView = () => {
       try { await walletClient?.sendTransaction({ to: SWAPPER_ADDRESS as Address, value: parseEther(amount), chain: baseSepolia }); setToast({msg: "Topup Sent!", type: "success"}); } catch(e) { console.error(e); }
   };
 
-  // 🔥🔥🔥 REAL BATCH SWAP (USER OPERATION) 🔥🔥🔥
-  // Ini satu-satunya cara agar Gas dibayar oleh Vault / Paymaster
+  // 🔥🔥🔥 HYBRID BATCH SWAP (THE SOLUTION) 🔥🔥🔥
   const handleBatchSwap = async () => {
     if (!vaultAddress || selectedTokens.size === 0) return;
     
-    // Cek Bensin Swapper (Contract yg beli token)
+    // Cek Bensin Swapper
     if (!swapperBalance || swapperBalance.value < parseEther("0.0001") * BigInt(selectedTokens.size)) {
-        alert("⚠️ SWAPPER HABIS BENSIN! Contract Swapper tidak punya ETH untuk membeli token Anda.");
+        alert("⚠️ SWAPPER HABIS BENSIN! Isi ulang dulu.");
         return;
     }
 
-    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}\n(Gas Paid by Vault/Paymaster)`)) return;
+    if (!window.confirm(`Swap ${selectedTokens.size} assets?\nVia: ${accountType}`)) return;
 
     try {
         if (chainId !== baseSepolia.id) await switchChainAsync({ chainId: baseSepolia.id });
-        setActionLoading("Building UserOp...");
+        
+        const isCoinbase = connector?.id === 'coinbaseWalletSDK';
 
-        // 1. DAPATKAN CLIENT (SimpleAccount atau CoinbaseAccount)
-        // Switcher memastikan kita dapat tipe yang benar.
-        const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
+        // ============================================
+        // 🛣️ JALUR 1: COINBASE (Logic Withdraw / Native Batch)
+        // ============================================
+        if (isCoinbase) {
+            setActionLoading("Sending to Coinbase...");
+            
+            const calls = [];
+            for (const addr of selectedTokens) {
+                const token = tokens.find(t => t.contractAddress === addr);
+                if (!token) continue;
 
-        // 2. SUSUN CALLS
-        const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
-        for (const addr of selectedTokens) {
-            const token = tokens.find(t => t.contractAddress === addr);
-            if (!token) continue;
+                // 1. Approve
+                calls.push({
+                    to: token.contractAddress as Address,
+                    data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] }),
+                    value: toHex(0n) // Wajib format Hex
+                });
 
-            // Approve
-            batchCalls.push({
-                to: token.contractAddress as Address,
-                value: 0n,
-                data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] })
+                // 2. Swap
+                const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
+                calls.push({
+                    to: SWAPPER_ADDRESS as Address,
+                    data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] }),
+                    value: toHex(0n)
+                });
+            }
+
+            // 🔥 TEMBAK LANGSUNG KE API WALLET (EIP-5792)
+            // Ini bypass error Raw Sign, karena Coinbase native batching support ini.
+            const id = await walletClient?.request({
+                method: 'wallet_sendCalls' as any,
+                params: [{
+                    version: '1.0',
+                    chainId: toHex(baseSepolia.id),
+                    from: ownerAddress as Address,
+                    calls: calls
+                }] as any
             });
+            console.log("Coinbase Batch ID:", id);
+            
+            // Tunggu sebentar (Manual delay karena wallet_sendCalls return ID, bukan receipt)
+            setActionLoading("Processing...");
+            await new Promise(r => setTimeout(r, 5000));
+        } 
+        
+        // ============================================
+        // 🛣️ JALUR 2: EOA / METAMASK (Logic UserOp / Permissionless)
+        // ============================================
+        else {
+            setActionLoading("Building UserOp...");
 
-            // Swap
-            const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
-            batchCalls.push({
-                to: SWAPPER_ADDRESS as Address,
-                value: 0n,
-                data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] })
+            // Switcher akan kasih SimpleAccount Client
+            const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
+
+            const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
+            for (const addr of selectedTokens) {
+                const token = tokens.find(t => t.contractAddress === addr);
+                if (!token) continue;
+                // Approve
+                batchCalls.push({
+                    to: token.contractAddress as Address,
+                    value: 0n,
+                    data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [SWAPPER_ADDRESS as Address, BigInt(token.rawBalance)] })
+                });
+                // Swap
+                const swapperAbi = [{ name: "swapTokenForETH", type: "function", stateMutability: "nonpayable", inputs: [{type: "address", name: "token"}, {type: "uint256", name: "amount"}], outputs: [] }] as const;
+                batchCalls.push({
+                    to: SWAPPER_ADDRESS as Address,
+                    value: 0n,
+                    data: encodeFunctionData({ abi: swapperAbi, functionName: "swapTokenForETH", args: [token.contractAddress as Address, BigInt(token.rawBalance)] })
+                });
+            }
+
+            // Kirim via Bundler (Gas Sponsored)
+            const userOpHash = await client.sendUserOperation({
+                account: client.account!,
+                calls: batchCalls
             });
+            
+            setActionLoading("Waiting for Bundler...");
+            const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
+            console.log("Receipt:", receipt);
         }
 
-        setActionLoading(`Signing (${accountType})...`);
-
-        // 3. KIRIM USER OPERATION
-        // - Kalau EOA: Client akan minta Personal Sign.
-        // - Kalau Coinbase: Client (yg udah difix) akan minta Typed Data Sign.
-        // ERROR "RAW SIGN" SUDAH FIXED DI DRIVER.
-        const userOpHash = await client.sendUserOperation({
-            account: client.account!,
-            calls: batchCalls
-        });
-
-        console.log("UserOp Hash:", userOpHash);
-        setActionLoading("Waiting for Bundler...");
-
-        // 4. TUNGGU SAMPAI SUKSES (PENTING BIAR GAK JADI "FAKE SWAP")
-        // Kalau fungsi ini lolos, berarti UserOp SUDAH dieksekusi on-chain.
-        const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
-        console.log("Receipt:", receipt);
-
-        if (!receipt.success) throw new Error("UserOp Reverted on-chain");
-        
-        // Optimistic UI
+        // --- SUCCESS STATE ---
         setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
         setSelectedTokens(new Set()); 
         setToast({ msg: "Swap Success! 🚀", type: "success" });
@@ -169,9 +208,7 @@ export const SwapView = () => {
 
     } catch (e: any) {
         console.error("BATCH ERROR:", e);
-        let msg = e.shortMessage || e.message;
-        if (msg.includes("paymaster")) msg = "Gas Sponsorship Failed / Vault Empty";
-        setToast({ msg: "Failed: " + msg, type: "error" });
+        setToast({ msg: "Failed: " + (e.shortMessage || e.message), type: "error" });
     } finally {
         setActionLoading(null);
     }
