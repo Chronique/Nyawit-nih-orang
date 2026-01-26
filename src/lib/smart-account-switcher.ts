@@ -1,57 +1,23 @@
 import { type WalletClient } from "viem";
-import { getSmartAccountClient as getSimpleClient } from "./simple-smart-account";
 import { getCoinbaseSmartAccountClient } from "./coinbase-smart-account";
+import { getZeroDevSmartAccountClient } from "./zerodev-smart-account"; // 👈 Import baru
 
-/**
- * Universal Smart Account Switcher
- * Automatically detects wallet type and returns appropriate client
- */
 export const getUnifiedSmartAccountClient = async (
   walletClient: WalletClient, 
-  connectorId?: string,
-  accountIndex: bigint = 0n 
+  connectorId: string | undefined,
+  accountIndex: bigint = 0n
 ) => {
-  if (!walletClient.account) {
-    throw new Error("Wallet client must have an account");
-  }
+  // 🟢 EKSPERIMEN: PAKSA PAKE ZERODEV DULU
+  // Kita bypass logika deteksi wallet, kita langsung tes ZeroDev.
+  console.log("🔀 Switcher: Using ZeroDev Kernel Experiment");
+  return getZeroDevSmartAccountClient(walletClient);
 
-  console.log("🔍 [Switcher] Starting detection...");
-  console.log("📋 Connector ID:", connectorId);
-  console.log("👤 Account Address:", walletClient.account.address);
-  
-  // Multi-layer detection for Coinbase Wallet
-  const isCoinbaseID = 
-    connectorId === "coinbaseWalletSDK" || 
-    connectorId === "coinbaseWallet" || 
-    connectorId === "coinbase";
-  
-  // Check provider properties
-  // @ts-ignore - accessing provider internals
-  const provider = walletClient.transport?.provider;
-  // @ts-ignore
-  const isCoinbaseProvider = 
-    provider?.isCoinbaseWallet === true || 
-    provider?.isCoinbaseBrowser === true;
-
-  // Check account name
-  // @ts-ignore
-  const walletName = walletClient.account?.name?.toLowerCase() || "";
-  const isCoinbaseName = walletName.includes("coinbase");
-
-  const isCoinbase = isCoinbaseID || isCoinbaseProvider || isCoinbaseName;
-
-  console.log("🔎 Detection Results:", {
-    isCoinbaseID,
-    isCoinbaseProvider,
-    isCoinbaseName,
-    finalResult: isCoinbase
-  });
-
+  /* Logika lama di-disable dulu biar fokus tes ZeroDev
+  const isCoinbase = connectorId === 'coinbaseWalletSDK' || connectorId === 'coinbaseWallet';
   if (isCoinbase) {
-    console.log("✅ Using Coinbase Smart Wallet (EIP-712 Signing)");
-    return await getCoinbaseSmartAccountClient(walletClient);
-  } else {
-    console.log("✅ Using Simple Account (EOA)");
-    return await getSimpleClient(walletClient, accountIndex);
+    return getCoinbaseSmartAccountClient(walletClient);
   }
+  // Default ke SimpleAccount (Bisa diganti nanti)
+  // ...
+  */
 };
