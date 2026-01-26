@@ -4,30 +4,26 @@ import { useEffect, useState } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 import { Copy, Refresh, Cube, Wallet } from "iconoir-react";
 
-// IMPORT DUA LIBRARY (SISTEM A & B)
-// Pastikan path import sesuai dengan file yang sudah kita buat sebelumnya
 import { getZeroDevSmartAccountClient, publicClient as zeroDevPublicClient } from "~/lib/zerodev-smart-account";
 import { getCoinbaseSmartAccountClient, coinbasePublicClient } from "~/lib/coinbase-smart-account";
 
 import { SimpleAccountDeposit } from "./simple-account-deposit";
 import { SmartAccountDeposit } from "./smart-account-deposit";
+import { TokenList } from "./token-list";
 
-// Definisikan 2 Mode
 type SystemMode = "ZERODEV" | "COINBASE";
 
 export const DustDepositView = () => {
   const { connector } = useAccount();
   const { data: walletClient } = useWalletClient();
 
-  // DEFAULT KE ZERODEV (Sistem A)
-  const [mode, setMode] = useState<SystemMode>("ZERODEV");
+  const [mode, setMode] = useState<SystemMode>("COINBASE"); // Default ke COINBASE biar langsung ketemu saldo lama
 
   const [vaultAddress, setVaultAddress] = useState<string | null>(null);
   const [vaultBalance, setVaultBalance] = useState<bigint>(0n);
   const [isDeployed, setIsDeployed] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // LOGIC SWITCHER ALAMAT
   const refreshStatus = async () => {
       if (!walletClient) return;
       setLoading(true);
@@ -35,22 +31,13 @@ export const DustDepositView = () => {
         let addr, code, bal;
 
         if (mode === "ZERODEV") {
-            // SISTEM A: ZERODEV (Kernel)
-            // Ini yang nanti pake 'SmartAccountDeposit' (UserOp)
             const client = await getZeroDevSmartAccountClient(walletClient);
             addr = client.account.address;
-            
-            // Cek status di chain Mainnet (via ZeroDev client)
             code = await zeroDevPublicClient.getBytecode({ address: addr });
             bal = await zeroDevPublicClient.getBalance({ address: addr });
-
         } else {
-            // SISTEM B: COINBASE (Yang Anda sebut Simple Account/EOA friendly)
-            // Ini yang nanti pake 'SimpleAccountDeposit' (Deploy Manual)
             const client = await getCoinbaseSmartAccountClient(walletClient);
             addr = client.account.address;
-
-            // Cek status di chain Mainnet (via Coinbase client)
             code = await coinbasePublicClient.getBytecode({ address: addr });
             bal = await coinbasePublicClient.getBalance({ address: addr });
         }
@@ -65,12 +52,12 @@ export const DustDepositView = () => {
 
   useEffect(() => {
     refreshStatus();
-  }, [walletClient, mode]); // Refresh saat wallet atau mode berubah
+  }, [walletClient, mode]);
 
   return (
     <div className="max-w-md mx-auto pb-24">
        
-       {/* --- TOMBOL SWITCHER (HYBRID) --- */}
+       {/* SWITCHER */}
        <div className="flex bg-zinc-900 p-1 rounded-xl mb-6 border border-zinc-800">
           <button 
             onClick={() => setMode("ZERODEV")}
@@ -86,7 +73,7 @@ export const DustDepositView = () => {
           </button>
        </div>
 
-       {/* HEADER ALAMAT */}
+       {/* HEADER */}
        <div className="text-center mb-6">
           <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
             Active Vault Address ({mode})
@@ -95,29 +82,35 @@ export const DustDepositView = () => {
              {loading ? <Refresh className="w-5 h-5 animate-spin"/> : (vaultAddress?.slice(0,6) + "..." + vaultAddress?.slice(-4))}
              {vaultAddress && <Copy className="w-4 h-4 text-zinc-500 cursor-pointer hover:text-white" onClick={() => navigator.clipboard.writeText(vaultAddress)}/>}
           </div>
-          <div className="text-xs text-zinc-600 mt-2">
-            {mode === "ZERODEV" ? "Kernel Factory" : "Coinbase Factory"}
-          </div>
        </div>
 
-       {/* --- RENDER LOGIC --- */}
+       {/* --- KONTEN BERDASARKAN MODE --- */}
        
        {mode === "COINBASE" ? (
-           // SISTEM B: COINBASE (EOA Friendly)
-           // Tampilkan tombol Deploy Manual & Deposit
-           <SimpleAccountDeposit 
-              vaultAddress={vaultAddress} 
-              isDeployed={isDeployed} 
-              onUpdate={refreshStatus} 
-           />
-       ) : (
-           // SISTEM A: ZERODEV (Smart UserOp)
-           // Tampilkan Deposit (Tanpa Deploy) & Withdraw Gasless
+           // SISTEM B: COINBASE 
+           // Sekarang punya Deposit DAN Withdraw
            <>
-             {/* Info Deposit untuk ZeroDev */}
+               <SimpleAccountDeposit 
+                  vaultAddress={vaultAddress} 
+                  isDeployed={isDeployed} 
+                  onUpdate={refreshStatus} 
+               />
+               
+               {vaultAddress && isDeployed && (
+                   <SmartAccountDeposit 
+                      vaultAddress={vaultAddress} 
+                      isDeployed={isDeployed} 
+                      balance={vaultBalance}
+                      onUpdate={refreshStatus}
+                      systemType="COINBASE" // 👈 Withdraw via Coinbase Client
+                   />
+               )}
+           </>
+       ) : (
+           // SISTEM A: ZERODEV
+           <>
              <div className="p-4 bg-zinc-800/50 rounded-xl mb-4 border border-zinc-700 text-center text-xs text-zinc-400">
-                Alamat ini menggunakan <strong>ZeroDev Kernel</strong>.<br/>
-                Kirim ETH Mainnet ke sini, lalu coba Gasless Withdraw di bawah.
+                Mode ZeroDev (Kernel). Kirim ETH Mainnet ke alamat di atas.
              </div>
              
              {vaultAddress && (
@@ -126,10 +119,14 @@ export const DustDepositView = () => {
                   isDeployed={isDeployed} 
                   balance={vaultBalance}
                   onUpdate={refreshStatus}
+                  systemType="ZERODEV" // 👈 Withdraw via ZeroDev Client
                />
              )}
            </>
        )}
+
+       <TokenList address={vaultAddress} />
+
     </div>
   );
 };

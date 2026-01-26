@@ -3,13 +3,29 @@
 import { useState } from "react";
 import { useAccount, useSwitchChain, useWalletClient } from "wagmi";
 import { parseEther, formatEther, type Address } from "viem";
-import { base } from "viem/chains"; // MAINNET
-// Panggil library ZeroDev langsung agar tidak bingung
-import { getZeroDevSmartAccountClient } from "~/lib/zerodev-smart-account"; 
-import { SimpleToast } from "~/components/ui/simple-toast";
-import { ArrowUp, CheckCircle, Cube, Globe } from "iconoir-react"; 
+import { base } from "viem/chains"; 
 
-export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdate }: { vaultAddress: string | null, isDeployed: boolean, balance: bigint, onUpdate: () => void }) => {
+// IMPORT KEDUA CLIENT
+import { getZeroDevSmartAccountClient } from "~/lib/zerodev-smart-account"; 
+import { getCoinbaseSmartAccountClient } from "~/lib/coinbase-smart-account";
+
+import { SimpleToast } from "~/components/ui/simple-toast";
+import { ArrowUp, CheckCircle, Cube, Globe, Wallet } from "iconoir-react"; 
+
+// Tambahkan Prop 'systemType'
+export const SmartAccountDeposit = ({ 
+    vaultAddress, 
+    isDeployed, 
+    balance, 
+    onUpdate,
+    systemType 
+}: { 
+    vaultAddress: string | null, 
+    isDeployed: boolean, 
+    balance: bigint, 
+    onUpdate: () => void,
+    systemType: "ZERODEV" | "COINBASE" // 👈 PROP BARU
+}) => {
   const { address: owner, connector, chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { data: walletClient } = useWalletClient();
@@ -36,11 +52,18 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      console.log("🤖 [Sistem A] Init ZeroDev Client...");
-      // Panggil fungsi ZeroDev
-      const client = await getZeroDevSmartAccountClient(walletClient);
+      console.log(`🤖 [${systemType}] Init Smart Account Client...`);
       
-      console.log("🚀 [Sistem A] Sending UserOp...");
+      let client;
+      // PILIH CLIENT BERDASARKAN SYSTEM TYPE
+      if (systemType === "ZERODEV") {
+          client = await getZeroDevSmartAccountClient(walletClient);
+      } else {
+          client = await getCoinbaseSmartAccountClient(walletClient);
+      }
+      
+      console.log(`🚀 [${systemType}] Sending Withdraw UserOp...`);
+      
       const hash = await client.sendUserOperation({
         account: client.account!,
         calls: [{ 
@@ -51,7 +74,7 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
       });
 
       console.log("✅ UserOp Hash:", hash);
-      setToast({ msg: "Bundling (Tunggu 20d)...", type: "success" });
+      setToast({ msg: "Bundling (Wait)...", type: "success" });
       
       const receipt = await client.waitForUserOperationReceipt({ hash });
       const realTxHash = receipt.receipt.transactionHash;
@@ -69,11 +92,14 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
   };
 
   return (
-    <div className="p-5 bg-purple-50 dark:bg-purple-900/10 border border-purple-200 dark:border-purple-800 rounded-2xl mb-8">
+    <div className={`p-5 rounded-2xl mb-8 border ${systemType === "ZERODEV" ? "bg-purple-50 border-purple-200" : "bg-blue-50 border-blue-200"}`}>
       <SimpleToast message={toast?.msg ?? null} type={toast?.type ?? undefined} onClose={() => setToast(null)} />
       
       <div className="flex justify-between items-center mb-4">
-         <div className="text-sm font-bold text-purple-800 dark:text-purple-300 flex items-center gap-2"><Cube className="w-4 h-4"/> Sistem A: ZeroDev (Gasless)</div>
+         <div className={`text-sm font-bold flex items-center gap-2 ${systemType === "ZERODEV" ? "text-purple-800" : "text-blue-800"}`}>
+            {systemType === "ZERODEV" ? <Cube className="w-4 h-4"/> : <Wallet className="w-4 h-4"/>} 
+            Withdraw ({systemType})
+         </div>
          <div className="text-right">
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider">Vault Balance</div>
             <div className="font-mono font-bold text-lg">{parseFloat(formatEther(balance)).toFixed(5)} ETH</div>
@@ -82,23 +108,19 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
 
       <div className="space-y-3">
          <div className="relative">
-            <input type="number" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.0" className="w-full pl-3 pr-16 py-3 rounded-xl border dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-purple-500"/>
-            <button onClick={() => setAmount(formatEther(balance))} className="absolute right-2 top-2 bottom-2 px-3 text-xs font-bold bg-purple-100 dark:bg-purple-800 text-purple-600 dark:text-purple-200 rounded-lg">MAX</button>
+            <input type="number" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.0" className="w-full pl-3 pr-16 py-3 rounded-xl border bg-white/50 focus:outline-none focus:ring-2 focus:ring-black/10 text-black"/>
+            <button onClick={() => setAmount(formatEther(balance))} className="absolute right-2 top-2 bottom-2 px-3 text-xs font-bold bg-white/80 text-black rounded-lg hover:bg-white">MAX</button>
          </div>
          
-         <button onClick={handleWithdraw} disabled={loading} className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all">
-            {loading ? "Signing UserOp..." : "Withdraw (Sponsored)"}
+         <button onClick={handleWithdraw} disabled={loading} className={`w-full py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${systemType === "ZERODEV" ? "bg-purple-600 hover:bg-purple-700" : "bg-blue-600 hover:bg-blue-700"}`}>
+            {loading ? "Signing..." : "Withdraw (Gasless)"}
          </button>
          
          {txHash && (
-             <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer" className="block text-center text-xs text-blue-600 hover:underline bg-blue-50 p-2 rounded border border-blue-100 flex items-center justify-center gap-1">
+             <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer" className="block text-center text-xs text-blue-600 hover:underline bg-white/50 p-2 rounded border border-blue-100 flex items-center justify-center gap-1">
                 <Globe className="w-3 h-3"/> Lihat di BaseScan
              </a>
          )}
-         
-         <div className="flex items-center gap-2 justify-center text-[10px] text-zinc-500">
-            <CheckCircle className="w-3 h-3"/> Sponsored by Pimlico
-         </div>
       </div>
     </div>
   );
