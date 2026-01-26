@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { useAccount, useSwitchChain, useWalletClient } from "wagmi";
 import { parseEther, formatEther, type Address } from "viem";
-import { base } from "viem/chains"; // 👈 MAINNET
-import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
+import { base } from "viem/chains"; // MAINNET
+// Panggil library ZeroDev langsung agar tidak bingung
+import { getZeroDevSmartAccountClient } from "~/lib/zerodev-smart-account"; 
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { ArrowUp, CheckCircle, Cube, Globe } from "iconoir-react"; 
 
@@ -25,7 +26,7 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
     }
     
     if (parseEther(amount) > balance) {
-        setToast({ msg: "Saldo Kurang! Isi ETH dulu.", type: "error" });
+        setToast({ msg: "Saldo Kurang!", type: "error" });
         return;
     }
 
@@ -33,13 +34,13 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
     setTxHash(null);
 
     try {
-      // 1. Force Switch ke Mainnet
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      console.log("🤖 [Mainnet] Init Client...");
-      const client = await getUnifiedSmartAccountClient(walletClient, connector?.id, 0n);
+      console.log("🤖 [Sistem A] Init ZeroDev Client...");
+      // Panggil fungsi ZeroDev
+      const client = await getZeroDevSmartAccountClient(walletClient);
       
-      console.log("🚀 [Mainnet] Sending Withdraw UserOp...");
+      console.log("🚀 [Sistem A] Sending UserOp...");
       const hash = await client.sendUserOperation({
         account: client.account!,
         calls: [{ 
@@ -50,19 +51,19 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
       });
 
       console.log("✅ UserOp Hash:", hash);
-      setToast({ msg: "Bundling di Mainnet...", type: "success" });
+      setToast({ msg: "Bundling (Tunggu 20d)...", type: "success" });
       
       const receipt = await client.waitForUserOperationReceipt({ hash });
       const realTxHash = receipt.receipt.transactionHash;
       
       setTxHash(realTxHash); 
-      setToast({ msg: "Withdraw Mainnet SUKSES! 💸", type: "success" });
+      setToast({ msg: "Withdraw Sukses! 💸", type: "success" });
       setAmount("");
       onUpdate();
     } catch (e: any) {
       console.error("WITHDRAW ERROR:", e);
       let msg = e.shortMessage || e.message;
-      if(msg.includes("null")) msg = "Wallet Data Error (Types Null)";
+      if(msg.includes("null")) msg = "Wallet Data Error";
       setToast({ msg: "Gagal: " + msg, type: "error" });
     } finally { setLoading(false); }
   };
@@ -72,7 +73,7 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
       <SimpleToast message={toast?.msg ?? null} type={toast?.type ?? undefined} onClose={() => setToast(null)} />
       
       <div className="flex justify-between items-center mb-4">
-         <div className="text-sm font-bold text-purple-800 dark:text-purple-300 flex items-center gap-2"><Cube className="w-4 h-4"/> Simple Account (Mainnet)</div>
+         <div className="text-sm font-bold text-purple-800 dark:text-purple-300 flex items-center gap-2"><Cube className="w-4 h-4"/> Sistem A: ZeroDev (Gasless)</div>
          <div className="text-right">
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider">Vault Balance</div>
             <div className="font-mono font-bold text-lg">{parseFloat(formatEther(balance)).toFixed(5)} ETH</div>
@@ -86,22 +87,17 @@ export const SmartAccountDeposit = ({ vaultAddress, isDeployed, balance, onUpdat
          </div>
          
          <button onClick={handleWithdraw} disabled={loading} className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all">
-            {loading ? "Signing (Real Money)..." : "Withdraw (Mainnet)"}
+            {loading ? "Signing UserOp..." : "Withdraw (Sponsored)"}
          </button>
          
          {txHash && (
-             <a 
-               href={`https://basescan.org/tx/${txHash}`} 
-               target="_blank" 
-               rel="noreferrer"
-               className="block text-center text-xs text-blue-600 hover:underline bg-blue-50 p-2 rounded border border-blue-100 flex items-center justify-center gap-1"
-             >
-                <Globe className="w-3 h-3"/> Lihat di BaseScan (Mainnet)
+             <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer" className="block text-center text-xs text-blue-600 hover:underline bg-blue-50 p-2 rounded border border-blue-100 flex items-center justify-center gap-1">
+                <Globe className="w-3 h-3"/> Lihat di BaseScan
              </a>
          )}
          
          <div className="flex items-center gap-2 justify-center text-[10px] text-zinc-500">
-            <CheckCircle className="w-3 h-3"/> Gas Sponsored by Pimlico
+            <CheckCircle className="w-3 h-3"/> Sponsored by Pimlico
          </div>
       </div>
     </div>
