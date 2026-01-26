@@ -22,7 +22,7 @@ export const fetchMoralisTokens = async (address: string) => {
   try {
     // URL untuk Base Sepolia
     // Jika mau Mainnet, ganti 'base%20sepolia' jadi 'base'
-    const chain = "base%20sepolia"; 
+    const chain = "base"; 
     const url = `https://deep-index.moralis.io/api/v2.2/${address}/erc20?chain=${chain}`;
 
     const response = await fetch(url, {

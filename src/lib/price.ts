@@ -6,21 +6,29 @@ const BASE_API_URL = "https://api.geckoterminal.com/api/v2/networks/base/tokens_
 export const fetchTokenPrices = async (contractAddresses: string[]) => {
   if (contractAddresses.length === 0) return {};
 
-  try {
-    // GeckoTerminal limit 30 address per request
-    // Kita ambil 30 pertama saja untuk demo, atau kamu bisa buat logic chunking
-    const addresses = contractAddresses.slice(0, 30).join(",");
-    
-    const res = await fetch(`${BASE_API_URL}/${addresses}`);
-    const data = await res.json();
+  const prices: Record<string, number> = {};
+  const chunkSize = 30; // Gecko limit 30 address per call
 
-    // Format return: { "0x123...": 1.5, "0xabc...": 0.002 }
-    const prices: Record<string, number> = {};
-    
-    if (data.data) {
-      data.data.forEach((token: any) => {
-        prices[token.attributes.address] = parseFloat(token.attributes.price_usd);
-      });
+  try {
+    // Loop untuk menangani lebih dari 30 token (Chunking)
+    for (let i = 0; i < contractAddresses.length; i += chunkSize) {
+        const chunk = contractAddresses.slice(i, i + chunkSize);
+        const addresses = chunk.join(",");
+        
+        const res = await fetch(`${BASE_API_URL}/${addresses}`);
+        const data = await res.json();
+
+        if (data.data) {
+            data.data.forEach((token: any) => {
+                // Simpan harga dengan key lowercase agar mudah dicocokkan
+                prices[token.attributes.address.toLowerCase()] = parseFloat(token.attributes.price_usd);
+            });
+        }
+
+        // Sedikit delay agar tidak kena rate limit jika token sangat banyak
+        if (i + chunkSize < contractAddresses.length) {
+            await new Promise(r => setTimeout(r, 200));
+        }
     }
 
     return prices;
