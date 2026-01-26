@@ -88,15 +88,12 @@ export default function Demo() {
           )}
         </div>
 
-        {/* --- BOTTOM NAVIGATION (FIXED) --- */}
-        <div className="fixed bottom-0 left-0 right-0 z-50 bg-white/80 dark:bg-black/80 backdrop-blur-lg border-t border-zinc-200 dark:border-zinc-800 safe-area-pb">
-           <div className="max-w-lg mx-auto">
-             <BottomNavigation 
-               activeTab={activeTab}
-               onTabChange={setActiveTab}
-             />
-           </div>
-        </div>
+        {/* --- BOTTOM NAVIGATION --- */}
+        {/* Wrapper dihapus karena BottomNavigation sudah mengatur posisi fixed sendiri */}
+        <BottomNavigation 
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        />
 
       </div>
     </div>
