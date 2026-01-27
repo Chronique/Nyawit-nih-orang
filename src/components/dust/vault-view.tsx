@@ -15,7 +15,7 @@ import { getCoinbaseSmartAccountClient } from "~/lib/coinbase-smart-account";
 import { formatEther } from "viem";
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
-const ITEMS_PER_PAGE = 5; 
+const ITEMS_PER_PAGE = 10; // [UBAH] Menjadi 10 item per halaman
 
 // Komponen Logo Token
 const TokenLogo = ({ token }: { token: any }) => {
@@ -68,7 +68,9 @@ export const VaultView = () => {
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
   const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
   
-  const [currentPage, setCurrentPage] = useState(1);
+  // State Pagination
+  const [currentPage, setCurrentPage] = useState(1);       // Untuk Vault
+  const [currentOwnerPage, setCurrentOwnerPage] = useState(1); // [BARU] Untuk Owner Wallet
 
   // 1. FETCH VAULT DATA (Alchemy)
   const fetchVaultData = async () => {
@@ -119,13 +121,12 @@ export const VaultView = () => {
       const usdc = formatted.find(t => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       const others = formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());
 
-      // [SORTING VAULT] Token dengan logo di atas, tanpa logo di bawah
+      // [SORTING VAULT]
       others.sort((a, b) => {
           const hasLogoA = !!a.logo;
           const hasLogoB = !!b.logo;
           if (hasLogoA && !hasLogoB) return -1;
           if (!hasLogoA && hasLogoB) return 1;
-          // Kalau sama-sama punya/tidak punya logo, urutkan by balance desc
           return parseFloat(b.formattedBal) - parseFloat(a.formattedBal);
       });
 
@@ -142,24 +143,23 @@ export const VaultView = () => {
     setLoadingOwnerTokens(true);
     try {
         const data = await fetchMoralisTokens(ownerAddress);
-        
         const activeTokens = data.filter(t => BigInt(t.balance) > 0n);
 
         // [SORTING OWNER] Spam paling bawah
         activeTokens.sort((a, b) => {
-            // Prioritas 1: Bukan Spam
             if (!a.possible_spam && b.possible_spam) return -1;
             if (a.possible_spam && !b.possible_spam) return 1;
             
-            // Prioritas 2: Balance Terbesar
             const balA = parseFloat(formatUnits(BigInt(a.balance), a.decimals));
             const balB = parseFloat(formatUnits(BigInt(b.balance), b.decimals));
             return balB - balA;
         });
         
         setOwnerTokens(activeTokens);
+        setCurrentOwnerPage(1); // Reset page saat data baru
+
     } catch (e) {
-        console.error("Failed to fetch Moralis:", e);
+        console.error("Gagal fetch Moralis:", e);
     } finally {
         setLoadingOwnerTokens(false);
     }
@@ -239,11 +239,16 @@ export const VaultView = () => {
       });
 
       console.log("Deposit Hash:", txHash);
-      setToast({ msg: "Deposit Sent! Waiting for block...", type: "success" });
+      setToast({ msg: "Deposit Sent! Updating balances...", type: "success" });
 
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      await fetchVaultData(); 
-      await fetchOwnerData(); 
+      // [PENTING] Tunggu lebih lama (10 detik) karena Moralis/Alchemy butuh waktu indexing
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      
+      // Refresh Data Paralel
+      await Promise.all([
+          fetchVaultData(),
+          fetchOwnerData()
+      ]);
 
     } catch (e: any) {
       console.error(e);
@@ -253,8 +258,13 @@ export const VaultView = () => {
     }
   };
   
+  // PAGINATION LOGIC: VAULT
   const totalPages = Math.ceil(tokens.length / ITEMS_PER_PAGE);
   const currentTokens = tokens.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+
+  // PAGINATION LOGIC: OWNER [BARU]
+  const totalOwnerPages = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
+  const currentOwnerTokens = ownerTokens.slice((currentOwnerPage - 1) * ITEMS_PER_PAGE, currentOwnerPage * ITEMS_PER_PAGE);
 
   return (
     <div className="pb-28 space-y-6 relative min-h-[50vh]">
@@ -303,7 +313,7 @@ export const VaultView = () => {
         </div>
       </div>
 
-      {/* --- VAULT ASSETS (PAGINATED & SORTED) --- */}
+      {/* --- VAULT ASSETS (WITH PAGINATION) --- */}
       <div>
         <div className="flex items-center justify-between px-1 mb-2">
             <h3 className="font-semibold text-lg flex items-center gap-2">
@@ -324,7 +334,7 @@ export const VaultView = () => {
           ))}
         </div>
         
-        {/* PAGINATION ANGKA (1, 2, 3...) */}
+        {/* PAGINATION VAULT */}
         {totalPages > 1 && (
             <div className="flex items-center justify-center gap-2 pt-6 pb-2 overflow-x-auto">
               <button 
@@ -362,7 +372,7 @@ export const VaultView = () => {
         )}
       </div>
 
-      {/* --- OWNER ASSETS (SORTED SPAM LAST) --- */}
+      {/* --- OWNER ASSETS (WITH PAGINATION 10 ITEMS) --- */}
       <div>
         <div className="flex items-center justify-between px-1 mb-2 mt-6 border-t pt-4 border-zinc-800">
             <h3 className="font-semibold text-lg flex items-center gap-2">
@@ -376,10 +386,10 @@ export const VaultView = () => {
             ) : ownerTokens.length === 0 ? (
                 <div className="text-center py-4 text-zinc-400 text-sm bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800">No assets found in Owner Wallet.</div>
             ) : (
-                ownerTokens.map((token, i) => (
+                currentOwnerTokens.map((token, i) => (
                     <div key={i} className={`flex items-center justify-between p-3 border rounded-xl shadow-sm transition-all ${
                         token.possible_spam 
-                          ? "bg-red-50/50 dark:bg-red-900/10 border-red-100 dark:border-red-900/30 opacity-70 grayscale-[0.5]" // Tampilan Spam Beda
+                          ? "bg-red-50/50 dark:bg-red-900/10 border-red-100 dark:border-red-900/30 opacity-70 grayscale-[0.5]" 
                           : "bg-green-50/80 dark:bg-green-900/10 border-green-200 dark:border-green-800"
                     }`}>
                         <div className="flex items-center gap-3 overflow-hidden">
@@ -404,6 +414,43 @@ export const VaultView = () => {
                 ))
             )}
         </div>
+
+        {/* PAGINATION OWNER */}
+        {totalOwnerPages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-6 pb-2 overflow-x-auto">
+              <button 
+                disabled={currentOwnerPage === 1}
+                onClick={() => setCurrentOwnerPage(p => Math.max(1, p - 1))}
+                className="p-2 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 disabled:opacity-30 transition-all"
+              >
+                <NavArrowLeft className="w-4 h-4" />
+              </button>
+              
+              <div className="flex items-center gap-1">
+                {Array.from({ length: totalOwnerPages }, (_, i) => i + 1).map((page) => (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentOwnerPage(page)}
+                    className={`w-8 h-8 flex items-center justify-center rounded-lg text-xs font-bold transition-all border ${
+                      currentOwnerPage === page 
+                        ? "bg-green-600 text-white border-green-600 shadow-md scale-110" 
+                        : "bg-white dark:bg-zinc-800 text-zinc-500 border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50"
+                    }`}
+                  >
+                    {page}
+                  </button>
+                ))}
+              </div>
+
+              <button 
+                disabled={currentOwnerPage === totalOwnerPages}
+                onClick={() => setCurrentOwnerPage(p => Math.min(totalOwnerPages, p + 1))}
+                className="p-2 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 disabled:opacity-30 transition-all"
+              >
+                <NavArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+        )}
       </div>
       
     </div>
