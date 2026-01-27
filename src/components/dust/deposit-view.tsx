@@ -2,16 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { useAccount, useWalletClient } from "wagmi"; 
-import { Copy, Refresh, WarningTriangle, Cube, Wallet } from "iconoir-react";
+import { Copy, Refresh, WarningTriangle, Wallet, UserCircle } from "iconoir-react"; // Icon baru
 
-// ZeroDev import di-disable atau tidak dipakai di logic bawah
-import { getZeroDevSmartAccountClient, publicClient as zeroDevPublicClient } from "~/lib/zerodev-smart-account";
-import { getCoinbaseSmartAccountClient, coinbasePublicClient } from "~/lib/coinbase-smart-account";
+import { getCoinbaseSmartAccountClient, coinbasePublicClient } from "~/lib/smart-account";
 import { useFrameContext } from "~/components/providers/frame-provider";
 
-import { SimpleAccountDeposit } from "./simple-account-deposit";
+import { SimpleAccountDeposit } from "./eoa-account-deposit";
 import { SmartAccountDeposit } from "./smart-account-deposit";
 import { TokenList } from "./token-list";
+
+// Kita ganti nama tipe-nya biar jelas
+type AppMode = "EOA_WRAPPER" | "SMART_WALLET";
 
 export const DustDepositView = () => {
   const { data: walletClient } = useWalletClient();
@@ -23,16 +24,19 @@ export const DustDepositView = () => {
   const [isDeployed, setIsDeployed] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const [mode, setMode] = useState<"COINBASE" | "ZERODEV">("ZERODEV");
+  // Default mode
+  const [mode, setMode] = useState<AppMode>("EOA_WRAPPER");
 
+  // Deteksi Otomatis
   useEffect(() => {
     if (frameContext?.isInMiniApp) {
-        setMode("COINBASE");
+        setMode("SMART_WALLET"); // Farcaster
     } else {
+        // Cek jika wallet aslinya adalah Smart Wallet (Coinbase App)
         if (connector?.id === 'coinbaseWalletSDK' || connector?.id === 'coinbaseWallet') {
-            setMode("COINBASE");
+            setMode("SMART_WALLET");
         } else {
-            setMode("ZERODEV");
+            setMode("EOA_WRAPPER"); // Metamask, Rabby, dll
         }
     }
   }, [frameContext, connector?.id]);
@@ -41,23 +45,16 @@ export const DustDepositView = () => {
       if (!walletClient) return;
       setLoading(true);
       try {
-        let addr, code, bal;
-
-        // [UBAH DI SINI]
-        if (mode === "ZERODEV") {
-            // 🟢 TEMPORARY: Mode ZeroDev dialihkan ke Coinbase Smart Wallet
-            // agar vault address SAMA dengan Farcaster dan bypass isu raw sign.
-            const client = await getCoinbaseSmartAccountClient(walletClient);
-            addr = client.account.address;
-            // Gunakan coinbasePublicClient karena kita pakai factory coinbase
-            code = await coinbasePublicClient.getBytecode({ address: addr });
-            bal = await coinbasePublicClient.getBalance({ address: addr });
-        } else {
-            const client = await getCoinbaseSmartAccountClient(walletClient);
-            addr = client.account.address;
-            code = await coinbasePublicClient.getBytecode({ address: addr });
-            bal = await coinbasePublicClient.getBalance({ address: addr });
-        }
+        // 🟢 PENTING: Baik EOA maupun Smart Wallet kita paksa lewat Coinbase Factory
+        // Tujuannya: 
+        // 1. Agar Rabby TIDAK Raw Sign (karena Coinbase support EIP-712).
+        // 2. Agar alamat Vault SAMA di kedua platform.
+        
+        const client = await getCoinbaseSmartAccountClient(walletClient);
+        const addr = client.account.address;
+        
+        const code = await coinbasePublicClient.getBytecode({ address: addr });
+        const bal = await coinbasePublicClient.getBalance({ address: addr });
 
         setVaultAddress(addr);
         setIsDeployed(code !== undefined && code !== null && code !== "0x");
@@ -74,12 +71,7 @@ export const DustDepositView = () => {
   }, [walletClient, mode]); 
 
   if (!frameContext) {
-    return (
-      <div className="max-w-md mx-auto py-20 text-center space-y-4">
-        <div className="w-8 h-8 border-4 border-zinc-300 border-t-blue-500 rounded-full animate-spin mx-auto"></div>
-        <p className="text-xs text-zinc-500">Detecting Environment...</p>
-      </div>
-    );
+    return <div className="text-center py-20 text-zinc-500 text-xs">Loading Environment...</div>;
   }
 
   const { isInMiniApp } = frameContext;
@@ -87,41 +79,33 @@ export const DustDepositView = () => {
   return (
     <div className="max-w-md mx-auto pb-24">
        
-       {/* WARNING KHUSUS SYSTEM A (Sekarang dialihkan ke Coinbase) */}
-       {!isInMiniApp && mode === "ZERODEV" && (
-         <div className="bg-orange-500/10 border border-orange-500 text-orange-600 dark:text-orange-400 p-3 rounded-xl mb-4 flex items-start gap-3 text-xs">
-            <WarningTriangle className="w-5 h-5 shrink-0" />
-            <div>
-               <strong>Using System A (External Wallet).</strong><br/>
-               Vault is synced with Farcaster (via Coinbase Infra).<br/>
-               <span className="opacity-70 font-mono text-[10px]">ZeroDev disabled temporarily due to sign issues.</span>
-            </div>
-         </div>
+       {/* SWITCHER MANUAL (Hanya muncul jika di Browser/Rabby) */}
+       {!isInMiniApp && (
+          <div className="flex justify-center mb-6">
+              <div className="bg-zinc-100 dark:bg-zinc-900 p-1 rounded-xl flex text-[10px] font-bold border border-zinc-200 dark:border-zinc-800 w-full max-w-[300px]">
+                  <button 
+                    onClick={() => setMode("EOA_WRAPPER")}
+                    className={`flex-1 py-2 rounded-lg flex justify-center items-center gap-2 transition-all ${mode === "EOA_WRAPPER" ? "bg-white dark:bg-zinc-800 shadow-sm text-zinc-900 dark:text-white ring-1 ring-black/5" : "text-zinc-400 hover:text-zinc-600"}`}
+                  >
+                    <UserCircle className="w-4 h-4"/> EOA (Rabby)
+                  </button>
+                  <button 
+                    onClick={() => setMode("SMART_WALLET")}
+                    className={`flex-1 py-2 rounded-lg flex justify-center items-center gap-2 transition-all ${mode === "SMART_WALLET" ? "bg-blue-600 text-white shadow-sm" : "text-zinc-400 hover:text-zinc-600"}`}
+                  >
+                    <Wallet className="w-4 h-4"/> Smart Wallet
+                  </button>
+              </div>
+          </div>
        )}
 
-       {/* HEADER & SWITCHER */}
+       {/* HEADER INFO */}
        <div className="text-center mb-6">
-          {!isInMiniApp && (
-              <div className="flex justify-center mb-4">
-                  <div className="bg-zinc-100 dark:bg-zinc-900 p-1 rounded-lg flex text-[10px] font-bold border border-zinc-200 dark:border-zinc-800">
-                      <button 
-                        onClick={() => setMode("ZERODEV")}
-                        className={`px-3 py-1.5 rounded-md flex items-center gap-1 transition-all ${mode === "ZERODEV" ? "bg-white dark:bg-zinc-800 shadow-sm text-zinc-900 dark:text-white" : "text-zinc-400 hover:text-zinc-600"}`}
-                      >
-                        <Cube className="w-3 h-3"/> System A
-                      </button>
-                      <button 
-                        onClick={() => setMode("COINBASE")}
-                        className={`px-3 py-1.5 rounded-md flex items-center gap-1 transition-all ${mode === "COINBASE" ? "bg-blue-600 text-white shadow-sm" : "text-zinc-400 hover:text-zinc-600"}`}
-                      >
-                        <Wallet className="w-3 h-3"/> System B
-                      </button>
-                  </div>
-              </div>
-          )}
-
-          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
-            Active Vault Address ({mode === "ZERODEV" ? "Sys A" : "Sys B"})
+          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1 flex items-center justify-center gap-1">
+            Active Vault 
+            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${mode === "SMART_WALLET" ? "bg-blue-100 text-blue-700" : "bg-zinc-200 text-zinc-700"}`}>
+                {mode === "SMART_WALLET" ? "Smart Wallet" : "EOA Wrapper"}
+            </span>
           </div>
           <div className="text-2xl font-mono font-bold flex justify-center items-center gap-2">
              {loading ? <Refresh className="w-5 h-5 animate-spin"/> : (vaultAddress ? (vaultAddress.slice(0,6) + "..." + vaultAddress.slice(-4)) : "...")}
@@ -130,21 +114,22 @@ export const DustDepositView = () => {
        </div>
 
        {/* KONTEN */}
-       {/* Karena kedua mode sekarang pakai Coinbase, kita bisa sederhanakan render-nya atau biarkan struktur ini */}
        <div className="animate-in fade-in duration-300">
+           {/* 1. Bagian Deposit dari Dompet Asli */}
            <SimpleAccountDeposit 
               vaultAddress={vaultAddress} 
               isDeployed={isDeployed} 
               onUpdate={refreshStatus} 
            />
            
+           {/* 2. Bagian Withdraw/Manage Vault (Hanya jika vault aktif) */}
            {vaultAddress && isDeployed && (
                <SmartAccountDeposit 
                   vaultAddress={vaultAddress} 
                   isDeployed={isDeployed} 
                   balance={vaultBalance}
                   onUpdate={refreshStatus}
-                  systemType="COINBASE" // Paksa tipe ke COINBASE di komponen internal
+                  systemType="COINBASE" // Kita pakai infrastruktur Coinbase untuk keduanya
                />
            )}
        </div>

@@ -1,5 +1,5 @@
 import { type WalletClient } from "viem";
-import { getCoinbaseSmartAccountClient } from "./coinbase-smart-account";
+import { getCoinbaseSmartAccountClient } from "./smart-account";
 // import { getZeroDevSmartAccountClient } from "./zerodev-smart-account"; // ❌ Disable ZeroDev
 
 export const getUnifiedSmartAccountClient = async (

@@ -7,7 +7,7 @@ import { base } from "viem/chains";
 
 // IMPORT KEDUA CLIENT
 import { getZeroDevSmartAccountClient } from "~/lib/zerodev-smart-account"; 
-import { getCoinbaseSmartAccountClient } from "~/lib/coinbase-smart-account";
+import { getCoinbaseSmartAccountClient } from "~/lib/smart-account";
 
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { ArrowUp, CheckCircle, Cube, Globe, Wallet } from "iconoir-react"; 

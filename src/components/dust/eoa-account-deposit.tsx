@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useAccount, useSendTransaction, useSwitchChain } from "wagmi";
 import { parseEther, encodeFunctionData, encodeAbiParameters, parseAbiParameters, getAddress, type Address } from "viem";
 import { base } from "viem/chains"; // MAINNET
-import { coinbasePublicClient } from "~/lib/coinbase-smart-account"; 
+import { coinbasePublicClient } from "~/lib/smart-account"; 
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { Flash, Wallet, Copy, Coins } from "iconoir-react";
 
