@@ -1,6 +1,7 @@
 # Nyawit (Dust Sweeper & Smart Vault)
 ![License](https://img.shields.io/badge/License-MIT-green)
 [![Follow on X](https://img.shields.io/twitter/follow/adhichronique?style=social)](https://x.com/adhichronique)
+---
 **Nyawit** is a Farcaster Mini-App built on the **Base** network. It helps users manage their crypto assets by aggregating "dust" (small token balances) into a Smart Account and providing tools to swap them into ETH or USDC efficiently.
 
 The app features a dual-system architecture that adapts to the user's environment, utilizing **ZeroDev (Kernel)** for standard web browsers and **Coinbase Smart Wallet** for a seamless Farcaster Mini-App experience.
@@ -92,6 +93,7 @@ npm run dev
 ```
 Open your browser: Navigate to http://localhost:3000 to see the app.
 
+---
 ## 📖 Usage Guide
 1. **Deposit (Blusukan)**
 This tab allows you to scan your Owner Wallet (EOA).
@@ -113,12 +115,12 @@ View your aggregated assets.
 Withdraw assets back to your main wallet if needed.
 
 Assets are paginated (10 items per page).
-
-⚠️ Important Note
+---
+## ⚠️ Important Note
 This application is optimized for Base Mainnet. Please ensure your wallet is connected to the Base network.
 
 If you are accessing this via a standard browser (System A/ZeroDev), please proceed with caution as this feature is currently Under Development. For the best experience, use the app as a Farcaster Frame/Mini-App.
-
+---
 ## 📄 License
 This project is licensed under the MIT License - see the LICENSE
  file for details.
