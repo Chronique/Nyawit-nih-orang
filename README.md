@@ -1,10 +1,10 @@
 # Nyawit (Dust Sweeper & Smart Vault)
-
+![License](https://img.shields.io/badge/License-MIT-green)
+[![Follow on X](https://img.shields.io/twitter/follow/adhichronique?style=social)](https://x.com/adhichronique)
 **Nyawit** is a Farcaster Mini-App built on the **Base** network. It helps users manage their crypto assets by aggregating "dust" (small token balances) into a Smart Account and providing tools to swap them into ETH or USDC efficiently.
 
 The app features a dual-system architecture that adapts to the user's environment, utilizing **ZeroDev (Kernel)** for standard web browsers and **Coinbase Smart Wallet** for a seamless Farcaster Mini-App experience.
-![License](https://img.shields.io/badge/License-MIT-green)
-[![Follow on X](https://img.shields.io/twitter/follow/adhichronique?style=social)](https://x.com/adhichronique)
+
 ![Banner](./public/banner.png)
 
 ## 🚀 Key Features
