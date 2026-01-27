@@ -1,25 +1,25 @@
 import { type WalletClient } from "viem";
 import { getCoinbaseSmartAccountClient } from "./coinbase-smart-account";
-import { getZeroDevSmartAccountClient } from "./zerodev-smart-account"; 
+// import { getZeroDevSmartAccountClient } from "./zerodev-smart-account"; // Disable dulu
 
 export const getUnifiedSmartAccountClient = async (
   walletClient: WalletClient, 
   connectorId: string | undefined,
   accountIndex: bigint = 0n
 ) => {
-  // 1. Deteksi apakah ini Coinbase Wallet (System B)
-  // ID 'coinbaseWalletSDK' biasanya dipakai oleh connector wagmi v5
-  const isCoinbaseSmartWallet = connectorId === 'coinbaseWalletSDK' || connectorId === 'coinbaseWallet';
-
-  if (isCoinbaseSmartWallet) {
-    console.log("🔀 Switcher: Detected Coinbase Smart Wallet (System B)");
-    return getCoinbaseSmartAccountClient(walletClient);
-  } 
+  // 🟢 TEMPORARY OVERRIDE:
+  // Semua wallet (Farcaster, Rabby, Metamask) dipaksa pakai Coinbase Smart Wallet Factory.
+  // Ini agar alamat Vault konsisten dan menghindari isu raw sign di ZeroDev.
   
-  // 2. Jika bukan Coinbase (misal: Metamask, Rabby, Rainbow) -> Anggap EOA
-  // Kita bungkus EOA ini dengan ZeroDev Kernel (System A)
-  else {
-    console.log("🔀 Switcher: Detected EOA/External Wallet (System A - ZeroDev)");
+  console.log("🔀 Switcher: Forcing Coinbase Smart Wallet for all connectors (Temporary)");
+  return getCoinbaseSmartAccountClient(walletClient);
+
+  /* LOGIKA LAMA (Disimpan untuk nanti)
+  const isCoinbaseSmartWallet = connectorId === 'coinbaseWalletSDK' || connectorId === 'coinbaseWallet';
+  if (isCoinbaseSmartWallet) {
+    return getCoinbaseSmartAccountClient(walletClient);
+  } else {
     return getZeroDevSmartAccountClient(walletClient);
   }
+  */
 };

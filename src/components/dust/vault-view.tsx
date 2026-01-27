@@ -111,7 +111,8 @@ export const VaultView = () => {
 
       // Pemilihan Factory Berdasarkan Mode
       if (mode === "ZERODEV") {
-          const client = await getZeroDevSmartAccountClient(walletClient);
+          // 🟢 TEMPORARY: Paksa pakai Coinbase Client
+          const client = await getCoinbaseSmartAccountClient(walletClient);
           addr = client.account.address;
       } else {
           const client = await getCoinbaseSmartAccountClient(walletClient);

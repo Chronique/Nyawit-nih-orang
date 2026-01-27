@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useAccount, useWalletClient } from "wagmi"; 
-// [FIX] Hapus 'Switch' dari import karena tidak ada di library
 import { Copy, Refresh, WarningTriangle, Cube, Wallet } from "iconoir-react";
 
+// ZeroDev import di-disable atau tidak dipakai di logic bawah
 import { getZeroDevSmartAccountClient, publicClient as zeroDevPublicClient } from "~/lib/zerodev-smart-account";
 import { getCoinbaseSmartAccountClient, coinbasePublicClient } from "~/lib/coinbase-smart-account";
 import { useFrameContext } from "~/components/providers/frame-provider";
@@ -18,20 +18,17 @@ export const DustDepositView = () => {
   const { connector } = useAccount(); 
   const frameContext = useFrameContext();
   
-  // State untuk data vault
   const [vaultAddress, setVaultAddress] = useState<string | null>(null);
   const [vaultBalance, setVaultBalance] = useState<bigint>(0n);
   const [isDeployed, setIsDeployed] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // --- 1. DETEKSI SISTEM (MODE) ---
   const [mode, setMode] = useState<"COINBASE" | "ZERODEV">("ZERODEV");
 
   useEffect(() => {
     if (frameContext?.isInMiniApp) {
         setMode("COINBASE");
     } else {
-        // Deteksi Coinbase Wallet extension
         if (connector?.id === 'coinbaseWalletSDK' || connector?.id === 'coinbaseWallet') {
             setMode("COINBASE");
         } else {
@@ -40,18 +37,21 @@ export const DustDepositView = () => {
     }
   }, [frameContext, connector?.id]);
 
-  // --- 2. FUNGSI LOAD DATA ---
   const refreshStatus = async () => {
       if (!walletClient) return;
       setLoading(true);
       try {
         let addr, code, bal;
 
+        // [UBAH DI SINI]
         if (mode === "ZERODEV") {
-            const client = await getZeroDevSmartAccountClient(walletClient);
+            // 🟢 TEMPORARY: Mode ZeroDev dialihkan ke Coinbase Smart Wallet
+            // agar vault address SAMA dengan Farcaster dan bypass isu raw sign.
+            const client = await getCoinbaseSmartAccountClient(walletClient);
             addr = client.account.address;
-            code = await zeroDevPublicClient.getBytecode({ address: addr });
-            bal = await zeroDevPublicClient.getBalance({ address: addr });
+            // Gunakan coinbasePublicClient karena kita pakai factory coinbase
+            code = await coinbasePublicClient.getBytecode({ address: addr });
+            bal = await coinbasePublicClient.getBalance({ address: addr });
         } else {
             const client = await getCoinbaseSmartAccountClient(walletClient);
             addr = client.account.address;
@@ -67,14 +67,12 @@ export const DustDepositView = () => {
       finally { setLoading(false); }
   };
 
-  // --- 3. EFFECT UPDATE DATA ---
   useEffect(() => {
     if (walletClient) {
         refreshStatus();
     }
   }, [walletClient, mode]); 
 
-  // --- 4. CONDITIONAL RENDERING (LOADING STATE) ---
   if (!frameContext) {
     return (
       <div className="max-w-md mx-auto py-20 text-center space-y-4">
@@ -86,24 +84,23 @@ export const DustDepositView = () => {
 
   const { isInMiniApp } = frameContext;
 
-  // --- 5. RENDER UTAMA ---
   return (
     <div className="max-w-md mx-auto pb-24">
        
-       {/* WARNING KHUSUS SYSTEM A (ZeroDev) */}
+       {/* WARNING KHUSUS SYSTEM A (Sekarang dialihkan ke Coinbase) */}
        {!isInMiniApp && mode === "ZERODEV" && (
          <div className="bg-orange-500/10 border border-orange-500 text-orange-600 dark:text-orange-400 p-3 rounded-xl mb-4 flex items-start gap-3 text-xs">
             <WarningTriangle className="w-5 h-5 shrink-0" />
             <div>
-               <strong>ZeroDev Vault Active.</strong><br/>
-               If you want to see your Farcaster funds, switch to System B below.
+               <strong>Using System A (External Wallet).</strong><br/>
+               Vault is synced with Farcaster (via Coinbase Infra).<br/>
+               <span className="opacity-70 font-mono text-[10px]">ZeroDev disabled temporarily due to sign issues.</span>
             </div>
          </div>
        )}
 
        {/* HEADER & SWITCHER */}
        <div className="text-center mb-6">
-          {/* SWITCHER MANUAL (Hanya muncul jika BUKAN di MiniApp) */}
           {!isInMiniApp && (
               <div className="flex justify-center mb-4">
                   <div className="bg-zinc-100 dark:bg-zinc-900 p-1 rounded-lg flex text-[10px] font-bold border border-zinc-200 dark:border-zinc-800">
@@ -124,7 +121,7 @@ export const DustDepositView = () => {
           )}
 
           <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
-            Active Vault Address ({mode})
+            Active Vault Address ({mode === "ZERODEV" ? "Sys A" : "Sys B"})
           </div>
           <div className="text-2xl font-mono font-bold flex justify-center items-center gap-2">
              {loading ? <Refresh className="w-5 h-5 animate-spin"/> : (vaultAddress ? (vaultAddress.slice(0,6) + "..." + vaultAddress.slice(-4)) : "...")}
@@ -132,46 +129,25 @@ export const DustDepositView = () => {
           </div>
        </div>
 
-       {/* --- KONTEN --- */}
-       
-       {mode === "COINBASE" ? (
-           // SYSTEM B (Coinbase Smart Wallet)
-           <div className="animate-in fade-in duration-300">
-               <SimpleAccountDeposit 
-                  vaultAddress={vaultAddress} 
-                  isDeployed={isDeployed} 
-                  onUpdate={refreshStatus} 
-               />
-               
-               {vaultAddress && isDeployed && (
-                   <SmartAccountDeposit 
-                      vaultAddress={vaultAddress} 
-                      isDeployed={isDeployed} 
-                      balance={vaultBalance}
-                      onUpdate={refreshStatus}
-                      systemType="COINBASE"
-                   />
-               )}
-           </div>
-       ) : (
-           // SYSTEM A (ZeroDev Kernel)
-           <div className="animate-in fade-in duration-300">
-             <div className="p-4 bg-zinc-800/50 rounded-xl mb-4 border border-zinc-700 text-center text-xs text-zinc-400">
-                Mode: ZeroDev Kernel (System A).<br/>
-                Deposit here to use ZeroDev infrastructure.
-             </div>
-             
-             {vaultAddress && (
+       {/* KONTEN */}
+       {/* Karena kedua mode sekarang pakai Coinbase, kita bisa sederhanakan render-nya atau biarkan struktur ini */}
+       <div className="animate-in fade-in duration-300">
+           <SimpleAccountDeposit 
+              vaultAddress={vaultAddress} 
+              isDeployed={isDeployed} 
+              onUpdate={refreshStatus} 
+           />
+           
+           {vaultAddress && isDeployed && (
                <SmartAccountDeposit 
                   vaultAddress={vaultAddress} 
                   isDeployed={isDeployed} 
                   balance={vaultBalance}
                   onUpdate={refreshStatus}
-                  systemType="ZERODEV"
+                  systemType="COINBASE" // Paksa tipe ke COINBASE di komponen internal
                />
-             )}
-           </div>
-       )}
+           )}
+       </div>
 
        <TokenList address={vaultAddress} />
 
