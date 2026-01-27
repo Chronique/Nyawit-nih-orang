@@ -159,7 +159,7 @@ export const VaultView = () => {
         
         setOwnerTokens(activeTokens);
     } catch (e) {
-        console.error("Gagal fetch Moralis:", e);
+        console.error("Failed to fetch Moralis:", e);
     } finally {
         setLoadingOwnerTokens(false);
     }

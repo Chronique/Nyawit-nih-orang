@@ -42,7 +42,7 @@ export const TokenList = ({ address }: { address: string | null }) => {
       {/* Header */}
       <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950">
         <h3 className="text-sm font-bold text-zinc-300 flex items-center gap-2">
-          <Coins className="w-4 h-4 text-yellow-500"/> Aset di Vault
+          <Coins className="w-4 h-4 text-yellow-500"/> Assets in the Vault
         </h3>
         <button 
           onClick={fetchTokens} 
@@ -58,7 +58,7 @@ export const TokenList = ({ address }: { address: string | null }) => {
         {loading ? (
             <div className="p-8 text-center text-xs text-zinc-500 animate-pulse">Scanning Blockchain...</div>
         ) : tokens.length === 0 ? (
-            <div className="p-8 text-center text-xs text-zinc-500">Tidak ada token (ETH only)</div>
+            <div className="p-8 text-center text-xs text-zinc-500">No tokens (ETH only)</div>
         ) : (
             <div className="space-y-1">
                 {tokens.map((token, idx) => (

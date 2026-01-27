@@ -42,7 +42,7 @@ export const SmartAccountDeposit = ({
     }
     
     if (parseEther(amount) > balance) {
-        setToast({ msg: "Saldo Kurang!", type: "error" });
+        setToast({ msg: "Insufficient Balance!", type: "error" });
         return;
     }
 
@@ -80,7 +80,7 @@ export const SmartAccountDeposit = ({
       const realTxHash = receipt.receipt.transactionHash;
       
       setTxHash(realTxHash); 
-      setToast({ msg: "Withdraw Sukses! 💸", type: "success" });
+      setToast({ msg: "Withdraw success! 💸", type: "success" });
       setAmount("");
       onUpdate();
     } catch (e: any) {
@@ -118,7 +118,7 @@ export const SmartAccountDeposit = ({
          
          {txHash && (
              <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer" className="block text-center text-xs text-blue-600 hover:underline bg-white/50 p-2 rounded border border-blue-100 flex items-center justify-center gap-1">
-                <Globe className="w-3 h-3"/> Lihat di BaseScan
+                <Globe className="w-3 h-3"/> See on BaseScan
              </a>
          )}
       </div>

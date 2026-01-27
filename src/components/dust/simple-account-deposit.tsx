@@ -59,11 +59,11 @@ export const SimpleAccountDeposit = ({ vaultAddress, isDeployed, onUpdate }: { v
         value: parseEther(amount),
         chainId: base.id
       });
-      setToast({ msg: "Deposit Sukses! 💰", type: "success" });
+      setToast({ msg: "Deposit success! 💰", type: "success" });
       setAmount("");
       onUpdate();
     } catch (e: any) {
-      setToast({ msg: "Deposit Gagal", type: "error" });
+      setToast({ msg: "Deposit Failed", type: "error" });
     } finally { setLoading(false); }
   };
 
@@ -72,7 +72,7 @@ export const SimpleAccountDeposit = ({ vaultAddress, isDeployed, onUpdate }: { v
       <SimpleToast message={toast?.msg ?? null} type={toast?.type ?? undefined} onClose={() => setToast(null)} />
       
       <div className="flex justify-between items-start mb-2">
-         <div className="text-xs text-zinc-400 flex items-center gap-2"><Wallet className="w-4 h-4"/> Sistem B: Coinbase Controls</div>
+         <div className="text-xs text-zinc-400 flex items-center gap-2"><Wallet className="w-4 h-4"/> System B: Coinbase Controls</div>
          {!isDeployed && <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-[10px] rounded border border-yellow-500/50">Inactive</span>}
       </div>
       

@@ -226,7 +226,7 @@ export const SwapView = () => {
         <div className="flex items-center gap-2 text-blue-200 text-xs mb-1"><Flash className="w-3 h-3" /> 0x Powered</div>
         <h2 className="text-xl font-bold mb-2">Dust to ETH</h2>
         <div className="text-xs opacity-70 mb-2">
-            Menggunakan 0x API Aggregator untuk menukar token kecil (dust) menjadi ETH dengan rate terbaik.
+            Use the 0x API Aggregator to exchange small tokens (dust) for ETH at the best rate.
         </div>
         <div className="flex items-center justify-between mt-2"><code className="text-[10px] opacity-60 font-mono">{vaultAddress || "Connecting..."}</code></div>
       </div>
