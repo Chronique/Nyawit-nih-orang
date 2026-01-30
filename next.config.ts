@@ -1,6 +1,5 @@
 import type { NextConfig } from "next";
 
-// [FIX] Kita tidak menggunakan ': NextConfig' agar lebih fleksibel
 const nextConfig = {
   devIndicators: false,
   images: {
@@ -12,10 +11,7 @@ const nextConfig = {
     ],
   },
   
-  // [FIX] Hapus bagian 'eslint' karena sudah tidak didukung di file config ini pada Next.js 16
-  
   typescript: {
-    // Abaikan error TS saat build agar deploy tidak gagal karena library pihak ketiga
     ignoreBuildErrors: true,
   },
 
@@ -24,25 +20,16 @@ const nextConfig = {
       {
         source: "/:path*",
         headers: [
-          {
-            key: "Content-Security-Policy",
-            value: "frame-ancestors *"
-          },
-          {
-            key: "X-Frame-Options",
-            value: "SAMEORIGIN"
-          },
-          {
-            key: "Access-Control-Allow-Origin",
-            value: "*"
-          }
+          { key: "Content-Security-Policy", value: "frame-ancestors *" },
+          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          { key: "Access-Control-Allow-Origin", value: "*" }
         ]
       }
     ];
   },
 
-  // [PENTING] Konfigurasi Webpack untuk mengatasi error 'tap', 'fs', dll.
   webpack: (config: any) => {
+    // 1. Fallback untuk modul Node.js
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
@@ -57,7 +44,17 @@ const nextConfig = {
       'desm': false
     };
 
-    // Pastikan ignore-loader ada untuk membuang file test yang bandel
+    // 2. [FIX BARU] Alias modul React Native ke 'false' agar diabaikan di Web
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@react-native-async-storage/async-storage': false,
+    };
+
+    // 3. Ignore file testing
+    config.module.rules.push({
+      test: /thread-stream\/test\//,
+      use: 'ignore-loader', 
+    });
     config.module.rules.push({
       test: /\.test\.(js|ts|mjs)$/,
       use: 'ignore-loader', 
