@@ -31,6 +31,11 @@ export default async function RootLayout({
   return (
     // Tambahkan suppressHydrationWarning di sini
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Hardcoded meta tag untuk verifikasi Base Build */}
+        <meta name="base:app_id" content="6970aac385045b1333e7bae2" />
+        <meta property="base:app_id" content="6970aac385045b1333e7bae2" />
+        </head>
       <body suppressHydrationWarning>
         <Providers>{children}</Providers>
       </body>

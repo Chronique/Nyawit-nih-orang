@@ -1,39 +1,43 @@
 "use client";
 
-import { createConfig, http, WagmiProvider as WagmiProviderLib } from "wagmi";
+import { createConfig, http } from "wagmi";
 import { base } from "viem/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { coinbaseWallet, injected } from "wagmi/connectors";
+import { PrivyProvider } from "@privy-io/react-auth";
+import { WagmiProvider as PrivyWagmiConnector } from "@privy-io/wagmi";
 
-// 1. Setup Query Client
 const queryClient = new QueryClient();
 
-// 2. Setup Wagmi Config
 const wagmiConfig = createConfig({
   chains: [base],
   transports: {
     [base.id]: http(),
   },
-  connectors: [
-    // Prioritas 1: Coinbase Wallet (Untuk Base App)
-    coinbaseWallet({ 
-        appName: "Nyawit",
-        // [FIX] Sesuaikan format preference dengan tipe object yang diminta error
-        preference: {
-            options: "smartWalletOnly" 
-        } as any // Gunakan 'as any' untuk keamanan jika type definition library tidak stabil
-    }),
-    // Prioritas 2: Injected (Untuk Farcaster / Metamask / Rabby)
-    injected(),
-  ],
 });
 
 export const WagmiProvider = ({ children }: { children: React.ReactNode }) => {
   return (
-    <WagmiProviderLib config={wagmiConfig}>
+    <PrivyProvider
+      appId={process.env.NEXT_PUBLIC_PRIVY_APP_ID || ""}
+      config={{
+        appearance: {
+          theme: "dark",
+          accentColor: "#676FFF",
+          showWalletLoginFirst: false, // Utamakan social login (Farcaster)
+        },
+        embeddedWallets: {
+          ethereum: {
+            createOnLogin: "users-without-wallets", 
+          }
+        },
+        loginMethods: ["farcaster", "wallet", "email"], 
+      }}
+    >
       <QueryClientProvider client={queryClient}>
-        {children}
+        <PrivyWagmiConnector config={wagmiConfig}>
+            {children}
+        </PrivyWagmiConnector>
       </QueryClientProvider>
-    </WagmiProviderLib>
+    </PrivyProvider>
   );
 };
