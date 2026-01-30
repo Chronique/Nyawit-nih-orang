@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
-// [FIX] Hapus ': NextConfig' agar TypeScript tidak protes soal properti 'eslint'
-// Konfigurasi tetap valid secara runtime.
+// [FIX] Kita tidak menggunakan ': NextConfig' agar lebih fleksibel
 const nextConfig = {
   devIndicators: false,
   images: {
@@ -12,6 +11,14 @@ const nextConfig = {
       },
     ],
   },
+  
+  // [FIX] Hapus bagian 'eslint' karena sudah tidak didukung di file config ini pada Next.js 16
+  
+  typescript: {
+    // Abaikan error TS saat build agar deploy tidak gagal karena library pihak ketiga
+    ignoreBuildErrors: true,
+  },
+
   async headers() {
     return [
       {
@@ -34,16 +41,7 @@ const nextConfig = {
     ];
   },
 
-  // --- Konfigurasi Build ---
-  
-  typescript: {
-    ignoreBuildErrors: true,
-  },
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  
-  // Konfigurasi Webpack (PENTING untuk fix error 'tap', 'fs', dll)
+  // [PENTING] Konfigurasi Webpack untuk mengatasi error 'tap', 'fs', dll.
   webpack: (config: any) => {
     config.resolve.fallback = {
       ...config.resolve.fallback,
@@ -52,8 +50,6 @@ const nextConfig = {
       tls: false,
       child_process: false, 
       worker_threads: false,
-      
-      // Modul Testing yang menyebabkan error
       'tap': false,
       'fastbench': false,
       'why-is-node-running': false,
@@ -61,12 +57,10 @@ const nextConfig = {
       'desm': false
     };
 
-    // Pastikan rule untuk ignore file test ada
-    config.module = config.module || {};
-    config.module.rules = config.module.rules || [];
+    // Pastikan ignore-loader ada untuk membuang file test yang bandel
     config.module.rules.push({
       test: /\.test\.(js|ts|mjs)$/,
-      loader: 'ignore-loader',
+      use: 'ignore-loader', 
     });
 
     return config;
