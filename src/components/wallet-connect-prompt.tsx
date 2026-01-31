@@ -1,32 +1,17 @@
 "use client";
 
-import { useEffect } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useFrameContext } from "~/components/providers/frame-provider";
-import { Wallet } from "iconoir-react";
+import { Wallet } from "lucide-react"; // Using lucide-react for consistency
 
 export const WalletConnectPrompt = () => {
-  const { login, ready, authenticated } = usePrivy();
-  const frameContext = useFrameContext();
+  const { login, ready } = usePrivy();
 
-  // 1. Logic Login Spesifik (Prioritas Farcaster)
-  const handleLogin = () => {
-    // Jika di dalam MiniApp, paksa login Farcaster
-    if (frameContext?.isInMiniApp) {
-      login({ loginMethods: ['farcaster'] });
-    } else {
-      // Jika di browser biasa, tawarkan Farcaster dan Wallet
-      login({ loginMethods: ['farcaster', 'wallet', 'email'] });
-    }
+  // "Create Vault" logic - explicitly NOT using Farcaster login to avoid conflicts
+  const handleCreateVault = () => {
+    // We only use 'wallet' or 'email' to create the Privy vault
+    // ignoring Farcaster auth to prevent "bentrok" (clash)
+    login({ loginMethods: ['wallet', 'email'] });
   };
-
-  // 2. Logic Auto Connect (Otomatis jalan saat komponen dimuat di Farcaster)
-  useEffect(() => {
-    if (ready && !authenticated && frameContext?.isInMiniApp) {
-        console.log("🚀 Auto-login Farcaster detected...");
-        login({ loginMethods: ['farcaster'] });
-    }
-  }, [ready, authenticated, frameContext, login]);
 
   if (!ready) return (
     <div className="flex flex-col items-center justify-center py-20 text-zinc-500 animate-pulse gap-2">
@@ -42,18 +27,17 @@ export const WalletConnectPrompt = () => {
       </div>
       
       <div className="space-y-1">
-        <h3 className="text-xl font-bold">Connect to Start</h3>
+        <h3 className="text-xl font-bold">Start Your Vault</h3>
         <p className="text-zinc-500 text-sm max-w-[250px] mx-auto">
-          Login to access your Unified Smart Vault.
+          Create a secure vault to store your assets.
         </p>
       </div>
 
-      {/* [FIX] Gunakan handleLogin yang sudah kita buat di atas */}
       <button
-        onClick={handleLogin}
+        onClick={handleCreateVault}
         className="mt-4 px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2"
       >
-        Login / Connect
+        Create Vault (Privy)
       </button>
     </div>
   );

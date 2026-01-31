@@ -23,14 +23,15 @@ export const WagmiProvider = ({ children }: { children: React.ReactNode }) => {
         appearance: {
           theme: "dark",
           accentColor: "#676FFF",
-          showWalletLoginFirst: false, // Utamakan social login (Farcaster)
+          showWalletLoginFirst: true, // Show wallets first since Farcaster login is disabled
         },
         embeddedWallets: {
           ethereum: {
             createOnLogin: "users-without-wallets", 
           }
         },
-        loginMethods: ["farcaster", "wallet", "email"], 
+        // We allow email and wallet, but exclude 'farcaster' if desired to avoid conflict
+        loginMethods: ["wallet", "email"], 
       }}
     >
       <QueryClientProvider client={queryClient}>
