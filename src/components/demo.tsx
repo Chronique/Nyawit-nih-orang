@@ -2,8 +2,8 @@
 "use client";
 
 import { useState } from "react";
-import { useFrameContext } from "~/components/providers/frame-provider";
 import { useAccount } from "wagmi";
+import { useFrameContext } from "~/components/providers/frame-provider";
 
 // --- IMPORTS MAIN COMPONENTS ---
 import { DustDepositView } from "~/components/dust/deposit-view";
@@ -12,6 +12,7 @@ import { VaultView } from "~/components/dust/vault-view";
 import { TopBar } from "~/components/top-bar";
 import { WalletConnectPrompt } from "~/components/wallet-connect-prompt";
 import { BottomNavigation } from "~/components/bottom-navigation";
+import SignIn from "~/components/actions/signin"; // [PENTING] Import ini untuk Seamless View
 import { TabType } from "~/types";
 
 export default function Demo() {
@@ -19,81 +20,82 @@ export default function Demo() {
   const { isConnected } = useAccount();
   const [activeTab, setActiveTab] = useState<TabType>("deposit");
 
+  // Safe Area Insets logic
+  const safeAreaTop = (frameContext?.context as any)?.client?.safeAreaInsets?.top ?? 0;
+  const safeAreaLeft = (frameContext?.context as any)?.client?.safeAreaInsets?.left ?? 0;
+  const safeAreaRight = (frameContext?.context as any)?.client?.safeAreaInsets?.right ?? 0;
+
   return (
-    <div style={{ 
-      marginTop: (frameContext?.context as any)?.client?.safeAreaInsets?.top ?? 0,
-      marginLeft: (frameContext?.context as any)?.client?.safeAreaInsets?.left ?? 0,
-      marginRight: (frameContext?.context as any)?.client?.safeAreaInsets?.right ?? 0,
-    }}>
-      <div className="w-full max-w-lg mx-auto">
+    <div 
+      className="min-h-screen bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-50"
+      style={{ 
+        paddingTop: safeAreaTop,
+        paddingLeft: safeAreaLeft,
+        paddingRight: safeAreaRight,
+      }}
+    >
+      <div className="w-full max-w-lg mx-auto relative flex flex-col min-h-screen">
         
-        {/* --- HEADER --- */}
-        <div className="px-4 py-2">
+        {/* --- 1. HEADER (TopBar) --- */}
+        <div className="sticky top-0 z-20 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-md px-4 py-3 border-b border-zinc-100 dark:border-zinc-800/50">
           <TopBar />
         </div>
 
         {/* --- MAIN CONTENT AREA --- */}
-        <div className="px-4 pb-28">
+        <main className="flex-1 px-4 py-6 pb-28 space-y-6">
+          
+          {/* --- 2. SEAMLESS LAYER (Profil Farcaster) --- */}
+          {/* Ini akan SELALU muncul, membuat user merasa "di dalam app" */}
+          <SignIn />
+
+          {/* --- 3. GATEKEEPER LOGIC --- */}
           {!isConnected ? (
-            <WalletConnectPrompt />
+            // A. BELUM LOGIN WALLET/EMAIL -> Tampilkan Prompt
+            <div className="flex flex-col items-center justify-center min-h-[40vh] animate-in fade-in zoom-in duration-500">
+               <WalletConnectPrompt />
+            </div>
           ) : (
-            <>
-              {/* --- CONTENT BASED ON ACTIVE TAB --- */}
+            // B. SUDAH LOGIN -> Tampilkan Fitur Dust (Alamat Wallet Aman Disini)
+            <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
               
-              {/* TAB 1: DEPOSIT (Scan EOA & Send to Vault) */}
-              {activeTab === "deposit" && (
-                <div className="animate-in fade-in zoom-in-95 duration-300">
-                  <div className="mb-4 pl-1">
-                    <h2 className="text-xl font-bold bg-gradient-to-r from-zinc-800 to-zinc-500 bg-clip-text text-transparent dark:from-white dark:to-zinc-400">
+              {/* HEADER SECTION FOR TABS */}
+              <div className="mb-6 space-y-1">
+                {activeTab === "deposit" && (
+                  <>
+                    <h2 className="text-2xl font-bold bg-gradient-to-br from-zinc-900 to-zinc-600 bg-clip-text text-transparent dark:from-white dark:to-zinc-400">
                       Deposit Dust
                     </h2>
-                    <p className="text-xs text-zinc-500 font-medium">
-                      Scan your wallet and move dust tokens to your Vault.
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      Scan wallet & move dust to Vault.
                     </p>
-                  </div>
-                  <DustDepositView />
-                </div>
-              )}
+                  </>
+                )}
+                {/* ... (Header tab lain sama seperti sebelumnya) ... */}
+              </div>
 
-              {/* TAB 2: SWAP (Execute Aerodrome Smart Router) */}
-              {activeTab === "swap" && (
-                <div className="animate-in fade-in zoom-in-95 duration-300">
-                  <div className="mb-4 pl-1">
-                    <h2 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                      Sweep & Swap
-                    </h2>
-                    <p className="text-xs text-zinc-500 font-medium">
-                      Convert all vault assets into USDC or ETH.
-                    </p>
-                  </div>
-                  <SwapView /> 
-                </div>
-               )}    
+              {/* TAB CONTENT */}
+              <div className="relative">
+                {activeTab === "deposit" && <DustDepositView />}
+                {activeTab === "swap" && <SwapView />}
+                {activeTab === "vault" && <VaultView />}
+              </div>
 
-              {/* TAB 3: VAULT (View Vault Assets) */}
-              {activeTab === "vault" && (
-                <div className="animate-in fade-in zoom-in-95 duration-300">
-                  <div className="mb-4 pl-1">
-                    <h2 className="text-xl font-bold bg-gradient-to-r from-yellow-600 to-orange-600 bg-clip-text text-transparent">
-                      My Vault
-                    </h2>
-                    <p className="text-xs text-zinc-500 font-medium">
-                      Assets securely stored in your Smart Account.
-                    </p>
-                  </div>
-                  <VaultView />
-                </div>
-              )}
-            </>
+            </div>
           )}
-        </div>
+        </main>
 
-        {/* --- BOTTOM NAVIGATION --- */}
-        {/* Wrapper dihapus karena BottomNavigation sudah mengatur posisi fixed sendiri */}
-        <BottomNavigation 
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-        />
+        {/* --- 4. BOTTOM NAVIGATION --- */}
+        {/* Hanya muncul jika wallet connect */}
+        {isConnected && (
+          <div className="fixed bottom-0 left-0 right-0 z-30 flex justify-center pb-safe-area">
+             <div className="w-full max-w-lg">
+                <BottomNavigation 
+                  activeTab={activeTab}
+                  onTabChange={setActiveTab}
+                />
+             </div>
+          </div>
+        )}
 
       </div>
     </div>
