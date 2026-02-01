@@ -3,7 +3,9 @@
 
 import { useState } from "react";
 import { useAccount } from "wagmi";
+import { usePrivy } from "@privy-io/react-auth"; // [IMPORT] usePrivy untuk logout
 import { useFrameContext } from "~/components/providers/frame-provider";
+import { LogOut } from "lucide-react"; // [IMPORT] Ikon Disconnect
 
 // --- IMPORTS MAIN COMPONENTS ---
 import { DustDepositView } from "~/components/dust/deposit-view";
@@ -12,12 +14,16 @@ import { VaultView } from "~/components/dust/vault-view";
 import { TopBar } from "~/components/top-bar";
 import { WalletConnectPrompt } from "~/components/wallet-connect-prompt";
 import { BottomNavigation } from "~/components/bottom-navigation";
-import SignIn from "~/components/actions/signin"; // [PENTING] Import ini untuk Seamless View
+import { Button } from "~/components/ui/button"; // [IMPORT] Button UI
 import { TabType } from "~/types";
+
+// [FIX] HAPUS SignIn karena "Welcome FID" & "Close MiniApp" dibuang
+// import SignIn from "~/components/actions/signin"; 
 
 export default function Demo() {
   const frameContext = useFrameContext();
   const { isConnected } = useAccount();
+  const { logout } = usePrivy(); // [LOGIC] Ambil fungsi logout
   const [activeTab, setActiveTab] = useState<TabType>("deposit");
 
   // Safe Area Insets logic
@@ -44,19 +50,30 @@ export default function Demo() {
         {/* --- MAIN CONTENT AREA --- */}
         <main className="flex-1 px-4 py-6 pb-28 space-y-6">
           
-          {/* --- 2. SEAMLESS LAYER (Profil Farcaster) --- */}
-          {/* Ini akan SELALU muncul, membuat user merasa "di dalam app" */}
-          <SignIn />
+          {/* [FIX] "Seamless" (SignIn) layer sudah dihapus. */}
 
-          {/* --- 3. GATEKEEPER LOGIC --- */}
+          {/* --- 2. GATEKEEPER LOGIC --- */}
           {!isConnected ? (
             // A. BELUM LOGIN WALLET/EMAIL -> Tampilkan Prompt
             <div className="flex flex-col items-center justify-center min-h-[40vh] animate-in fade-in zoom-in duration-500">
                <WalletConnectPrompt />
             </div>
           ) : (
-            // B. SUDAH LOGIN -> Tampilkan Fitur Dust (Alamat Wallet Aman Disini)
+            // B. SUDAH LOGIN -> Tampilkan Fitur Dust
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+              
+              {/* [NEW] TOMBOL DISCONNECT (Pengganti Close MiniApp) */}
+              <div className="flex justify-end mb-4">
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={logout}
+                  className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 gap-2 px-2"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span className="text-xs font-semibold">Disconnect</span>
+                </Button>
+              </div>
               
               {/* HEADER SECTION FOR TABS */}
               <div className="mb-6 space-y-1">
@@ -70,7 +87,28 @@ export default function Demo() {
                     </p>
                   </>
                 )}
-                {/* ... (Header tab lain sama seperti sebelumnya) ... */}
+                
+                {activeTab === "swap" && (
+                  <>
+                    <h2 className="text-2xl font-bold bg-gradient-to-br from-blue-600 to-violet-600 bg-clip-text text-transparent">
+                      Sweep & Swap
+                    </h2>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      Convert assets to USDC or ETH.
+                    </p>
+                  </>
+                )}
+
+                {activeTab === "vault" && (
+                  <>
+                    <h2 className="text-2xl font-bold bg-gradient-to-br from-amber-500 to-orange-600 bg-clip-text text-transparent">
+                      My Vault
+                    </h2>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      Secure Smart Account Storage.
+                    </p>
+                  </>
+                )}
               </div>
 
               {/* TAB CONTENT */}
@@ -84,8 +122,7 @@ export default function Demo() {
           )}
         </main>
 
-        {/* --- 4. BOTTOM NAVIGATION --- */}
-        {/* Hanya muncul jika wallet connect */}
+        {/* --- 3. BOTTOM NAVIGATION --- */}
         {isConnected && (
           <div className="fixed bottom-0 left-0 right-0 z-30 flex justify-center pb-safe-area">
              <div className="w-full max-w-lg">
