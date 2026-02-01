@@ -5,12 +5,11 @@ import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher"; 
 import { alchemy } from "~/lib/alchemy";
 import { fetchTokenPrices } from "~/lib/price";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, type Hex } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, type Hex, parseUnits } from "viem";
 import { base } from "viem/chains"; 
-import { Refresh, Flash, ArrowRight, Check, Wallet, WarningCircle } from "iconoir-react";
+import { Refresh, Flash, ArrowRight, Check, Wallet, WarningCircle, Settings } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// Interface untuk Data Token
 interface TokenData {
   contractAddress: string;
   symbol: string;
@@ -23,236 +22,297 @@ interface TokenData {
 }
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
-const WETH_ADDRESS = "0x4200000000000000000000000000000000000006"; // 0x swap ke ETH biasanya via WETH unwrap atau native
+const WETH_ADDRESS = "0x4200000000000000000000000000000000000006"; 
+const LIFI_API_URL = "https://li.quest/v1";
+
+// [FIX] KONFIGURASI FEE
+const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524"; // Wallet Anda
+const FEE_PERCENTAGE = "0.05"; // 5%
 
 const TokenLogo = ({ token }: { token: any }) => {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => { setSrc(token.logo || null); }, [token]);
-  const sources = [token.logo, `https://tokens.1inch.io/${token.contractAddress}.png`].filter(Boolean);
-  
-  return (
-    <img 
-      src={src || sources[0] || "https://via.placeholder.com/32"} 
-      className="w-full h-full object-cover" 
-      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} 
-    />
-  );
+    const [src, setSrc] = useState<string | null>(null);
+    useEffect(() => { setSrc(token.logo || null); }, [token]);
+    const sources = [token.logo, `https://tokens.1inch.io/${token.contractAddress}.png`].filter(Boolean);
+    return <img src={src || sources[0] || "https://via.placeholder.com/30"} className="w-8 h-8 rounded-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />;
 };
 
 export const SwapView = () => {
   const { data: walletClient } = useWalletClient();
-  const { address: ownerAddress, connector, chainId } = useAccount(); 
+  const { address: ownerAddress, chainId } = useAccount(); 
   const { switchChainAsync } = useSwitchChain();
-  
-  const [vaultAddress, setVaultAddress] = useState<string | null>(null);
-  const [accountType, setAccountType] = useState<string>("Detecting...");
-  
-  const [tokens, setTokens] = useState<TokenData[]>([]);
-  const [loading, setLoading] = useState(false); 
-  const [actionLoading, setActionLoading] = useState<string | null>(null); 
-  const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
-  const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
 
-  // 1. FETCH VAULT DATA + PRICE
-  const fetchVaultData = async () => {
+  const [tokens, setTokens] = useState<TokenData[]>([]);
+  const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+  const [swapping, setSwapping] = useState(false);
+  const [swapProgress, setSwapProgress] = useState<string>(""); 
+  const [toast, setToast] = useState<{ msg: string, type: "success" | "error" } | null>(null);
+  const [useLifiFallback, setUseLifiFallback] = useState(true);
+
+  const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
-
     try {
-      const client = await getUnifiedSmartAccountClient(walletClient, connector?.id, 0n);
-      if (!client.account) return;
-      setVaultAddress(client.account.address);
+        const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+        const vaultAddr = client.account.address;
+        
+        const balances = await alchemy.core.getTokenBalances(vaultAddr);
+        const nonZeroTokens = balances.tokenBalances.filter(t => {
+             const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
+             return !isUSDC && BigInt(t.tokenBalance || "0") > 0n;
+        });
 
-      // @ts-ignore
-      const isCSW = client.account.source === "coinbaseSmartAccount" || client.account.type === "coinbaseSmartAccount";
-      setAccountType(isCSW ? "Coinbase Smart Wallet" : "Simple Account (EOA)");
+        if (nonZeroTokens.length === 0) {
+            setTokens([]);
+            return;
+        }
 
-      // A. Ambil Saldo (Alchemy)
-      const balances = await alchemy.core.getTokenBalances(client.account.address);
-      const nonZeroTokens = balances.tokenBalances.filter(t => t.tokenBalance && BigInt(t.tokenBalance) > 0n);
-      const metadata = await Promise.all(nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress)));
-      
-      const rawTokens = nonZeroTokens.map((t, i) => {
-          const meta = metadata[i];
-          return {
-              contractAddress: t.contractAddress,
-              symbol: meta.symbol || "UNKNOWN",
-              logo: meta.logo || null,
-              decimals: meta.decimals || 18,
-              rawBalance: t.tokenBalance || "0",
-              formattedBal: formatUnits(BigInt(t.tokenBalance || 0), meta.decimals || 18)
-          };
-      });
+        const metadata = await Promise.all(nonZeroTokens.map(t => alchemy.core.getTokenMetadata(t.contractAddress)));
+        const addresses = nonZeroTokens.map(t => t.contractAddress);
+        const prices = await fetchTokenPrices(addresses);
 
-      // B. Ambil Harga (GeckoTerminal)
-      const addresses = rawTokens.map(t => t.contractAddress);
-      const prices = await fetchTokenPrices(addresses);
+        const formatted: TokenData[] = nonZeroTokens.map((t, i) => {
+             const meta = metadata[i];
+             const decimals = meta.decimals || 18;
+             const rawBal = t.tokenBalance || "0";
+             const fmtBal = formatUnits(BigInt(rawBal), decimals);
+             const price = prices[t.contractAddress.toLowerCase()] || 0;
+             
+             return {
+                 contractAddress: t.contractAddress,
+                 symbol: meta.symbol || "UNKNOWN",
+                 logo: meta.logo || null,
+                 decimals: decimals,
+                 rawBalance: rawBal,
+                 formattedBal: fmtBal,
+                 priceUsd: price,
+                 valueUsd: parseFloat(fmtBal) * price
+             };
+        });
 
-      // C. Filter & Hitung Value
-      const liquidTokens = rawTokens.filter(t => {
-          const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
-          const price = prices[t.contractAddress.toLowerCase()];
-          // Tampilkan jika BUKAN USDC dan Punya Harga (bisa dijual)
-          return !isUSDC && (price && price > 0);
-      }).map(t => ({
-          ...t,
-          priceUsd: prices[t.contractAddress.toLowerCase()] || 0,
-          valueUsd: (prices[t.contractAddress.toLowerCase()] || 0) * parseFloat(t.formattedBal)
-      }));
+        const validDust = formatted.filter(t => t.valueUsd > 0.000001); 
+        validDust.sort((a, b) => b.valueUsd - a.valueUsd); 
 
-      // Sort: Value Tertinggi ke Terendah
-      liquidTokens.sort((a, b) => b.valueUsd - a.valueUsd);
-      setTokens(liquidTokens);
+        setTokens(validDust);
 
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
-  useEffect(() => { if(walletClient) fetchVaultData(); }, [walletClient, connector?.id]); 
+  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient]);
 
-  const toggleSelect = (addr: string) => {
+  const toggleToken = (addr: string) => {
       const newSet = new Set(selectedTokens);
-      if (newSet.has(addr)) newSet.delete(addr); else newSet.add(addr);
+      if (newSet.has(addr)) newSet.delete(addr);
+      else newSet.add(addr);
       setSelectedTokens(newSet);
   };
 
-  const toggleSelectAll = () => setSelectedTokens(selectedTokens.size === tokens.length ? new Set() : new Set(tokens.map(t => t.contractAddress)));
+  const selectAll = () => {
+      if (selectedTokens.size === tokens.length) setSelectedTokens(new Set());
+      else setSelectedTokens(new Set(tokens.map(t => t.contractAddress)));
+  };
 
-  // 🔥 0x SWAP LOGIC 🔥
-  const get0xQuote = async (sellToken: string, sellAmount: string) => {
+  // --- 1. Get 0x Quote (DENGAN FEE) ---
+  const getZeroExQuote = async (token: TokenData, amount: string) => {
       const params = new URLSearchParams({
-          chainId: "8453", // Base Chain ID
-          sellToken: sellToken,
-          buyToken: "ETH", // Target ETH
-          sellAmount: sellAmount,
-          slippagePercentage: "0.05" // 5% slippage (aman untuk dust)
+          chainId: "8453", 
+          sellToken: token.contractAddress,
+          buyToken: WETH_ADDRESS, 
+          sellAmount: amount,
+          // [FIX] Masukkan Parameter Fee di sini
+          feeRecipient: FEE_RECIPIENT, 
+          buyTokenPercentageFee: FEE_PERCENTAGE // 0.05 = 5%
+      });
+      const res = await fetch(`/api/0x/quote?${params}`);
+      if (!res.ok) throw new Error("0x No Route");
+      return await res.json();
+  };
+
+  // --- 2. Get LI.FI Quote (Fallback) ---
+  const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
+      const params = new URLSearchParams({
+          fromChain: "8453",
+          toChain: "8453",
+          fromToken: token.contractAddress,
+          toToken: WETH_ADDRESS, 
+          fromAmount: amount,
+          fromAddress: fromAddress,
+          // fee: FEE_PERCENTAGE // LI.FI butuh integrator ID utk fee, kita coba pasang siapa tau jalan
       });
 
-      const res = await fetch(`/api/0x/quote?${params.toString()}`);
-      if (!res.ok) throw new Error("Gagal mengambil quote 0x");
+      const res = await fetch(`${LIFI_API_URL}/quote?${params}`);
+      if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.message || "LI.FI No Route");
+      }
       return await res.json();
   };
 
   const handleBatchSwap = async () => {
-    if (!vaultAddress || selectedTokens.size === 0) return;
-    if (!window.confirm(`Swap ${selectedTokens.size} assets to ETH using 0x API?`)) return;
+      if (!walletClient || selectedTokens.size === 0) return;
+      setSwapping(true);
+      setSwapProgress("Initializing...");
 
-    try {
-        if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-        
-        setActionLoading("Fetching 0x Quotes...");
-        const client = await getUnifiedSmartAccountClient(walletClient!, connector?.id, 0n);
+      try {
+          if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
+          const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+          const vaultAddress = client.account.address;
 
-        const batchCalls: { to: Address; value: bigint; data: Hex }[] = [];
-        
-        // Loop token yang dipilih & Ambil Quote secara Paralel (hati-hati rate limit)
-        // Kita proses chunking kecil agar aman
-        const selectedList = tokens.filter(t => selectedTokens.has(t.contractAddress));
-        
-        for (const token of selectedList) {
-            setActionLoading(`Quoting ${token.symbol}...`);
-            
-            try {
-                // 1. Get Quote
-                const quote = await get0xQuote(token.contractAddress, token.rawBalance);
-                
-                // 2. Cek apakah perlu Approve?
-                // 0x API mengembalikan 'allowanceTarget'
-                if (quote.allowanceTarget) {
-                    batchCalls.push({
-                        to: token.contractAddress as Address,
-                        value: 0n,
-                        data: encodeFunctionData({ 
-                            abi: erc20Abi, 
-                            functionName: "approve", 
-                            args: [quote.allowanceTarget as Address, BigInt(token.rawBalance)] 
-                        })
-                    });
-                }
+          const batchCalls: any[] = [];
+          const tokensToSwap = tokens.filter(t => selectedTokens.has(t.contractAddress));
+          
+          let successCount = 0;
+          let failCount = 0;
 
-                // 3. Masukkan Transaksi Swap
-                batchCalls.push({
-                    to: quote.to as Address,
-                    value: BigInt(quote.value || 0),
-                    data: quote.data as Hex
-                });
+          for (const token of tokensToSwap) {
+              setSwapProgress(`Routing ${token.symbol}...`);
+              
+              try {
+                  let txData = null;
+                  let toAddress = null;
+                  let value = 0n;
 
-                // Delay dikit biar gak kena rate limit API 0x (Free tier)
-                await new Promise(r => setTimeout(r, 200));
+                  // A. COBA 0x (Prioritas karena support fee)
+                  try {
+                      console.log(`Trying 0x for ${token.symbol}...`);
+                      const quote0x = await getZeroExQuote(token, token.rawBalance);
+                      txData = quote0x.transaction.data;
+                      toAddress = quote0x.transaction.to;
+                      value = BigInt(quote0x.transaction.value || 0);
+                      console.log(`✅ 0x Route Found for ${token.symbol}`);
+                  } catch (err0x) {
+                      console.warn(`0x failed for ${token.symbol}, trying LI.FI...`);
+                      
+                      // B. FALLBACK LI.FI
+                      if (useLifiFallback) {
+                          const quoteLifi = await getLifiQuote(token, token.rawBalance, vaultAddress);
+                          txData = quoteLifi.transactionRequest.data;
+                          toAddress = quoteLifi.transactionRequest.to;
+                          value = BigInt(quoteLifi.transactionRequest.value || 0);
+                          console.log(`✅ LI.FI Route Found for ${token.symbol}`);
+                      } else {
+                          throw err0x; 
+                      }
+                  }
 
-            } catch (err) {
-                console.error(`Skip ${token.symbol} error:`, err);
-                setToast({ msg: `Skipped ${token.symbol}: No Liquidity/Error`, type: "error" });
-            }
-        }
+                  if (txData && toAddress) {
+                      const approveData = encodeFunctionData({
+                          abi: erc20Abi,
+                          functionName: "approve",
+                          args: [toAddress as Address, BigInt(token.rawBalance)]
+                      });
+                      
+                      batchCalls.push({
+                          to: token.contractAddress as Address,
+                          value: 0n,
+                          data: approveData
+                      });
 
-        if (batchCalls.length === 0) {
-            throw new Error("No valid quotes generated.");
-        }
+                      batchCalls.push({
+                          to: toAddress as Address,
+                          value: value,
+                          data: txData
+                      });
+                      
+                      successCount++;
+                  }
 
-        setActionLoading(`Signing (${batchCalls.length / 2} Swaps)...`);
+              } catch (e) {
+                  console.error(`Failed routing ${token.symbol}:`, e);
+                  failCount++;
+              }
+          }
 
-        // 4. KIRIM SEMUA SEBAGAI 1 UserOp (Atomik!)
-        const userOpHash = await client.sendUserOperation({
-            account: client.account!,
-            calls: batchCalls
-        });
+          if (batchCalls.length === 0) {
+              setToast({ msg: "No routes found for selected tokens. Try later.", type: "error" });
+              setSwapping(false);
+              return;
+          }
 
-        console.log("UserOp Hash:", userOpHash);
-        setActionLoading("Executing On-Chain...");
+          setSwapProgress(`Signing Batch Swap (${successCount} Assets)...`);
+          
+          const txHash = await client.sendUserOperation({
+              account: client.account!,
+              calls: batchCalls
+          });
 
-        const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
-        if (!receipt.success) throw new Error("Transaction Reverted");
+          console.log("Batch Swap UserOp:", txHash);
+          setSwapProgress("Transaction Sent! Waiting...");
+          
+          await client.waitForUserOperationReceipt({ hash: txHash });
+          
+          setToast({ msg: `Swapped ${successCount} assets to ETH!`, type: "success" });
+          await new Promise(r => setTimeout(r, 2000));
+          await loadDustTokens(); 
+          setSelectedTokens(new Set()); 
 
-        setTokens(prev => prev.filter(t => !selectedTokens.has(t.contractAddress)));
-        setSelectedTokens(new Set()); 
-        setToast({ msg: "All Swaps Success! 🚀", type: "success" });
-
-    } catch (e: any) {
-        console.error("SWAP ERROR:", e);
-        setToast({ msg: "Failed: " + (e.message || "Unknown error"), type: "error" });
-    } finally {
-        setActionLoading(null);
-    }
+      } catch (e: any) {
+          console.error(e);
+          setToast({ msg: "Swap Error: " + (e.shortMessage || e.message), type: "error" });
+      } finally {
+          setSwapping(false);
+          setSwapProgress("");
+      }
   };
 
   return (
-    <div className="pb-32 relative min-h-[50vh] p-4">
+    <div className="pb-32 space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
-      {actionLoading && ( <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm"><div className="bg-white dark:bg-zinc-900 p-6 rounded-2xl flex flex-col items-center gap-4"><div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div><div className="font-bold text-blue-600 animate-pulse">{actionLoading}</div></div></div> )}
 
-      {/* HEADER CARD */}
-      <div className="p-5 bg-gradient-to-br from-blue-900 to-indigo-900 text-white rounded-2xl shadow-lg mb-6 relative overflow-hidden">
-        <div className="absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border border-white/20 bg-black/20 font-medium flex items-center gap-1"><Wallet className="w-3 h-3" /> {accountType}</div>
-        <div className="flex items-center gap-2 text-blue-200 text-xs mb-1"><Flash className="w-3 h-3" /> 0x Powered</div>
-        <h2 className="text-xl font-bold mb-2">Dust to ETH</h2>
-        <div className="text-xs opacity-70 mb-2">
-            Use the 0x API Aggregator to exchange small tokens (dust) for ETH at the best rate.
-        </div>
-        <div className="flex items-center justify-between mt-2"><code className="text-[10px] opacity-60 font-mono">{vaultAddress || "Connecting..."}</code></div>
-      </div>
-
-      {/* LIST HEADER */}
-      <div className="flex items-center justify-between px-1 mb-2">
-        <div className="flex items-center gap-3">
-            <h3 className="font-semibold text-zinc-700 dark:text-zinc-300">Liquid Assets ({tokens.length})</h3>
-            {tokens.length > 0 && ( <button onClick={toggleSelectAll} className="text-xs font-bold text-blue-600 hover:text-blue-700">{selectedTokens.size === tokens.length ? "Deselect All" : "Select All"}</button> )}
-        </div>
-        <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500"><Refresh className="w-4 h-4 text-zinc-500" /></button>
+      {/* HEADER INFO */}
+      <div className="bg-gradient-to-r from-blue-900/40 to-purple-900/40 border border-blue-500/20 rounded-2xl p-4 flex items-center justify-between">
+         <div>
+             <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                 <Flash className="w-4 h-4 text-yellow-400" fill="currentColor"/> Aggregator Mode
+             </h3>
+             <p className="text-xs text-zinc-400 mt-1">
+                 Auto-routing via 0x & LI.FI<br/>
+                 <span className="text-blue-300">5% Platform Fee applied.</span>
+             </p>
+         </div>
+         <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-700">
+             <div className="text-[10px] text-zinc-500 uppercase font-bold text-center">Selected Value</div>
+             <div className="text-lg font-mono font-bold text-white text-center">
+                 ${tokens.filter(t => selectedTokens.has(t.contractAddress)).reduce((a, b) => a + b.valueUsd, 0).toFixed(2)}
+             </div>
+         </div>
       </div>
 
       {/* TOKEN LIST */}
-      <div className="space-y-3">
-        {loading ? ( <div className="text-center py-10 text-zinc-400 animate-pulse">Checking Prices & Liquidity...</div> ) : tokens.length === 0 ? ( <div className="text-center py-10 bg-zinc-50 dark:bg-zinc-900 rounded-xl border border-zinc-100 dark:border-zinc-800 text-zinc-400 text-sm">No tokens with value found.</div> ) : (
+      <div className="flex items-center justify-between px-2">
+          <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
+          <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
+              {selectedTokens.size === tokens.length ? "Deselect All" : "Select All"}
+          </button>
+      </div>
+
+      <div className="space-y-2">
+        {loading ? (
+             <div className="text-center py-12 animate-pulse text-zinc-500 text-xs">Scanning Dust...</div>
+        ) : tokens.length === 0 ? (
+             <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl">
+                 No dust tokens found.
+             </div>
+        ) : (
             tokens.map((token, i) => {
                 const isSelected = selectedTokens.has(token.contractAddress);
                 return (
-                    <div key={i} onClick={() => toggleSelect(token.contractAddress)} className={`flex items-center justify-between p-4 border rounded-2xl shadow-sm cursor-pointer transition-all ${isSelected ? "bg-blue-50 border-blue-200 dark:bg-blue-900/10 dark:border-blue-800" : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-blue-200"}`}>
+                    <div 
+                        key={i} 
+                        onClick={() => toggleToken(token.contractAddress)}
+                        className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${isSelected ? "bg-blue-900/20 border-blue-500/50 shadow-md" : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"}`}
+                    >
                         <div className="flex items-center gap-3">
-                            <div className={`w-6 h-6 rounded-full border flex items-center justify-center transition-colors ${isSelected ? "bg-blue-600 border-blue-600" : "bg-white border-zinc-300"}`}>{isSelected && <Check className="w-4 h-4 text-white" />}</div>
-                            <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center overflow-hidden border border-zinc-200"><TokenLogo token={token} /></div>
+                            <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${isSelected ? "bg-blue-500 border-blue-500 text-white" : "border-zinc-600 text-transparent"}`}>
+                                <Check className="w-3 h-3" strokeWidth={4} />
+                            </div>
+                            <TokenLogo token={token} />
                             <div>
-                                <div className="font-bold text-sm">{token.symbol}</div>
-                                <div className="text-xs text-zinc-500 font-mono">{parseFloat(token.formattedBal).toFixed(6)}</div>
+                                <div className="text-sm font-bold dark:text-white flex items-center gap-2">
+                                    {token.symbol} 
+                                    {token.valueUsd < 0.01 && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">DUST</span>}
+                                </div>
+                                <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
                             </div>
                         </div>
                         <div className="text-right">
@@ -273,11 +333,25 @@ export const SwapView = () => {
       {/* FLOATING ACTION BUTTON */}
       {selectedTokens.size > 0 && (
           <div className="fixed bottom-24 left-4 right-4 z-40 animate-in slide-in-from-bottom-5">
-            <button onClick={handleBatchSwap} className="w-full bg-blue-600 hover:bg-blue-700 text-white shadow-xl py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-colors">
-                <Flash className="w-5 h-5" /> Swap {selectedTokens.size} Assets to ETH
+            <button 
+                onClick={handleBatchSwap} 
+                disabled={swapping}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white shadow-xl py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-colors relative overflow-hidden"
+            >
+                {swapping ? (
+                    <>
+                        <Refresh className="w-5 h-5 animate-spin" />
+                        <span className="text-sm">{swapProgress}</span>
+                    </>
+                ) : (
+                    <>
+                        <Flash className="w-5 h-5" /> 
+                        Swap {selectedTokens.size} Assets
+                    </>
+                )}
             </button>
-            <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border">
-                Gas sponsored via Paymaster (if eligible)
+            <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
+                Fee 5% to Dev • Powered by 0x
             </div>
           </div>
       )}
