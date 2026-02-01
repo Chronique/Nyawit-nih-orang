@@ -2,19 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
-// [FIX] Gunakan client unified baru & public client yang benar
 import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher";
 import { publicClient } from "~/lib/smart-account"; 
 import { alchemy } from "~/lib/alchemy";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains"; 
-import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, User, NavArrowLeft, NavArrowRight, Download, WarningTriangle } from "iconoir-react";
+import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, User, NavArrowLeft, NavArrowRight, Download, WarningTriangle, Upload } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
-
-// [FIX] Tidak perlu import zerodev atau coinbase spesifik lagi
-// import { getZeroDevSmartAccountClient } from "~/lib/zerodev-smart-account"; // HAPUS
-// import { getCoinbaseSmartAccountClient } from "~/lib/smart-account"; // HAPUS
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; 
 const ITEMS_PER_PAGE = 10; 
@@ -53,15 +48,7 @@ export const VaultView = () => {
   const [tokens, setTokens] = useState<any[]>([]); 
   const [ownerTokens, setOwnerTokens] = useState<MoralisToken[]>([]); 
   
-  // State Status
   const [isDeployed, setIsDeployed] = useState(false);
-
-  // [OPTIONAL] Legacy Recovery State (Jika masih mau simpan fitur ini sementara)
-  // Kalau mau hapus total, hapus blok ini. Tapi saran saya simpan dulu buat jaga-jaga.
-  const [legacyTokens, setLegacyTokens] = useState<any[]>([]);
-  const [legacyAddress, setLegacyAddress] = useState<string | null>(null);
-  const [isCheckingLegacy, setIsCheckingLegacy] = useState(false);
-
   const [loading, setLoading] = useState(false); 
   const [loadingOwnerTokens, setLoadingOwnerTokens] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null); 
@@ -70,12 +57,16 @@ export const VaultView = () => {
   const [currentPage, setCurrentPage] = useState(1);       
   const [currentOwnerPage, setCurrentOwnerPage] = useState(1); 
 
+  // State untuk form Withdraw ETH sederhana
+  const [showEthWithdraw, setShowEthWithdraw] = useState(false);
+  const [ethWithdrawAmount, setEthWithdrawAmount] = useState("");
+
+
   // 1. FETCH MAIN VAULT (Unified System)
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
     try {
-      // [FIX] Gunakan Unified Client (yang sudah otomatis handle Privy)
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const addr = client.account.address;
 
@@ -129,17 +120,10 @@ export const VaultView = () => {
     } catch (e) { console.error("Gagal fetch Moralis:", e); } finally { setLoadingOwnerTokens(false); }
   };
 
-  // [OPTIONAL] FUNGSI CEK LEGACY (Hanya jika masih ada file zerodev lama. Kalau sudah dihapus, hapus fungsi ini)
-  /*
-  const checkLegacyVault = async () => {
-      // ... (Kode lama zerodev bisa dihapus jika sudah yakin migrasi total)
-  };
-  */
 
   useEffect(() => { 
       if(walletClient) {
           fetchVaultData(); 
-          // checkLegacyVault(); // Disable dulu kalau library zerodev sudah dihapus
       }
   }, [walletClient]); 
   
@@ -152,22 +136,64 @@ export const VaultView = () => {
       }
   };
 
-  // WITHDRAW DARI VAULT UTAMA (Unified Client)
-  const handleWithdraw = async (token?: any) => {
+  // --- HANDLER WITHDRAW ETH (NATIVE) ---
+  const handleWithdrawETH = async () => {
+      if (!walletClient || !ownerAddress || !vaultAddress || !ethWithdrawAmount) return;
+      if (isNaN(Number(ethWithdrawAmount)) || Number(ethWithdrawAmount) <= 0) {
+          setToast({ msg: "Invalid ETH Amount", type: "error" });
+          return;
+      }
+      
+      try {
+          await ensureNetwork();
+          setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
+          
+          const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+          
+          // Kirim ETH: to = ownerAddress, value = amount, data = empty/0x
+          const txHash = await client.sendUserOperation({
+              account: client.account!,
+              calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }]
+          });
+
+          console.log("ETH WD UserOp:", txHash);
+          setToast({ msg: "Withdraw ETH Sent!", type: "success" });
+          setEthWithdrawAmount("");
+          setShowEthWithdraw(false);
+
+          await new Promise(r => setTimeout(r, 5000));
+          await client.waitForUserOperationReceipt({ hash: txHash });
+          await fetchVaultData();
+      } catch (e: any) {
+          console.error(e);
+          setToast({ msg: "Withdraw ETH Failed: " + (e.shortMessage || e.message), type: "error" });
+      } finally {
+          setActionLoading(null);
+      }
+  };
+
+
+  // --- HANDLER WITHDRAW TOKEN (ERC-20) ---
+  const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
-    if (!window.confirm(`Withdraw ${token?.symbol || "ETH"}?`)) return;
+    const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+
+    if (!window.confirm(`Withdraw ${amount} ${token.symbol} to owner?`)) return;
 
     try {
       await ensureNetwork(); 
-      setActionLoading(`Withdrawing...`); 
+      setActionLoading(`Withdrawing ${token.symbol}...`); 
       
+      // Hitung raw amount berdasarkan decimals
+      const rawAmount = BigInt(Math.floor(parseFloat(amount) * (10 ** token.decimals)));
+
       const transferData = encodeFunctionData({
         abi: erc20Abi,
         functionName: "transfer",
-        args: [ownerAddress as Address, BigInt(token.rawBalance)]
+        args: [ownerAddress as Address, rawAmount]
       });
 
-      // [FIX] Panggil unified client
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
 
       const txHash = await client.sendUserOperation({
@@ -175,7 +201,7 @@ export const VaultView = () => {
           calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }]
       });
 
-      console.log("UserOp Hash:", txHash);
+      console.log("Token WD UserOp:", txHash);
       setToast({ msg: "Withdraw Processed!", type: "success" });
       
       await new Promise(r => setTimeout(r, 5000));
@@ -188,6 +214,7 @@ export const VaultView = () => {
     } finally { setActionLoading(null); }
   };
 
+
   // DEPOSIT (Owner -> Main Vault)
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
@@ -197,7 +224,6 @@ export const VaultView = () => {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
 
-      // Gunakan writeContractAsync bawaan Wagmi (yang sudah di-hook ke Privy)
       const txHash = await writeContractAsync({
         address: token.token_address as Address, 
         abi: erc20Abi,
@@ -247,20 +273,68 @@ export const VaultView = () => {
             <code className="text-sm truncate max-w-[180px] opacity-80">{vaultAddress || "Loading..."}</code>
             <button onClick={() => vaultAddress && navigator.clipboard.writeText(vaultAddress)}><Copy className="w-4 h-4 hover:text-blue-400" /></button>
         </div>
+        
         <div className="mt-4 space-y-3">
-             <div className="flex items-center justify-between bg-zinc-800/50 p-3 rounded-xl border border-zinc-700/50">
-                <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center text-zinc-400"><Gas className="w-5 h-5" /></div>
-                    <div><div className="text-xs text-zinc-400">Gas Reserve (ETH)</div><div className="text-lg font-bold">{parseFloat(ethBalance).toFixed(5)}</div></div>
+             {/* --- ETH (GAS RESERVE) SECTION --- */}
+             <div className="bg-zinc-800/50 p-3 rounded-xl border border-zinc-700/50">
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-zinc-700 flex items-center justify-center text-zinc-400"><Gas className="w-5 h-5" /></div>
+                        <div>
+                            <div className="text-xs text-zinc-400">Gas Reserve (ETH)</div>
+                            <div className="text-lg font-bold">{parseFloat(ethBalance).toFixed(5)}</div>
+                        </div>
+                    </div>
+                    {/* TOMBOL TOGGLE WITHDRAW ETH */}
+                    <button 
+                        onClick={() => setShowEthWithdraw(!showEthWithdraw)} 
+                        className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-medium transition-colors border border-zinc-600"
+                    >
+                        {showEthWithdraw ? "Cancel" : "Withdraw"}
+                    </button>
                 </div>
+                
+                {/* FORM WITHDRAW ETH (COLLAPSIBLE) */}
+                {showEthWithdraw && (
+                    <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
+                        <div className="flex gap-2">
+                            <input 
+                                type="number" 
+                                placeholder="Amount (e.g 0.01)" 
+                                value={ethWithdrawAmount}
+                                onChange={(e) => setEthWithdrawAmount(e.target.value)}
+                                className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
+                            />
+                            <button 
+                                onClick={handleWithdrawETH}
+                                disabled={!ethWithdrawAmount}
+                                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1"
+                            >
+                                <Upload className="w-3 h-3" /> Send
+                            </button>
+                        </div>
+                        <div className="text-[10px] text-zinc-500 mt-1 ml-1">To Owner: {ownerAddress?.slice(0,6)}...{ownerAddress?.slice(-4)}</div>
+                    </div>
+                )}
              </div>
+
+             {/* --- USDC SAVINGS SECTION --- */}
              <div className="flex items-center justify-between bg-blue-900/20 p-3 rounded-xl border border-blue-500/30">
                 <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white"><Dollar className="w-5 h-5" /></div>
-                    <div><div className="text-xs text-blue-300">USDC Savings</div><div className="text-lg font-bold text-blue-100">{usdcBalance ? parseFloat(usdcBalance.formattedBal).toFixed(2) : "0.00"}</div></div>
+                    <div>
+                        <div className="text-xs text-blue-300">USDC Savings</div>
+                        <div className="text-lg font-bold text-blue-100">{usdcBalance ? parseFloat(usdcBalance.formattedBal).toFixed(2) : "0.00"}</div>
+                    </div>
                 </div>
+                {/* TOMBOL WD USDC */}
                 {usdcBalance && parseFloat(usdcBalance.formattedBal) > 0 && (
-                    <button onClick={() => handleWithdraw(usdcBalance)} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-blue-900/20 transition-all flex items-center gap-1">Withdraw</button>
+                    <button 
+                        onClick={() => handleWithdrawToken(usdcBalance)} 
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-blue-900/20 transition-all flex items-center gap-1"
+                    >
+                        Withdraw
+                    </button>
                 )}
              </div>
         </div>
@@ -281,7 +355,8 @@ export const VaultView = () => {
                     <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden"><TokenLogo token={token} /></div>
                     <div><div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div><div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div></div>
                 </div>
-                <button onClick={() => handleWithdraw(token)} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors">WD</button>
+                {/* TOMBOL WD TOKEN LAIN */}
+                <button onClick={() => handleWithdrawToken(token)} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors">WD</button>
             </div>
           ))}
         </div>

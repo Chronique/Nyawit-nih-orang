@@ -2,10 +2,10 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount } from "wagmi";
-import { usePrivy } from "@privy-io/react-auth"; // [IMPORT] usePrivy untuk logout
+import { useAccount, useDisconnect } from "wagmi"; // [TAMBAH] useDisconnect
+import { usePrivy } from "@privy-io/react-auth";
 import { useFrameContext } from "~/components/providers/frame-provider";
-import { LogOut } from "lucide-react"; // [IMPORT] Ikon Disconnect
+import { LogOut } from "lucide-react";
 
 // --- IMPORTS MAIN COMPONENTS ---
 import { DustDepositView } from "~/components/dust/deposit-view";
@@ -14,19 +14,29 @@ import { VaultView } from "~/components/dust/vault-view";
 import { TopBar } from "~/components/top-bar";
 import { WalletConnectPrompt } from "~/components/wallet-connect-prompt";
 import { BottomNavigation } from "~/components/bottom-navigation";
-import { Button } from "~/components/ui/button"; // [IMPORT] Button UI
+import { Button } from "~/components/ui/button"; 
 import { TabType } from "~/types";
-
-// [FIX] HAPUS SignIn karena "Welcome FID" & "Close MiniApp" dibuang
-// import SignIn from "~/components/actions/signin"; 
 
 export default function Demo() {
   const frameContext = useFrameContext();
   const { isConnected } = useAccount();
-  const { logout } = usePrivy(); // [LOGIC] Ambil fungsi logout
+  const { logout } = usePrivy();
+  const { disconnect } = useDisconnect(); // [TAMBAH] Hook disconnect wagmi
+  
   const [activeTab, setActiveTab] = useState<TabType>("deposit");
 
-  // Safe Area Insets logic
+  // [LOGIC BARU] Fungsi Disconnect Total
+  const handleDisconnect = async () => {
+    try {
+        await logout(); // 1. Logout Privy
+        disconnect();   // 2. Putus Koneksi Wagmi
+        // Opsional: Reload halaman agar bersih total
+        // window.location.reload(); 
+    } catch (e) {
+        console.error("Disconnect failed:", e);
+    }
+  };
+
   const safeAreaTop = (frameContext?.context as any)?.client?.safeAreaInsets?.top ?? 0;
   const safeAreaLeft = (frameContext?.context as any)?.client?.safeAreaInsets?.left ?? 0;
   const safeAreaRight = (frameContext?.context as any)?.client?.safeAreaInsets?.right ?? 0;
@@ -42,32 +52,25 @@ export default function Demo() {
     >
       <div className="w-full max-w-lg mx-auto relative flex flex-col min-h-screen">
         
-        {/* --- 1. HEADER (TopBar) --- */}
         <div className="sticky top-0 z-20 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-md px-4 py-3 border-b border-zinc-100 dark:border-zinc-800/50">
           <TopBar />
         </div>
 
-        {/* --- MAIN CONTENT AREA --- */}
         <main className="flex-1 px-4 py-6 pb-28 space-y-6">
           
-          {/* [FIX] "Seamless" (SignIn) layer sudah dihapus. */}
-
-          {/* --- 2. GATEKEEPER LOGIC --- */}
           {!isConnected ? (
-            // A. BELUM LOGIN WALLET/EMAIL -> Tampilkan Prompt
             <div className="flex flex-col items-center justify-center min-h-[40vh] animate-in fade-in zoom-in duration-500">
                <WalletConnectPrompt />
             </div>
           ) : (
-            // B. SUDAH LOGIN -> Tampilkan Fitur Dust
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
               
-              {/* [NEW] TOMBOL DISCONNECT (Pengganti Close MiniApp) */}
+              {/* TOMBOL DISCONNECT YANG SUDAH DIPERBAIKI */}
               <div className="flex justify-end mb-4">
                 <Button 
                   variant="ghost" 
                   size="sm" 
-                  onClick={logout}
+                  onClick={handleDisconnect} // [FIX] Panggil fungsi baru
                   className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 gap-2 px-2"
                 >
                   <LogOut className="w-4 h-4" />
@@ -75,7 +78,6 @@ export default function Demo() {
                 </Button>
               </div>
               
-              {/* HEADER SECTION FOR TABS */}
               <div className="mb-6 space-y-1">
                 {activeTab === "deposit" && (
                   <>
@@ -111,7 +113,6 @@ export default function Demo() {
                 )}
               </div>
 
-              {/* TAB CONTENT */}
               <div className="relative">
                 {activeTab === "deposit" && <DustDepositView />}
                 {activeTab === "swap" && <SwapView />}
@@ -122,7 +123,6 @@ export default function Demo() {
           )}
         </main>
 
-        {/* --- 3. BOTTOM NAVIGATION --- */}
         {isConnected && (
           <div className="fixed bottom-0 left-0 right-0 z-30 flex justify-center pb-safe-area">
              <div className="w-full max-w-lg">
