@@ -1,13 +1,12 @@
 import { createSmartAccountClient, type SmartAccountClient } from "permissionless";
 import { createPimlicoClient } from "permissionless/clients/pimlico";
-import { createPublicClient, http, type WalletClient, type Transport, type Chain, type LocalAccount } from "viem";
+import { createPublicClient, http, type WalletClient, type LocalAccount } from "viem";
 import { base } from "viem/chains"; 
 import { toCoinbaseSmartAccount } from "viem/account-abstraction";
 
 const pimlicoApiKey = process.env.NEXT_PUBLIC_PIMLICO_API_KEY;
 const PIMLICO_URL = `https://api.pimlico.io/v2/8453/rpc?apikey=${pimlicoApiKey}`;
 
-// [FIX] Gunakan nama 'publicClient' (bukan coinbasePublicClient) agar cocok dengan import di file lain
 export const publicClient = createPublicClient({
   chain: base,
   transport: http("https://mainnet.base.org"), 
@@ -18,22 +17,36 @@ const pimlicoClient = createPimlicoClient({
   entryPoint: { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789", version: "0.6" },
 });
 
-// [FIX] Gunakan nama 'getSmartAccountClient' (bukan getCoinbase...) agar cocok dengan switcher
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("Wallet not detected");
 
+  // [FIX UTAMA] Bridge Owner Wrapper untuk menghindari error Raw Sign di Farcaster
   const bridgeOwner: LocalAccount = {
     address: walletClient.account.address,
     publicKey: walletClient.account.address,
     source: 'custom',
     type: 'local', 
-    signMessage: async ({ message }: { message: any }) => walletClient.signMessage({ message, account: walletClient.account! }),
-    signTypedData: async (params: any) => walletClient.signTypedData({ ...params, account: walletClient.account! }),
-    signTransaction: () => { throw new Error("Not supported"); }
+    
+    // Paksa semua signing menggunakan standar yang aman (personal_sign)
+    signMessage: async ({ message }: { message: any }) => {
+        return walletClient.signMessage({ 
+            message, 
+            account: walletClient.account! 
+        });
+    },
+    
+    signTypedData: async (params: any) => {
+        return walletClient.signTypedData({ 
+            ...params, 
+            account: walletClient.account! 
+        });
+    },
+
+    signTransaction: () => { throw new Error("Not supported: Smart Account signer cannot sign raw transactions"); }
   } as any;
 
   const coinbaseAccount = await toCoinbaseSmartAccount({
-    client: publicClient, // Pakai variable publicClient yang sudah direname di atas
+    client: publicClient, 
     owners: [bridgeOwner], 
     nonce: 0n, 
     version: "1.1" 
@@ -44,6 +57,10 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     chain: base,
     bundlerTransport: http(PIMLICO_URL),
     paymaster: pimlicoClient, 
-    userOperation: { estimateFeesPerGas: async () => (await pimlicoClient.getUserOperationGasPrice()).fast },
-  }) as any as SmartAccountClient<Transport, Chain, typeof coinbaseAccount>;
+    userOperation: {
+      estimateFeesPerGas: async () => {
+        return (await pimlicoClient.getUserOperationGasPrice()).fast;
+      },
+    },
+  });
 };

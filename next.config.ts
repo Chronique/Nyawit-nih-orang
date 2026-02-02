@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const nextConfig = {
+const nextConfig: NextConfig = {
   devIndicators: false,
   images: {
     remotePatterns: [
@@ -28,8 +28,8 @@ const nextConfig = {
     ];
   },
 
+  // Config Webpack ini SANGAT KRUSIAL untuk Web3
   webpack: (config: any) => {
-    // 1. Fallback untuk modul Node.js
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
@@ -44,13 +44,11 @@ const nextConfig = {
       'desm': false
     };
 
-    // 2. [FIX BARU] Alias modul React Native ke 'false' agar diabaikan di Web
     config.resolve.alias = {
       ...config.resolve.alias,
       '@react-native-async-storage/async-storage': false,
     };
 
-    // 3. Ignore file testing
     config.module.rules.push({
       test: /thread-stream\/test\//,
       use: 'ignore-loader', 
