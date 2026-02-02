@@ -8,6 +8,7 @@ import { WagmiProvider as PrivyWagmiConnector } from "@privy-io/wagmi";
 
 const queryClient = new QueryClient();
 
+// Konfigurasi Wagmi Standar
 const wagmiConfig = createConfig({
   chains: [base],
   transports: {
@@ -23,14 +24,18 @@ export const WagmiProvider = ({ children }: { children: React.ReactNode }) => {
         appearance: {
           theme: "dark",
           accentColor: "#676FFF",
-          // [FIX] Tampilkan opsi wallet paling depan
+          // [PENTING] Tampilkan list wallet (Rabby/MetaMask) paling atas
           showWalletLoginFirst: true, 
+          logo: "https://nyawit-nih-orang.vercel.app/icon.png", // Opsional: Logo App Anda
         },
         embeddedWallets: {
           createOnLogin: "users-without-wallets", 
         },
-        // [FIX] Izinkan 'wallet' dan 'email'. Hapus 'farcaster' biar gak bentrok.
-        loginMethods: ["wallet", "email"], 
+        // [PENTING] Izinkan semua metode login yang relevan
+        // 'wallet' = Rabby, Metamask, dll
+        // 'email' = Privy Embedded Wallet
+        // 'farcaster' = Kita simpan sbg opsi backup, tapi tidak auto-trigger
+        loginMethods: ["wallet", "email", "farcaster"], 
       }}
     >
       <QueryClientProvider client={queryClient}>

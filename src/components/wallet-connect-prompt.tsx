@@ -1,44 +1,52 @@
 "use client";
 
 import { usePrivy } from "@privy-io/react-auth";
-import { Wallet } from "lucide-react"; // Ganti icon jadi Wallet lagi
+import { Wallet, ShieldCheck, Zap } from "lucide-react";
 
 export const WalletConnectPrompt = () => {
-  const { login, ready } = usePrivy();
+  const { login } = usePrivy();
 
+  // Fungsi sama dengan TopBar: Buka modal pilihan Wallet/Email
   const handleConnect = () => {
-    // [FIX] Panggil login() tanpa argumen khusus agar muncul pilihan "Connect Wallet"
-    // atau force list: ['wallet', 'email']
     login({ loginMethods: ['wallet', 'email'] });
   };
 
-  if (!ready) return (
-    <div className="flex flex-col items-center justify-center py-20 text-zinc-500 animate-pulse gap-2">
-       <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"/>
-       <span className="text-xs">Preparing Connection...</span>
-    </div>
-  );
-
   return (
-    <div className="flex flex-col items-center justify-center py-12 px-4 text-center space-y-4 animate-in fade-in zoom-in duration-300">
-      <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mb-2">
-         <Wallet className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+    <div className="flex flex-col items-center justify-center p-8 text-center space-y-6 animate-in fade-in zoom-in duration-500 max-w-sm mx-auto">
+      
+      {/* Icon Group */}
+      <div className="flex -space-x-4">
+          <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/50 rounded-full flex items-center justify-center border-4 border-white dark:border-zinc-950 z-10">
+             <Wallet className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+          </div>
+          <div className="w-16 h-16 bg-green-100 dark:bg-green-900/50 rounded-full flex items-center justify-center border-4 border-white dark:border-zinc-950">
+             <ShieldCheck className="w-8 h-8 text-green-600 dark:text-green-400" />
+          </div>
       </div>
       
-      <div className="space-y-1">
-        <h3 className="text-xl font-bold">Connect Wallet</h3>
-        <p className="text-zinc-500 text-sm max-w-[250px] mx-auto">
-          Connect Rabby (Farcaster Import) to access your existing Vault.
+      <div className="space-y-2">
+        <h3 className="text-2xl font-bold text-zinc-800 dark:text-white">
+          Connect Your Wallet
+        </h3>
+        <p className="text-zinc-500 text-sm leading-relaxed">
+          Link your <strong>Rabby</strong>, <strong>MetaMask</strong>, or <strong>Email</strong> to access your Smart Vault and start sweeping dust.
         </p>
       </div>
 
-      <button
-        onClick={handleConnect}
-        className="mt-4 px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2"
-      >
-        <Wallet className="w-4 h-4" />
-        Connect Wallet
-      </button>
+      <div className="w-full space-y-3 pt-4">
+        {/* Tombol Utama */}
+        <button
+          onClick={handleConnect}
+          className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+        >
+          <Zap className="w-4 h-4 fill-current" />
+          Connect Now
+        </button>
+        
+        <p className="text-[10px] text-zinc-400">
+          Secure connection via Privy & Base
+        </p>
+      </div>
     </div>
   );
 };

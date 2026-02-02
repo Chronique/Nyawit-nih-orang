@@ -2,81 +2,71 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount, useDisconnect } from "wagmi"; // [TAMBAH] useDisconnect
-import { usePrivy } from "@privy-io/react-auth";
+import { useAccount } from "wagmi";
 import { useFrameContext } from "~/components/providers/frame-provider";
-import { LogOut } from "lucide-react";
-
+import { WalletConnectPrompt } from "~/components/wallet-connect-prompt";
 // --- IMPORTS MAIN COMPONENTS ---
 import { DustDepositView } from "~/components/dust/deposit-view";
 import { SwapView } from "~/components/dust/swap-view";
 import { VaultView } from "~/components/dust/vault-view";
-import { TopBar } from "~/components/top-bar";
-import { WalletConnectPrompt } from "~/components/wallet-connect-prompt";
+import { TopBar } from "~/components/top-bar"; // TopBar Baru
 import { BottomNavigation } from "~/components/bottom-navigation";
-import { Button } from "~/components/ui/button"; 
 import { TabType } from "~/types";
+import { ArrowUpRight } from "lucide-react"; // Icon penunjuk
 
 export default function Demo() {
   const frameContext = useFrameContext();
   const { isConnected } = useAccount();
-  const { logout } = usePrivy();
-  const { disconnect } = useDisconnect(); // [TAMBAH] Hook disconnect wagmi
-  
   const [activeTab, setActiveTab] = useState<TabType>("deposit");
 
-  // [LOGIC BARU] Fungsi Disconnect Total
-  const handleDisconnect = async () => {
-    try {
-        await logout(); // 1. Logout Privy
-        disconnect();   // 2. Putus Koneksi Wagmi
-        // Opsional: Reload halaman agar bersih total
-        // window.location.reload(); 
-    } catch (e) {
-        console.error("Disconnect failed:", e);
-    }
-  };
-
   const safeAreaTop = (frameContext?.context as any)?.client?.safeAreaInsets?.top ?? 0;
-  const safeAreaLeft = (frameContext?.context as any)?.client?.safeAreaInsets?.left ?? 0;
-  const safeAreaRight = (frameContext?.context as any)?.client?.safeAreaInsets?.right ?? 0;
-
+  
   return (
     <div 
       className="min-h-screen bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-50"
-      style={{ 
-        paddingTop: safeAreaTop,
-        paddingLeft: safeAreaLeft,
-        paddingRight: safeAreaRight,
-      }}
+      style={{ paddingTop: safeAreaTop }}
     >
       <div className="w-full max-w-lg mx-auto relative flex flex-col min-h-screen">
         
+        {/* HEADER (TopBar Handle Connect) */}
         <div className="sticky top-0 z-20 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-md px-4 py-3 border-b border-zinc-100 dark:border-zinc-800/50">
           <TopBar />
         </div>
 
         <main className="flex-1 px-4 py-6 pb-28 space-y-6">
           
+          {/* --- GATEKEEPER LOGIC --- */}
           {!isConnected ? (
-            <div className="flex flex-col items-center justify-center min-h-[40vh] animate-in fade-in zoom-in duration-500">
+            // STATE BELUM CONNECT: Tampilkan Teaser & Penunjuk ke TopBar
+            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center space-y-6 animate-in fade-in zoom-in duration-500">
+               
+               {/* Animasi Penunjuk ke Tombol Connect */}
+               <div className="absolute top-4 right-16 animate-bounce text-blue-500">
+                  <ArrowUpRight className="w-8 h-8" />
+               </div>
+
+               <div className="min-h-[60vh] flex flex-col justify-center">
                <WalletConnectPrompt />
             </div>
+
+               <div className="space-y-2 max-w-xs mx-auto">
+                  <h2 className="text-2xl font-bold">Welcome to Nyawit</h2>
+                  <p className="text-zinc-500">
+                    Connect your wallet (Rabby, MetaMask, or Email) via the top right button to access your Smart Vault.
+                  </p>
+               </div>
+
+               {/* Fitur Teaser (Visual Saja) */}
+               <div className="grid grid-cols-3 gap-2 opacity-50 grayscale blur-[1px] select-none pointer-events-none">
+                  <div className="h-20 bg-zinc-100 rounded-xl"></div>
+                  <div className="h-20 bg-zinc-100 rounded-xl"></div>
+                  <div className="h-20 bg-zinc-100 rounded-xl"></div>
+               </div>
+
+            </div>
           ) : (
+            // SUDAH CONNECT: Tampilkan App Normal
             <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-              
-              {/* TOMBOL DISCONNECT YANG SUDAH DIPERBAIKI */}
-              <div className="flex justify-end mb-4">
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  onClick={handleDisconnect} // [FIX] Panggil fungsi baru
-                  className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 gap-2 px-2"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span className="text-xs font-semibold">Disconnect</span>
-                </Button>
-              </div>
               
               <div className="mb-6 space-y-1">
                 {activeTab === "deposit" && (
@@ -89,28 +79,9 @@ export default function Demo() {
                     </p>
                   </>
                 )}
-                
-                {activeTab === "swap" && (
-                  <>
-                    <h2 className="text-2xl font-bold bg-gradient-to-br from-blue-600 to-violet-600 bg-clip-text text-transparent">
-                      Sweep & Swap
-                    </h2>
-                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                      Convert assets to USDC or ETH.
-                    </p>
-                  </>
-                )}
-
-                {activeTab === "vault" && (
-                  <>
-                    <h2 className="text-2xl font-bold bg-gradient-to-br from-amber-500 to-orange-600 bg-clip-text text-transparent">
-                      My Vault
-                    </h2>
-                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                      Secure Smart Account Storage.
-                    </p>
-                  </>
-                )}
+                {/* ... (Header tab lain sama) ... */}
+                {activeTab === "swap" && (<h2 className="text-2xl font-bold">Swap</h2>)}
+                {activeTab === "vault" && (<h2 className="text-2xl font-bold">My Vault</h2>)}
               </div>
 
               <div className="relative">
