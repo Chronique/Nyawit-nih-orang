@@ -36,6 +36,7 @@
     "react-dom": "^19.2.4",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
+    "valtio": "^1.11.2",
     "viem": "^2.23.0",
     "wagmi": "^2.14.9"
   },
