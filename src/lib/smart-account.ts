@@ -21,9 +21,21 @@ const pimlicoClient = createPimlicoClient({
   },
 });
 
+// Tipe unified untuk semua caller — tidak perlu tahu native vs permissionless
+export interface UnifiedCall {
+  to: Address;
+  value: bigint;
+  data: `0x${string}`;
+}
+
+export interface UnifiedSmartClient {
+  account: { address: Address };
+  sendUserOperation: (params: { calls: UnifiedCall[] }) => Promise<`0x${string}`>;
+  waitForUserOperationReceipt: (params: { hash: `0x${string}` }) => Promise<{ receipt: any }>;
+}
+
 // -----------------------------------------------------------------------------
-// Deteksi native smart wallet (EIP-5792)
-// Coinbase Smart Wallet, Base App, Farcaster App semuanya support ini
+// Deteksi native smart wallet via EIP-5792
 // -----------------------------------------------------------------------------
 const isNativeSmartWallet = async (walletClient: WalletClient): Promise<boolean> => {
   try {
@@ -35,21 +47,16 @@ const isNativeSmartWallet = async (walletClient: WalletClient): Promise<boolean>
 };
 
 // -----------------------------------------------------------------------------
-// Path 1 — Native Smart Wallet (EIP-5792)
-// Kirim batch tx via wallet_sendCalls, tidak butuh raw sign sama sekali
+// Path 1 — Native Smart Wallet (Base App, Farcaster, Coinbase Smart Wallet)
+// Pakai wallet_sendCalls (EIP-5792) — tidak butuh raw sign
 // -----------------------------------------------------------------------------
-const createNativeSmartWalletClient = (walletClient: WalletClient) => {
+const createNativeSmartWalletClient = (walletClient: WalletClient): UnifiedSmartClient => {
   const address = walletClient.account!.address;
 
   return {
     account: { address },
 
-    sendUserOperation: async ({
-      calls,
-    }: {
-      account?: any;
-      calls: Array<{ to: Address; value: bigint; data: `0x${string}` }>;
-    }): Promise<`0x${string}`> => {
+    sendUserOperation: async ({ calls }: { calls: UnifiedCall[] }): Promise<`0x${string}`> => {
       const bundleId = await walletClient.request({
         method: "wallet_sendCalls" as any,
         params: [
@@ -76,16 +83,13 @@ const createNativeSmartWalletClient = (walletClient: WalletClient) => {
             method: "wallet_getCallsStatus" as any,
             params: [hash],
           })) as any;
-
           if (
             status?.status === "CONFIRMED" ||
             (status?.receipts && status.receipts.length > 0)
           ) {
             return { receipt: status.receipts?.[0] ?? status };
           }
-          if (status?.status === "FAILED") {
-            throw new Error("Transaction bundle failed");
-          }
+          if (status?.status === "FAILED") throw new Error("Transaction bundle failed");
         } catch (e: any) {
           if (e?.message?.includes("failed")) throw e;
         }
@@ -97,41 +101,29 @@ const createNativeSmartWalletClient = (walletClient: WalletClient) => {
 };
 
 // -----------------------------------------------------------------------------
-// Main export — otomatis pilih path yang tepat
+// Main export
 // -----------------------------------------------------------------------------
-export const getSmartAccountClient = async (walletClient: WalletClient) => {
+export const getSmartAccountClient = async (walletClient: WalletClient): Promise<UnifiedSmartClient> => {
   if (!walletClient.account) throw new Error("Wallet not connected");
 
   const smartWallet = await isNativeSmartWallet(walletClient);
 
   if (smartWallet) {
-    // Base App / Farcaster / Coinbase Smart Wallet → pakai EIP-5792 langsung
     console.log("Native Smart Wallet — using wallet_sendCalls (EIP-5792)");
     return createNativeSmartWalletClient(walletClient);
   }
 
-  // EOA (Rabby, MetaMask, Injected)
-  // walletClient.account = JsonRpcAccount → TIDAK bisa langsung dipakai sebagai owner.
-  // Harus dibungkus pakai toAccount() agar jadi LocalAccount yang valid.
+  // EOA path — bungkus dengan toAccount() agar jadi LocalAccount yang valid
   console.log("EOA — creating Coinbase Smart Account via factory");
 
   const ownerAccount = toAccount({
     address: walletClient.account.address,
-
     signMessage: ({ message }) =>
-      walletClient.signMessage({
-        message,
-        account: walletClient.account!,
-      }),
-
+      walletClient.signMessage({ message, account: walletClient.account! }),
     signTypedData: (params) =>
-      walletClient.signTypedData({
-        ...(params as any),
-        account: walletClient.account!,
-      }),
-
+      walletClient.signTypedData({ ...(params as any), account: walletClient.account! }),
     signTransaction: () => {
-      throw new Error("signTransaction not supported for smart account owner");
+      throw new Error("signTransaction not supported");
     },
   });
 
@@ -142,7 +134,7 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     version: "1.1",
   });
 
-  return createSmartAccountClient({
+  const permissionlessClient = createSmartAccountClient({
     account: coinbaseAccount,
     chain: base,
     bundlerTransport: http(PIMLICO_URL),
@@ -153,4 +145,17 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
       },
     },
   });
+
+  // Wrap permissionless client ke UnifiedSmartClient agar interface sama
+  return {
+    account: { address: coinbaseAccount.address },
+    sendUserOperation: async ({ calls }: { calls: UnifiedCall[] }) => {
+      return permissionlessClient.sendUserOperation({
+        calls,
+      } as any);
+    },
+    waitForUserOperationReceipt: async ({ hash }) => {
+      return permissionlessClient.waitForUserOperationReceipt({ hash }) as any;
+    },
+  };
 };
