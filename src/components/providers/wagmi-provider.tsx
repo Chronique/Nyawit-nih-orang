@@ -1,48 +1,70 @@
 "use client";
 
-import { createConfig, http } from "wagmi";
+import {
+  createConfig,
+  http,
+  WagmiProvider as WagmiProviderBase,
+  useConnect,
+  useAccount,
+} from "wagmi";
 import { base } from "viem/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { PrivyProvider } from "@privy-io/react-auth";
-import { WagmiProvider as PrivyWagmiConnector } from "@privy-io/wagmi";
+import { coinbaseWallet, injected } from "wagmi/connectors";
+import { farcasterMiniApp } from "@farcaster/miniapp-wagmi-connector";
+import { useEffect, useRef } from "react";
 
 const queryClient = new QueryClient();
 
-// Konfigurasi Wagmi Standar
-const wagmiConfig = createConfig({
+export const wagmiConfig = createConfig({
   chains: [base],
+  connectors: [
+    farcasterMiniApp(),  // index 0 — prioritas di Base App / Farcaster
+    coinbaseWallet({
+      appName: "Nyawit Nih Orang",
+      preference: "smartWalletOnly",
+    }),
+    injected(),          // Rabby, MetaMask, dll
+  ],
   transports: {
-    [base.id]: http(),
+    [base.id]: http("https://mainnet.base.org"),
   },
 });
 
+// -----------------------------------------------------------------------------
+// AutoConnect: saat app pertama mount, coba connect ke farcasterMiniApp.
+// Di dalam Base App / Farcaster ini langsung berhasil tanpa interaksi user.
+// Di browser biasa akan gagal diam-diam (tidak throw), lalu user bisa klik Connect.
+// -----------------------------------------------------------------------------
+function AutoConnect() {
+  const { isConnected } = useAccount();
+  const { connect, connectors } = useConnect();
+  // Pakai ref agar tidak trigger ulang jika parent re-render
+  const attempted = useRef(false);
+
+  useEffect(() => {
+    // Sudah connect atau sudah pernah dicoba → skip
+    if (isConnected || attempted.current) return;
+    attempted.current = true;
+
+    const miniAppConnector = connectors[0]; // selalu farcasterMiniApp
+    if (!miniAppConnector) return;
+
+    // Tidak await — biar tidak block render.
+    // Kalau gagal (misal di browser biasa), silent fail.
+    connect({ connector: miniAppConnector });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Hanya run sekali saat mount
+
+  return null;
+}
+
 export const WagmiProvider = ({ children }: { children: React.ReactNode }) => {
   return (
-    <PrivyProvider
-      appId={process.env.NEXT_PUBLIC_PRIVY_APP_ID || ""}
-      config={{
-        appearance: {
-          theme: "dark",
-          accentColor: "#676FFF",
-          // [PENTING] Tampilkan list wallet (Rabby/MetaMask) paling atas
-          showWalletLoginFirst: true, 
-          logo: "https://nyawit-nih-orang.vercel.app/icon.png", // Opsional: Logo App Anda
-        },
-        embeddedWallets: {
-          createOnLogin: "users-without-wallets", 
-        },
-        // [PENTING] Izinkan semua metode login yang relevan
-        // 'wallet' = Rabby, Metamask, dll
-        // 'email' = Privy Embedded Wallet
-        // 'farcaster' = Kita simpan sbg opsi backup, tapi tidak auto-trigger
-        loginMethods: ["wallet", "email", "farcaster"], 
-      }}
-    >
-      <QueryClientProvider client={queryClient}>
-        <PrivyWagmiConnector config={wagmiConfig}>
-            {children}
-        </PrivyWagmiConnector>
-      </QueryClientProvider>
-    </PrivyProvider>
+    <QueryClientProvider client={queryClient}>
+      <WagmiProviderBase config={wagmiConfig}>
+        <AutoConnect />
+        {children}
+      </WagmiProviderBase>
+    </QueryClientProvider>
   );
 };
