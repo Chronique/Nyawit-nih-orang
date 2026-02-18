@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@base-org/account": "^2.5.2",
     "@coinbase/onchainkit": "^0.36.8",
     "@farcaster/auth-client": "^0.7.0",
     "@farcaster/miniapp-sdk": "^0.2.2",
