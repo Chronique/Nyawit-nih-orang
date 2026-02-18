@@ -464,6 +464,6 @@ export function SwitchChain() {
 
 declare global {
   interface Window {
-    ethereum?: Record<string, unknown>;
+    ethereum?: any;
   }
 }

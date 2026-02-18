@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { BasePayButton } from '@base-org/account-ui/react';
 import { pay, getPaymentStatus } from '@base-org/account';
 import { 
   Button, 
@@ -273,10 +272,7 @@ export function BasePay() {
         </div>
 
         <div className={isProcessing ? 'opacity-50 pointer-events-none' : ''}>
-          <BasePayButton
-            colorScheme="light"
-            onClick={handlePay}
-          />
+          
           <div className="text-xs text-muted-foreground mt-2 text-center">
             {isProcessing ? 'Processing payment...' : 'Click to pay with Base Account'}
           </div>
