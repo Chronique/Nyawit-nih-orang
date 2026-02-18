@@ -9,7 +9,8 @@ import {
 } from "wagmi";
 import { base } from "viem/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { coinbaseWallet, injected } from "wagmi/connectors";
+import { injected } from "wagmi/connectors";
+// ✅ farcasterMiniApp tidak menarik @reown/appkit — aman untuk webpack
 import { farcasterMiniApp } from "@farcaster/miniapp-wagmi-connector";
 import { useEffect, useRef } from "react";
 
@@ -18,12 +19,11 @@ const queryClient = new QueryClient();
 export const wagmiConfig = createConfig({
   chains: [base],
   connectors: [
-    farcasterMiniApp(),  // index 0 — prioritas di Base App / Farcaster
-    coinbaseWallet({
-      appName: "Nyawit Nih Orang",
-      preference: "smartWalletOnly",
-    }),
-    injected(),          // Rabby, MetaMask, dll
+    farcasterMiniApp(), // index 0 — auto-connect di Base App / Farcaster
+    injected(),         // Rabby, MetaMask, dll di browser biasa
+    // ⚠️  coinbaseWallet sengaja dihapus — menarik @reown/appkit yang break webpack
+    // Kalau butuh Coinbase Smart Wallet di browser, gunakan extension Coinbase Wallet
+    // yang akan terbaca sebagai injected connector
   ],
   transports: {
     [base.id]: http("https://mainnet.base.org"),
@@ -31,29 +31,25 @@ export const wagmiConfig = createConfig({
 });
 
 // -----------------------------------------------------------------------------
-// AutoConnect: saat app pertama mount, coba connect ke farcasterMiniApp.
-// Di dalam Base App / Farcaster ini langsung berhasil tanpa interaksi user.
-// Di browser biasa akan gagal diam-diam (tidak throw), lalu user bisa klik Connect.
+// AutoConnect: saat app mount di dalam Farcaster / Base App,
+// langsung connect ke wallet user tanpa perlu klik tombol apapun
 // -----------------------------------------------------------------------------
 function AutoConnect() {
   const { isConnected } = useAccount();
   const { connect, connectors } = useConnect();
-  // Pakai ref agar tidak trigger ulang jika parent re-render
   const attempted = useRef(false);
 
   useEffect(() => {
-    // Sudah connect atau sudah pernah dicoba → skip
     if (isConnected || attempted.current) return;
     attempted.current = true;
 
     const miniAppConnector = connectors[0]; // selalu farcasterMiniApp
     if (!miniAppConnector) return;
 
-    // Tidak await — biar tidak block render.
-    // Kalau gagal (misal di browser biasa), silent fail.
+    // Silent fail kalau bukan di Farcaster/Base App
     connect({ connector: miniAppConnector });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Hanya run sekali saat mount
+  }, []);
 
   return null;
 }
