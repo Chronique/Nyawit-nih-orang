@@ -10,9 +10,8 @@ import {
 import { base } from "viem/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { injected } from "wagmi/connectors";
-// ✅ farcasterMiniApp tidak menarik @reown/appkit — aman untuk webpack
 import { farcasterMiniApp } from "@farcaster/miniapp-wagmi-connector";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const queryClient = new QueryClient();
 
@@ -21,9 +20,6 @@ export const wagmiConfig = createConfig({
   connectors: [
     farcasterMiniApp(), // index 0 — auto-connect di Base App / Farcaster
     injected(),         // Rabby, MetaMask, dll di browser biasa
-    // ⚠️  coinbaseWallet sengaja dihapus — menarik @reown/appkit yang break webpack
-    // Kalau butuh Coinbase Smart Wallet di browser, gunakan extension Coinbase Wallet
-    // yang akan terbaca sebagai injected connector
   ],
   transports: {
     [base.id]: http("https://mainnet.base.org"),
@@ -31,25 +27,34 @@ export const wagmiConfig = createConfig({
 });
 
 // -----------------------------------------------------------------------------
-// AutoConnect: saat app mount di dalam Farcaster / Base App,
-// langsung connect ke wallet user tanpa perlu klik tombol apapun
+// AutoConnect: mount setelah hydration selesai, baru connect
+// Ini fix untuk error "Cannot update a component while rendering a different component"
 // -----------------------------------------------------------------------------
 function AutoConnect() {
   const { isConnected } = useAccount();
   const { connect, connectors } = useConnect();
   const attempted = useRef(false);
+  // [FIX] Tunggu sampai component benar-benar mounted di client
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    if (isConnected || attempted.current) return;
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    // [FIX] Hanya jalankan setelah mounted, belum pernah coba, dan belum connect
+    if (!mounted || isConnected || attempted.current) return;
     attempted.current = true;
 
     const miniAppConnector = connectors[0]; // selalu farcasterMiniApp
     if (!miniAppConnector) return;
 
     // Silent fail kalau bukan di Farcaster/Base App
+    // Tidak perlu await — biarkan async, tidak block render
     connect({ connector: miniAppConnector });
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mounted]);
 
   return null;
 }

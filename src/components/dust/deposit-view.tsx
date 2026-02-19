@@ -22,6 +22,7 @@ export const DustDepositView = () => {
   const [activating, setActivating] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
+  // ── Refresh status vault ──────────────────────────────────────────────────
   const refreshStatus = async () => {
     if (!walletClient) return;
     setLoading(true);
@@ -30,11 +31,11 @@ export const DustDepositView = () => {
       const addr = client.account.address;
       setVaultAddress(addr);
 
-      // Cek apakah kontrak sudah di-deploy (aktif)
+      // Cek apakah kontrak sudah di-deploy (aktif) di chain
       const code = await publicClient.getBytecode({ address: addr });
       setIsDeployed(code !== undefined && code !== null && code !== "0x");
     } catch (e) {
-      console.error("Status Check Error:", e);
+      console.error("[DepositView] Status Check Error:", e);
     } finally {
       setLoading(false);
     }
@@ -42,23 +43,25 @@ export const DustDepositView = () => {
 
   useEffect(() => {
     if (walletClient) refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletClient]);
 
-  // ── Aktivasi Smart Wallet via UserOp ──────────────────────────────────────
-  // Kirim dummy UserOp (0 ETH ke diri sendiri) untuk men-deploy kontrak smart wallet
-  // Ini memicu factory untuk deploy CoinbaseSmartAccount di-chain
+  // ── Aktivasi Smart Wallet ──────────────────────────────────────────────────
+  // Kirim dummy call (0 ETH ke diri sendiri) untuk men-deploy kontrak smart wallet.
+  // Untuk native smart wallet (Farcaster/Base App) → wallet_sendCalls (EIP-5792)
+  // Untuk EOA → UserOp via Pimlico bundler
   const handleActivate = async () => {
     if (!walletClient || !vaultAddress) return;
     setActivating(true);
+
     try {
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
 
-      setToast({ msg: "Deploying Smart Wallet... please sign", type: "success" });
+      setToast({ msg: "Deploying Smart Wallet... please approve in your wallet", type: "success" });
 
       const txHash = await client.sendUserOperation({
         calls: [
           {
-            // Kirim 0 ETH ke vault address sendiri — cukup untuk deploy kontrak
             to: vaultAddress as `0x${string}`,
             value: 0n,
             data: "0x",
@@ -72,16 +75,25 @@ export const DustDepositView = () => {
       setToast({ msg: "Smart Wallet activated! ✅", type: "success" });
       await refreshStatus();
     } catch (e: any) {
-      console.error("Activation Error:", e);
-      setToast({
-        msg: "Activation Failed: " + (e.shortMessage || e.message),
-        type: "error",
-      });
+      console.error("[DepositView] Activation Error:", e);
+
+      // Pesan error yang lebih informatif
+      let errMsg = e?.shortMessage || e?.message || "Unknown error";
+      if (errMsg.includes("raw")) {
+        errMsg = "Wallet tidak support raw sign. Pastikan pakai Coinbase Smart Wallet atau Base App.";
+      } else if (errMsg.includes("rejected") || errMsg.includes("denied")) {
+        errMsg = "Request ditolak oleh user.";
+      } else if (errMsg.includes("gas") || errMsg.includes("insufficient")) {
+        errMsg = "Saldo ETH di vault tidak cukup untuk gas. Deposit ETH dulu.";
+      }
+
+      setToast({ msg: "Activation Failed: " + errMsg, type: "error" });
     } finally {
       setActivating(false);
     }
   };
 
+  // ── Loading state ─────────────────────────────────────────────────────────
   if (!walletClient) {
     return (
       <div className="text-center py-20 text-zinc-500 animate-pulse">
@@ -92,9 +104,13 @@ export const DustDepositView = () => {
 
   return (
     <div className="max-w-md mx-auto pb-24">
-      <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
+      <SimpleToast
+        message={toast?.msg || null}
+        type={toast?.type}
+        onClose={() => setToast(null)}
+      />
 
-      {/* HEADER */}
+      {/* ── HEADER ──────────────────────────────────────────────────────── */}
       <div className="text-center mb-6 pt-4 space-y-4">
 
         {/* VAULT ADDRESS */}
@@ -132,13 +148,17 @@ export const DustDepositView = () => {
                   : "bg-orange-500/20 border-orange-500 text-orange-600 dark:text-orange-400"
               }`}
             >
-              <div className={`w-1.5 h-1.5 rounded-full ${isDeployed ? "bg-green-500" : "bg-orange-500"}`} />
+              <div
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isDeployed ? "bg-green-500" : "bg-orange-500"
+                }`}
+              />
               {isDeployed ? "Smart Wallet Active" : "Smart Wallet Inactive"}
             </div>
           </div>
         </div>
 
-        {/* OWNER ADDRESS (DEBUG) */}
+        {/* OWNER ADDRESS */}
         <div className="bg-zinc-100 dark:bg-zinc-900/50 rounded-lg p-2 max-w-[200px] mx-auto border border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center justify-center gap-1 text-[10px] text-zinc-500 mb-1">
             <User className="w-3 h-3" /> Owner (Signer) Address
@@ -160,7 +180,7 @@ export const DustDepositView = () => {
                 Aktivasi dulu agar bisa menerima UserOp dan swap dust.
                 <br />
                 <span className="text-[10px] opacity-70">
-                  (Kamu butuh sedikit ETH di vault untuk gas pertama)
+                  Proses ini akan meminta approval di wallet kamu.
                 </span>
               </div>
               <button
@@ -181,13 +201,14 @@ export const DustDepositView = () => {
                 )}
               </button>
               <p className="text-[10px] text-center text-zinc-400">
-                Proses ini men-deploy kontrak wallet kamu on-chain via UserOp
+                Deploy kontrak wallet on-chain via EIP-5792 / UserOp
               </p>
             </div>
           </div>
         )}
       </div>
 
+      {/* ── BODY ──────────────────────────────────────────────────────────── */}
       <div className="animate-in fade-in duration-500">
         {/* DEPOSIT FORM */}
         <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm mb-6">
