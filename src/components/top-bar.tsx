@@ -1,17 +1,19 @@
 "use client";
 
+// src/components/top-bar.tsx
+
 import Image from "next/image";
 import { useFrameContext } from "~/components/providers/frame-provider";
 import { sdk } from "@farcaster/miniapp-sdk";
 import { useState, useEffect } from "react";
-import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { useAccount, useDisconnect } from "wagmi";
 import { Wallet, Sun, Moon, Share2, Github } from "lucide-react";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
 export function TopBar() {
   const frameContext = useFrameContext();
-  const { isConnected, address } = useAccount();
-  const { connectors, connect } = useConnect();
+  const { isConnected } = useAccount();
   const { disconnect } = useDisconnect();
 
   const [isDark, setIsDark] = useState(false);
@@ -31,11 +33,7 @@ export function TopBar() {
   const handleShare = async () => {
     try {
       if (navigator.share) {
-        await navigator.share({
-          title: "Nyawit",
-          text: "Sweep dust tokens!",
-          url: window.location.href,
-        });
+        await navigator.share({ title: "Nyawit", text: "Sweep dust tokens!", url: window.location.href });
       } else {
         await navigator.clipboard.writeText(window.location.href);
         setToastMsg("Copied! 📋");
@@ -45,27 +43,10 @@ export function TopBar() {
     }
   };
 
-  const handleConnect = () => {
-    // Di dalam mini app: connector[0] (farcasterMiniApp) sudah auto-connect via AutoConnect.
-    // Tombol ini adalah fallback untuk user di browser biasa (Rabby/MetaMask/Coinbase).
-    // Prioritas: coinbaseWallet (smart wallet) → injected (Rabby/MM)
-    const coinbaseConnector = connectors.find((c) =>
-      c.name.toLowerCase().includes("coinbase")
-    );
-    const injectedConnector = connectors.find((c) =>
-      c.id === "injected"
-    );
-    const preferred = coinbaseConnector ?? injectedConnector ?? connectors[0];
-    if (preferred) connect({ connector: preferred });
-  };
-
   const handleProfileClick = () => {
     const fid = (frameContext?.context as any)?.user?.fid;
-    if (fid) {
-      sdk.actions.viewProfile({ fid });
-    } else {
-      disconnect();
-    }
+    if (fid) sdk.actions.viewProfile({ fid });
+    else disconnect();
   };
 
   const userPfp =
@@ -81,18 +62,10 @@ export function TopBar() {
         {/* KIRI: LOGO */}
         <div className="flex items-center gap-2">
           <div className="bg-white dark:bg-black rounded-full p-1 shadow-sm">
-            <Image
-              src="/nyawit.png"
-              alt="Logo"
-              width={40}
-              height={40}
-              className="w-10 h-10 object-contain"
-            />
+            <Image src="/nyawit.png" alt="Logo" width={40} height={40} className="w-10 h-10 object-contain" />
           </div>
           <div className="hidden sm:block leading-tight">
-            <h1 className="text-xl font-black text-zinc-800 dark:text-white">
-              NYAWIT
-            </h1>
+            <h1 className="text-xl font-black text-zinc-800 dark:text-white">NYAWIT</h1>
           </div>
         </div>
 
@@ -107,47 +80,42 @@ export function TopBar() {
             >
               <Github className="w-4 h-4" />
             </a>
-            <button
-              onClick={handleShare}
-              className="p-2 rounded-full text-zinc-500 hover:text-blue-500 transition-all"
-            >
+            <button onClick={handleShare} className="p-2 rounded-full text-zinc-500 hover:text-blue-500 transition-all">
               <Share2 className="w-4 h-4" />
             </button>
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-full text-zinc-500 hover:text-yellow-500 transition-all"
-            >
+            <button onClick={toggleTheme} className="p-2 rounded-full text-zinc-500 hover:text-yellow-500 transition-all">
               {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
           </div>
 
           {/* Connect / Profile */}
-          {!isConnected ? (
-            <button
-              onClick={handleConnect}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-full text-xs font-bold hover:bg-blue-500 shadow-md transition-all active:scale-95"
-            >
-              <Wallet className="w-3.5 h-3.5" /> Connect
-            </button>
-          ) : (
-            <button
-              onClick={handleProfileClick}
-              className="relative group transition-transform active:scale-95"
-            >
+          {isConnected ? (
+            // Sudah konek → tampil foto profil Farcaster atau gradient avatar
+            // Klik → view Farcaster profile (kalau di miniapp) atau disconnect
+            <button onClick={handleProfileClick} className="relative group transition-transform active:scale-95">
               {userPfp ? (
-                <Image
-                  src={userPfp as string}
-                  alt="Profile"
-                  width={36}
-                  height={36}
-                  className="w-9 h-9 rounded-full border-2 border-green-500"
-                />
+                <Image src={userPfp} alt="Profile" width={36} height={36} className="w-9 h-9 rounded-full border-2 border-green-500" />
               ) : (
                 <div className="w-9 h-9 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white border-2 border-green-500 shadow-lg">
                   <Wallet className="w-4 h-4" />
                 </div>
               )}
             </button>
+          ) : (
+            // Belum konek → RainbowKit ConnectButton custom render
+            // Di web: klik → muncul bottom sheet pilih wallet
+            // Di Farcaster: AutoConnect sudah handle, tombol ini jarang terlihat
+            <ConnectButton.Custom>
+              {({ openConnectModal, mounted }) => (
+                <button
+                  onClick={openConnectModal}
+                  disabled={!mounted}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-full text-xs font-bold hover:bg-blue-500 shadow-md transition-all active:scale-95 disabled:opacity-0"
+                >
+                  <Wallet className="w-3.5 h-3.5" /> Connect
+                </button>
+              )}
+            </ConnectButton.Custom>
           )}
         </div>
       </div>
