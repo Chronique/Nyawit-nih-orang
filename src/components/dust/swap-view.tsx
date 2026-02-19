@@ -21,6 +21,18 @@ interface TokenData {
   valueUsd: number;
 }
 
+// [NEW] Props dari VaultView
+interface SwapViewProps {
+  defaultFromToken?: {
+    contractAddress: string;
+    symbol: string;
+    formattedBal: string;
+    decimals: number;
+    rawBalance: string;
+  } | null;
+  onTokenConsumed?: () => void; // callback setelah token dikonsumsi, clear parent state
+}
+
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
 const LIFI_API_URL = "https://li.quest/v1";
@@ -39,7 +51,7 @@ const TokenLogo = ({ token }: { token: any }) => {
   );
 };
 
-export const SwapView = () => {
+export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) => {
   const { data: walletClient } = useWalletClient();
   const { chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
@@ -51,6 +63,9 @@ export const SwapView = () => {
   const [swapProgress, setSwapProgress] = useState("");
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [useLifiFallback] = useState(true);
+
+  // [NEW] Banner info ketika datang dari VaultView
+  const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
 
   const loadDustTokens = async () => {
     if (!walletClient) return;
@@ -92,6 +107,8 @@ export const SwapView = () => {
       const validDust = formatted.filter((t) => t.valueUsd > 0.000001);
       validDust.sort((a, b) => b.valueUsd - a.valueUsd);
       setTokens(validDust);
+
+      return validDust; // return agar bisa dipakai oleh caller
     } catch (e) {
       console.error(e);
     } finally {
@@ -99,18 +116,63 @@ export const SwapView = () => {
     }
   };
 
-  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient]);
+  // Load tokens saat mount
+  useEffect(() => {
+    if (walletClient) loadDustTokens();
+  }, [walletClient]);
+
+  // [NEW] Ketika ada defaultFromToken dari VaultView:
+  // 1. Tampilkan banner info
+  // 2. Pre-select token tersebut setelah tokens selesai di-load
+  useEffect(() => {
+    if (!defaultFromToken) return;
+
+    setIncomingToken(defaultFromToken);
+
+    // Setelah tokens loaded, auto-select token yang diminta
+    const trySelect = async () => {
+      let loadedTokens = tokens;
+
+      // Jika tokens belum ada, load dulu
+      if (loadedTokens.length === 0 && walletClient) {
+        const result = await loadDustTokens();
+        loadedTokens = result || [];
+      }
+
+      const found = loadedTokens.find(
+        (t) => t.contractAddress.toLowerCase() === defaultFromToken.contractAddress.toLowerCase()
+      );
+
+      if (found) {
+        setSelectedTokens(new Set([found.contractAddress]));
+      } else {
+        // Token tidak ada di vault (mungkin sudah di-swap), tetap kasih info
+        setToast({
+          msg: `${defaultFromToken.symbol} tidak ditemukan di vault, mungkin sudah di-swap.`,
+          type: "error",
+        });
+      }
+
+      // Clear parent state
+      onTokenConsumed?.();
+    };
+
+    trySelect();
+  }, [defaultFromToken]);
 
   const toggleToken = (addr: string) => {
     const newSet = new Set(selectedTokens);
     if (newSet.has(addr)) newSet.delete(addr);
     else newSet.add(addr);
     setSelectedTokens(newSet);
+    // Dismiss incoming token banner jika user mulai pilih manual
+    if (incomingToken) setIncomingToken(null);
   };
 
   const selectAll = () => {
     if (selectedTokens.size === tokens.length) setSelectedTokens(new Set());
     else setSelectedTokens(new Set(tokens.map((t) => t.contractAddress)));
+    setIncomingToken(null);
   };
 
   const getZeroExQuote = async (token: TokenData, amount: string) => {
@@ -145,6 +207,7 @@ export const SwapView = () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSwapping(true);
     setSwapProgress("Initializing...");
+    setIncomingToken(null);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
@@ -196,8 +259,6 @@ export const SwapView = () => {
       }
 
       setSwapProgress(`Signing Batch Swap (${successCount} Assets)...`);
-
-      // ✅ Tidak perlu account: client.account!
       const txHash = await client.sendUserOperation({ calls: batchCalls });
 
       setSwapProgress("Transaction Sent! Waiting...");
@@ -219,6 +280,25 @@ export const SwapView = () => {
   return (
     <div className="pb-32 space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
+
+      {/* [NEW] Banner: token dari VaultView */}
+      {incomingToken && (
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-orange-500/10 border border-orange-500/30 animate-in slide-in-from-top-2 duration-300">
+          <Flash className="w-4 h-4 text-orange-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold text-orange-300">Dari Vault</div>
+            <div className="text-sm text-orange-100 truncate">
+              {incomingToken.symbol} — {parseFloat(incomingToken.formattedBal).toFixed(4)}
+            </div>
+          </div>
+          <button
+            onClick={() => { setIncomingToken(null); setSelectedTokens(new Set()); }}
+            className="text-orange-400 hover:text-orange-200 text-xs"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* HEADER */}
       <div className="bg-gradient-to-r from-blue-900/40 to-purple-900/40 border border-blue-500/20 rounded-2xl p-4 flex items-center justify-between">
@@ -247,9 +327,14 @@ export const SwapView = () => {
       {/* TOKEN LIST HEADER */}
       <div className="flex items-center justify-between px-2">
         <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
-        <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
-          {selectedTokens.size === tokens.length ? "Deselect All" : "Select All"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => loadDustTokens()} className="text-xs text-zinc-500 hover:text-zinc-300">
+            <Refresh className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
+            {selectedTokens.size === tokens.length && tokens.length > 0 ? "Deselect All" : "Select All"}
+          </button>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -262,20 +347,27 @@ export const SwapView = () => {
         ) : (
           tokens.map((token, i) => {
             const isSelected = selectedTokens.has(token.contractAddress);
+            const isIncoming = incomingToken?.contractAddress.toLowerCase() === token.contractAddress.toLowerCase();
             return (
               <div
                 key={i}
                 onClick={() => toggleToken(token.contractAddress)}
                 className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
                   isSelected
-                    ? "bg-blue-900/20 border-blue-500/50 shadow-md"
+                    ? isIncoming
+                      ? "bg-orange-900/20 border-orange-500/50 shadow-md"
+                      : "bg-blue-900/20 border-blue-500/50 shadow-md"
                     : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"
                 }`}
               >
                 <div className="flex items-center gap-3">
                   <div
                     className={`w-5 h-5 rounded-full flex items-center justify-center border ${
-                      isSelected ? "bg-blue-500 border-blue-500 text-white" : "border-zinc-600 text-transparent"
+                      isSelected
+                        ? isIncoming
+                          ? "bg-orange-500 border-orange-500 text-white"
+                          : "bg-blue-500 border-blue-500 text-white"
+                        : "border-zinc-600 text-transparent"
                     }`}
                   >
                     <Check className="w-3 h-3" strokeWidth={4} />
@@ -284,7 +376,10 @@ export const SwapView = () => {
                   <div>
                     <div className="text-sm font-bold dark:text-white flex items-center gap-2">
                       {token.symbol}
-                      {token.valueUsd < 0.01 && (
+                      {isIncoming && (
+                        <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>
+                      )}
+                      {!isIncoming && token.valueUsd < 0.01 && (
                         <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">DUST</span>
                       )}
                     </div>

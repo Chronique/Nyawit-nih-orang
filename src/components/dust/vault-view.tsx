@@ -7,7 +7,7 @@ import { publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";
-import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload } from "iconoir-react";
+import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
 
@@ -40,7 +40,12 @@ const TokenLogo = ({ token }: { token: any }) => {
   );
 };
 
-export const VaultView = () => {
+// ── Props: onGoToSwap dipanggil dengan token terpilih ─────────────────────────
+interface VaultViewProps {
+  onGoToSwap?: (token: { contractAddress: string; symbol: string; formattedBal: string; decimals: number; rawBalance: string }) => void;
+}
+
+export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
@@ -135,13 +140,8 @@ export const VaultView = () => {
     }
   };
 
-  useEffect(() => {
-    if (walletClient) fetchVaultData();
-  }, [walletClient]);
-
-  useEffect(() => {
-    if (ownerAddress) fetchOwnerData();
-  }, [ownerAddress]);
+  useEffect(() => { if (walletClient) fetchVaultData(); }, [walletClient]);
+  useEffect(() => { if (ownerAddress) fetchOwnerData(); }, [ownerAddress]);
 
   const ensureNetwork = async () => {
     if (chainId !== base.id) {
@@ -154,7 +154,6 @@ export const VaultView = () => {
     }
   };
 
-  // ── Withdraw ETH ──────────────────────────────────────────────────────────
   const handleWithdrawETH = async () => {
     if (!walletClient || !ownerAddress || !vaultAddress || !ethWithdrawAmount) return;
     if (isNaN(Number(ethWithdrawAmount)) || Number(ethWithdrawAmount) <= 0) {
@@ -165,12 +164,9 @@ export const VaultView = () => {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
-
-      // ✅ Tidak perlu account: client.account! — sudah ada di dalam client
       const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
-
       setToast({ msg: "Withdraw ETH Sent!", type: "success" });
       setEthWithdrawAmount("");
       setShowEthWithdraw(false);
@@ -184,7 +180,6 @@ export const VaultView = () => {
     }
   };
 
-  // ── Withdraw Token ────────────────────────────────────────────────────────
   const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
@@ -200,12 +195,9 @@ export const VaultView = () => {
         args: [ownerAddress as Address, rawAmount],
       });
       const client = await getUnifiedSmartAccountClient(walletClient, undefined);
-
-      // ✅ Tidak perlu account: client.account!
       const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
-
       setToast({ msg: "Withdraw Processed!", type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
       await fetchVaultData();
@@ -217,7 +209,6 @@ export const VaultView = () => {
     }
   };
 
-  // ── Deposit Token dari Owner ke Vault ─────────────────────────────────────
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     if (!window.confirm(`Deposit ${token.symbol} ke Vault?`)) return;
@@ -392,50 +383,45 @@ export const VaultView = () => {
                     <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
                   </div>
                 </div>
-                <button
-                  onClick={() => handleWithdrawToken(token)}
-                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100"
-                >
-                  WD
-                </button>
+
+                {/* ── [NEW] Dua tombol: Swap + WD ─────────────────────────── */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {onGoToSwap && (
+                    <button
+                      onClick={() => onGoToSwap({
+                        contractAddress: token.contractAddress,
+                        symbol: token.symbol,
+                        formattedBal: token.formattedBal,
+                        decimals: token.decimals,
+                        rawBalance: token.rawBalance,
+                      })}
+                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-orange-50 text-orange-500 hover:bg-orange-100 dark:bg-orange-900/20 dark:text-orange-400 dark:hover:bg-orange-900/40 flex items-center gap-1 transition-colors"
+                    >
+                      <Flash className="w-3 h-3" /> Swap
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleWithdrawToken(token)}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 transition-colors"
+                  >
+                    WD
+                  </button>
+                </div>
               </div>
             ))
           )}
         </div>
+
         {/* Pagination Vault */}
         {totalPages > 1 && (
           <div className="flex justify-center items-center gap-1 mt-3">
-            <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
-              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
-            >
-              <NavArrowLeft className="w-4 h-4" />
-            </button>
+            <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
             {generatePagination(currentPage, totalPages).map((page, i) =>
-              page === "..." ? (
-                <span key={i} className="px-2 text-zinc-400 text-sm">...</span>
-              ) : (
-                <button
-                  key={i}
-                  onClick={() => setCurrentPage(page as number)}
-                  className={`w-8 h-8 rounded-lg text-xs font-bold ${
-                    currentPage === page
-                      ? "bg-blue-600 text-white"
-                      : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
-                  }`}
-                >
-                  {page}
-                </button>
+              page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> : (
+                <button key={i} onClick={() => setCurrentPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
               )
             )}
-            <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
-              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
-            >
-              <NavArrowRight className="w-4 h-4" />
-            </button>
+            <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
           </div>
         )}
       </div>
@@ -446,10 +432,7 @@ export const VaultView = () => {
           <h3 className="font-semibold text-lg flex items-center gap-2">
             <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
           </h3>
-          <button
-            onClick={fetchOwnerData}
-            className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500"
-          >
+          <button onClick={fetchOwnerData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
             <Refresh className="w-4 h-4 text-zinc-500" />
           </button>
         </div>
@@ -457,72 +440,35 @@ export const VaultView = () => {
           {loadingOwnerTokens ? (
             <div className="text-center py-6 animate-pulse text-zinc-400 text-sm">Scanning wallet...</div>
           ) : ownerTokens.length === 0 ? (
-            <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">
-              No tokens in wallet.
-            </div>
+            <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">No tokens in wallet.</div>
           ) : (
             currentOwnerTokens.map((token, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm"
-              >
+              <div key={i} className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm">
                 <div className="flex items-center gap-3 overflow-hidden">
                   <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
                     <TokenLogo token={token} />
                   </div>
                   <div>
                     <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
-                    <div className="text-xs text-zinc-500">
-                      {parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}
-                    </div>
+                    <div className="text-xs text-zinc-500">{parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}</div>
                   </div>
                 </div>
                 {vaultAddress && (
-                  <button
-                    onClick={() => handleDeposit(token)}
-                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-green-50 text-green-600 hover:bg-green-100"
-                  >
-                    Deposit
-                  </button>
+                  <button onClick={() => handleDeposit(token)} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-green-50 text-green-600 hover:bg-green-100">Deposit</button>
                 )}
               </div>
             ))
           )}
         </div>
-        {/* Pagination Owner */}
         {totalOwnerPages > 1 && (
           <div className="flex justify-center items-center gap-1 mt-3">
-            <button
-              onClick={() => setCurrentOwnerPage((p) => Math.max(1, p - 1))}
-              disabled={currentOwnerPage === 1}
-              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
-            >
-              <NavArrowLeft className="w-4 h-4" />
-            </button>
+            <button onClick={() => setCurrentOwnerPage((p) => Math.max(1, p - 1))} disabled={currentOwnerPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
             {generatePagination(currentOwnerPage, totalOwnerPages).map((page, i) =>
-              page === "..." ? (
-                <span key={i} className="px-2 text-zinc-400 text-sm">...</span>
-              ) : (
-                <button
-                  key={i}
-                  onClick={() => setCurrentOwnerPage(page as number)}
-                  className={`w-8 h-8 rounded-lg text-xs font-bold ${
-                    currentOwnerPage === page
-                      ? "bg-blue-600 text-white"
-                      : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
-                  }`}
-                >
-                  {page}
-                </button>
+              page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> : (
+                <button key={i} onClick={() => setCurrentOwnerPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentOwnerPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
               )
             )}
-            <button
-              onClick={() => setCurrentOwnerPage((p) => Math.min(totalOwnerPages, p + 1))}
-              disabled={currentOwnerPage === totalOwnerPages}
-              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
-            >
-              <NavArrowRight className="w-4 h-4" />
-            </button>
+            <button onClick={() => setCurrentOwnerPage((p) => Math.min(totalOwnerPages, p + 1))} disabled={currentOwnerPage === totalOwnerPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
           </div>
         )}
       </div>
