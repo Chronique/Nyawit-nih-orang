@@ -1,14 +1,20 @@
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import Moralis from "moralis";
 import { EvmChain } from "@moralisweb3/common-evm-utils";
 
 let moralisStarted = false;
+let Moralis: any;
 
 const initMoralis = async () => {
   if (!process.env.MORALIS_API_KEY) {
     throw new Error("MORALIS_API_KEY not set");
+  }
+
+  if (!Moralis) {
+    const moralisModule = await import("moralis");
+    Moralis = moralisModule.default;
   }
 
   if (!moralisStarted) {
