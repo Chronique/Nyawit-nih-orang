@@ -64,7 +64,7 @@ export const DustDepositView = () => {
   // Derive vault address
   useEffect(() => {
     if (!ownerAddress) return;
-    deriveVaultAddress(ownerAddress as Address).then((addr) => {
+    deriveVaultAddress(ownerAddress as Address, 0n, chainId).then((addr) => {
       console.log("[DepositView] Vault address:", addr);
       setVaultAddress(addr);
     });
@@ -75,7 +75,7 @@ export const DustDepositView = () => {
     setLoading(true);
     try {
       const [deployed, ethBal] = await Promise.all([
-        isVaultDeployed(vaultAddress),
+        isVaultDeployed(vaultAddress, chainId),
         publicClient.getBalance({ address: vaultAddress }),
       ]);
       setIsDeployed(deployed);

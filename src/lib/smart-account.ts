@@ -126,9 +126,11 @@ export interface VaultCall {
 // Deterministik: sama owner + salt = sama address, selamanya, di semua chain
 export const deriveVaultAddress = async (
   ownerAddress: Address,
-  salt = 0n
+  salt = 0n,
+  chainId?: number
 ): Promise<Address> => {
-  const address = await publicClient.readContract({
+  const client = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
+  const address = await client.readContract({
     address: FACTORY_ADDRESS,
     abi: FACTORY_ABI,
     functionName: "getAddress",
@@ -138,8 +140,9 @@ export const deriveVaultAddress = async (
 };
 
 // ── 2. Cek apakah vault sudah di-deploy ──────────────────────────────────────
-export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> => {
-  const bytecode = await publicClient.getBytecode({ address: vaultAddress });
+export const isVaultDeployed = async (vaultAddress: Address, chainId?: number): Promise<boolean> => {
+  const client = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
+  const bytecode = await client.getBytecode({ address: vaultAddress });
   return !!bytecode && bytecode !== "0x";
 };
 
