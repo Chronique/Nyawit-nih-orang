@@ -1,12 +1,14 @@
 "use client";
 
+// src/components/dust/swap-view.tsx
+
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher";
+import { getSmartAccountClient, isSupportedChain, getChainLabel } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { fetchTokenPrices } from "~/lib/price";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { base } from "viem/chains";
+import { base, baseSepolia } from "viem/chains";
 import { Refresh, Flash, ArrowRight, Check } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
@@ -32,11 +34,22 @@ interface SwapViewProps {
   onTokenConsumed?: () => void;
 }
 
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
-const LIFI_API_URL = "https://li.quest/v1";
-const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
+// Mainnet
+const USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const WETH_MAINNET = "0x4200000000000000000000000000000000000006";
+// Sepolia
+const USDC_SEPOLIA  = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+const WETH_SEPOLIA  = "0x4200000000000000000000000000000000000006"; // sama di kedua chain
+
+const LIFI_API_URL   = "https://li.quest/v1";
+const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
 const FEE_PERCENTAGE = "0.05";
+
+const getTokenAddresses = (chainId: number) => ({
+  usdc: chainId === baseSepolia.id ? USDC_SEPOLIA : USDC_MAINNET,
+  weth: chainId === baseSepolia.id ? WETH_SEPOLIA : WETH_MAINNET,
+  chainIdStr: String(chainId),
+});
 
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(null);
@@ -52,8 +65,7 @@ const TokenLogo = ({ token }: { token: any }) => {
 
 export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) => {
   const { data: walletClient } = useWalletClient();
-  const { chainId } = useAccount();
-  const { switchChainAsync } = useSwitchChain();
+  const { chainId = baseSepolia.id } = useAccount();
 
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
@@ -64,15 +76,18 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [useLifiFallback] = useState(true);
   const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
 
+  const { usdc: usdcAddress, weth: wethAddress, chainIdStr } = getTokenAddresses(chainId);
+  const isTestnet = chainId === baseSepolia.id;
+
   const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+      const client = await getSmartAccountClient(walletClient);
       const vaultAddr = client.account.address;
       const balances = await alchemy.core.getTokenBalances(vaultAddr);
       const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
-        const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
+        const isUSDC = t.contractAddress.toLowerCase() === usdcAddress.toLowerCase();
         return !isUSDC && BigInt(t.tokenBalance || "0") > 0n;
       });
       if (nonZeroTokens.length === 0) { setTokens([]); return; }
@@ -112,7 +127,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient]);
+  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient, chainId]);
 
   useEffect(() => {
     if (!defaultFromToken) return;
@@ -129,7 +144,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       if (found) {
         setSelectedTokens(new Set([found.contractAddress]));
       } else {
-        setToast({ msg: `${defaultFromToken.symbol} not found in vault — may have already been swapped.`, type: "error" });
+        setToast({ msg: `${defaultFromToken.symbol} not found in vault.`, type: "error" });
       }
       onTokenConsumed?.();
     };
@@ -151,10 +166,12 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   };
 
   const getZeroExQuote = async (token: TokenData, amount: string) => {
+    // 0x Protocol tidak support testnet — skip kalau di Sepolia
+    if (isTestnet) throw new Error("0x: Testnet not supported");
     const params = new URLSearchParams({
-      chainId: "8453",
+      chainId: chainIdStr,
       sellToken: token.contractAddress,
-      buyToken: WETH_ADDRESS,
+      buyToken: wethAddress,
       sellAmount: amount,
       feeRecipient: FEE_RECIPIENT,
       buyTokenPercentageFee: FEE_PERCENTAGE,
@@ -166,8 +183,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
     const params = new URLSearchParams({
-      fromChain: "8453", toChain: "8453",
-      fromToken: token.contractAddress, toToken: WETH_ADDRESS,
+      fromChain: chainIdStr, toChain: chainIdStr,
+      fromToken: token.contractAddress, toToken: wethAddress,
       fromAmount: amount, fromAddress,
     });
     const res = await fetch(`${LIFI_API_URL}/quote?${params}`);
@@ -177,12 +194,18 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const handleBatchSwap = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
+
+    if (!isSupportedChain(chainId)) {
+      setToast({ msg: "Switch ke Base atau Base Sepolia dulu.", type: "error" });
+      return;
+    }
+
     setSwapping(true);
     setSwapProgress("Initializing...");
     setIncomingToken(null);
+
     try {
-      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+      const client = await getSmartAccountClient(walletClient);
       const vaultAddress = client.account.address;
 
       const batchCalls: any[] = [];
@@ -197,13 +220,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           let value = 0n;
 
           try {
-            // Primary: 0x Protocol
             const quote0x = await getZeroExQuote(token, token.rawBalance);
             txData = quote0x.transaction.data;
             toAddress = quote0x.transaction.to;
             value = BigInt(quote0x.transaction.value || 0);
           } catch {
-            // Fallback: LI.FI aggregator
             if (useLifiFallback) {
               const quoteLifi = await getLifiQuote(token, token.rawBalance, vaultAddress);
               txData = quoteLifi.transactionRequest.data;
@@ -228,17 +249,17 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       }
 
       if (batchCalls.length === 0) {
-        setToast({ msg: "No routes found for selected tokens. Try again later.", type: "error" });
+        setToast({ msg: "No routes found. Di testnet, coba pakai LI.FI saja.", type: "error" });
         return;
       }
 
       setSwapProgress(`Signing batch swap (${successCount} asset${successCount > 1 ? "s" : ""})...`);
       const txHash = await client.sendUserOperation({ calls: batchCalls });
 
-      setSwapProgress("Transaction sent! Waiting for confirmation...");
+      setSwapProgress("Waiting for confirmation...");
       await client.waitForUserOperationReceipt({ hash: txHash });
 
-      setToast({ msg: `Successfully swapped ${successCount} asset${successCount > 1 ? "s" : ""} to ETH!`, type: "success" });
+      setToast({ msg: `Swapped ${successCount} asset${successCount > 1 ? "s" : ""} to ETH!`, type: "success" });
       await new Promise((r) => setTimeout(r, 2000));
       await loadDustTokens();
       setSelectedTokens(new Set());
@@ -276,15 +297,19 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
           <p className="text-xs text-zinc-400 mt-1">
-            Auto-routing via 0x Protocol & LI.FI
-            <br />
-            <span className="text-blue-300">5% platform fee applied.</span>
+            {isTestnet
+              ? <span className="text-yellow-400">Testnet: routing via LI.FI only</span>
+              : <>Auto-routing via 0x Protocol & LI.FI<br /><span className="text-blue-300">5% platform fee applied.</span></>
+            }
           </p>
         </div>
         <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-700">
           <div className="text-[10px] text-zinc-500 uppercase font-bold text-center">Selected Value</div>
           <div className="text-lg font-mono font-bold text-white text-center">
             ${tokens.filter((t) => selectedTokens.has(t.contractAddress)).reduce((a, b) => a + b.valueUsd, 0).toFixed(2)}
+          </div>
+          <div className={`text-[9px] text-center mt-0.5 ${isTestnet ? "text-yellow-400" : "text-blue-400"}`}>
+            {getChainLabel(chainId)}
           </div>
         </div>
       </div>
@@ -369,7 +394,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
-            5% fee · Routed via 0x Protocol & LI.FI
+            {isTestnet ? "Testnet · LI.FI only" : "5% fee · 0x Protocol & LI.FI"} · {getChainLabel(chainId)}
           </div>
         </div>
       )}
