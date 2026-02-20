@@ -72,7 +72,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const vaultAddr = client.account.address;
       const balances = await alchemy.core.getTokenBalances(vaultAddr);
       const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
@@ -213,7 +213,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     setIncomingToken(null);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const vaultAddress = client.account.address;
 
       const batchCalls: any[] = [];
@@ -385,25 +385,26 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         )}
       </div>
 
-      {/* ── VAULT ASSETS (semua token di vault, termasuk tanpa likuiditas) ── */}
-      {vaultTokens.length > 0 && (
+      {/* ── DEPOSITED DUST (token tanpa likuiditas / no route) ── */}
+      {vaultTokens.filter(t => t.valueUsd <= 0.000001).length > 0 && (
         <div className="space-y-2 mt-6">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-wide flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" />
-              Vault Assets ({vaultTokens.length})
+              <span className="w-2 h-2 rounded-full bg-zinc-500 inline-block" />
+              Deposited Dust ({vaultTokens.filter(t => t.valueUsd <= 0.000001).length})
             </h3>
             <span className="text-[10px] text-zinc-500">
-              Page {vaultPage} / {Math.ceil(vaultTokens.length / VAULT_PER_PAGE)}
+              Page {vaultPage} / {Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)}
             </span>
           </div>
 
           <div className="space-y-2">
             {vaultTokens
+              .filter(t => t.valueUsd <= 0.000001)
               .slice((vaultPage - 1) * VAULT_PER_PAGE, vaultPage * VAULT_PER_PAGE)
               .map((token, i) => {
                 const isSelected = selectedTokens.has(token.contractAddress);
-                const isSwappable = token.valueUsd > 0.000001;
+                const isSwappable = false; // no route tokens
                 return (
                   <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
                     <div className="flex items-center gap-3 overflow-hidden">
@@ -447,7 +448,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           </div>
 
           {/* Pagination */}
-          {Math.ceil(vaultTokens.length / VAULT_PER_PAGE) > 1 && (
+          {Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) > 1 && (
             <div className="flex justify-center items-center gap-1 mt-2 pb-2">
               <button
                 onClick={() => setVaultPage((p) => Math.max(1, p - 1))}
@@ -456,8 +457,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               >
                 ← Prev
               </button>
-              {Array.from({ length: Math.ceil(vaultTokens.length / VAULT_PER_PAGE) }, (_, i) => i + 1)
-                .filter((p) => p === 1 || p === Math.ceil(vaultTokens.length / VAULT_PER_PAGE) || Math.abs(p - vaultPage) <= 2)
+              {Array.from({ length: Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) || Math.abs(p - vaultPage) <= 2)
                 .reduce((acc: (number | string)[], p, idx, arr) => {
                   if (idx > 0 && (p as number) - (arr[idx - 1] as number) > 1) acc.push("...");
                   acc.push(p);
@@ -480,7 +481,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                 )}
               <button
                 onClick={() => setVaultPage((p) => Math.min(Math.ceil(vaultTokens.length / VAULT_PER_PAGE), p + 1))}
-                disabled={vaultPage === Math.ceil(vaultTokens.length / VAULT_PER_PAGE)}
+                disabled={vaultPage === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)}
                 className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
               >
                 Next →
