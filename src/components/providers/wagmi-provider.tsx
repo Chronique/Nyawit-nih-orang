@@ -14,7 +14,7 @@ import {
   injectedWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { WagmiProvider as WagmiProviderBase } from "wagmi";
-import { base } from "wagmi/chains";
+import { base, baseSepolia } from "wagmi/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useConnect, useAccount } from "wagmi";
 import { useEffect, useState } from "react";
