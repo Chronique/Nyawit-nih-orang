@@ -9,18 +9,13 @@ import {
   deployVault,
   publicClient,
   publicClientSepolia,
-  ACTIVE_CHAIN,
-  IS_TESTNET,
 } from "~/lib/smart-account";
-import { baseSepolia } from "viem/chains";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, formatEther, type Address } from "viem";
 import { Rocket, Check, Copy, Refresh } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-const USDC_ADDRESS = IS_TESTNET
-  ? "0x036CbD53842c5426634e7929541eC2318f3dCF7e" // USDC Base Sepolia
-  : "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC Base mainnet
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC Base mainnet
 
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(token.logo || null);
@@ -77,10 +72,9 @@ export const DustDepositView = () => {
     setLoading(true);
     try {
       // Pakai client sesuai chain — fix ETH balance salah chain
-      const activeClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
       const [deployed, ethBal] = await Promise.all([
         isVaultDeployed(vaultAddress, chainId),
-        activeClient.getBalance({ address: vaultAddress }),
+        publicClient.getBalance({ address: vaultAddress }),
       ]);
       setIsDeployed(deployed);
       setEthBalance(formatEther(ethBal));
@@ -121,8 +115,8 @@ export const DustDepositView = () => {
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
-      if (chainId !== ACTIVE_CHAIN.id) {
-        await switchChainAsync({ chainId: ACTIVE_CHAIN.id });
+      if (chainId !== 8453) {
+        await switchChainAsync({ chainId: 8453 });
       }
       setActivating(true);
       setToast({ msg: "Confirm transaction in your wallet...", type: "success" });
@@ -146,12 +140,6 @@ export const DustDepositView = () => {
   return (
     <div className="space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
-
-      {IS_TESTNET && (
-        <div className="text-[10px] text-center text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-1.5">
-          ⚠ Testnet Mode — Base Sepolia
-        </div>
-      )}
 
       {/* VAULT ADDRESS CARD */}
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">

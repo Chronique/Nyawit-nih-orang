@@ -1,23 +1,18 @@
 "use client";
 
-// src/components/dust/vault-view.tsx
-
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient, publicClientSepolia, getChainLabel, isSupportedChain } from "~/lib/smart-account";
+import { getUnifiedSmartAccountClient } from "~/lib/smart-account-switcher";
+import { publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { base } from "viem/chains";
 import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
 
-const USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ITEMS_PER_PAGE = 10;
-
-const getUsdcAddress = (chainId: number) =>
-  chainId === baseSepolia.id ? USDC_SEPOLIA : USDC_MAINNET;
 
 const generatePagination = (current: number, total: number) => {
   if (total <= 5) return Array.from({ length: total }, (_, i) => i + 1);
@@ -46,15 +41,12 @@ const TokenLogo = ({ token }: { token: any }) => {
 };
 
 interface VaultViewProps {
-  onGoToSwap?: (token: {
-    contractAddress: string; symbol: string;
-    formattedBal: string; decimals: number; rawBalance: string;
-  }) => void;
+  onGoToSwap?: (token: { contractAddress: string; symbol: string; formattedBal: string; decimals: number; rawBalance: string }) => void;
 }
 
 export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const { data: walletClient } = useWalletClient();
-  const { address: ownerAddress, chainId = baseSepolia.id } = useAccount();
+  const { address: ownerAddress, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
   const { switchChainAsync } = useSwitchChain();
 
@@ -73,21 +65,14 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const [showEthWithdraw, setShowEthWithdraw] = useState(false);
   const [ethWithdrawAmount, setEthWithdrawAmount] = useState("");
 
-  // Pilih public client sesuai chain
-  const activeClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const usdcAddress = getUsdcAddress(chainId);
-  const isTestnet = chainId === baseSepolia.id;
-
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const addr = client.account.address;
-      const [bal, code] = await Promise.all([
-        activeClient.getBalance({ address: addr }),
-        activeClient.getBytecode({ address: addr }),
-      ]);
+      const bal = await publicClient.getBalance({ address: addr });
+      const code = await publicClient.getBytecode({ address: addr });
 
       setVaultAddress(addr);
       setEthBalance(formatEther(bal));
@@ -114,8 +99,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         };
       });
 
-      const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === usdcAddress.toLowerCase());
-      const others = formatted.filter((t: any) => t.contractAddress.toLowerCase() !== usdcAddress.toLowerCase());
+      const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
+      const others = formatted.filter((t: any) => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());
       others.sort((a: any, b: any) => parseFloat(b.formattedBal) - parseFloat(a.formattedBal));
 
       setUsdcBalance(usdc || null);
@@ -135,8 +120,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       const data = await fetchMoralisTokens(ownerAddress);
       const activeTokens = data.filter((t) => BigInt(t.balance) > 0n);
       activeTokens.sort(
-        (a, b) => parseFloat(formatUnits(BigInt(b.balance), b.decimals)) -
-                  parseFloat(formatUnits(BigInt(a.balance), a.decimals))
+        (a, b) => parseFloat(formatUnits(BigInt(b.balance), b.decimals)) - parseFloat(formatUnits(BigInt(a.balance), a.decimals))
       );
       setOwnerTokens(activeTokens);
       setCurrentOwnerPage(1);
@@ -147,14 +131,17 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  useEffect(() => { if (walletClient) fetchVaultData(); }, [walletClient, chainId]);
+  useEffect(() => { if (walletClient) fetchVaultData(); }, [walletClient]);
   useEffect(() => { if (ownerAddress) fetchOwnerData(); }, [ownerAddress]);
 
-  // Pastikan user di chain yang supported
   const ensureNetwork = async () => {
-    if (!isSupportedChain(chainId)) {
-      setToast({ msg: "Switch ke Base atau Base Sepolia dulu.", type: "error" });
-      throw new Error("Unsupported network");
+    if (chainId !== base.id) {
+      try {
+        await switchChainAsync({ chainId: base.id });
+      } catch {
+        setToast({ msg: "Please switch to Base Mainnet first.", type: "error" });
+        throw new Error("Wrong network");
+      }
     }
   };
 
@@ -167,7 +154,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
@@ -196,7 +183,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         abi: erc20Abi, functionName: "transfer",
         args: [ownerAddress as Address, rawAmount],
       });
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
       const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
@@ -220,7 +207,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         address: token.token_address as Address,
         abi: erc20Abi, functionName: "transfer",
         args: [vaultAddress as Address, BigInt(token.balance)],
-        chainId: chainId as typeof base.id | typeof baseSepolia.id,
+        chainId: base.id,
       });
       setToast({ msg: "Deposit sent! Updating balances...", type: "success" });
       await new Promise((r) => setTimeout(r, 8000));
@@ -252,23 +239,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
 
       {/* HEADER CARD */}
       <div className="p-5 bg-zinc-900 text-white rounded-2xl shadow-lg relative overflow-hidden">
-        {/* Chain badge */}
-        <div className={`absolute top-4 left-4 text-[9px] px-2 py-0.5 rounded-full border font-bold ${
-          isTestnet
-            ? "bg-yellow-500/20 border-yellow-500 text-yellow-400"
-            : "bg-blue-500/20 border-blue-500 text-blue-400"
-        }`}>
-          {getChainLabel(chainId)}
-        </div>
-
         <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${
           isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-orange-500/20 border-orange-500 text-orange-400"
         }`}>
           {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
           {isDeployed ? "Active" : "Inactive"}
         </div>
-
-        <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1 mt-6">
+        <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
           <Wallet className="w-3 h-3" /> Smart Vault
         </div>
         <div className="flex items-center justify-between mb-4">
@@ -279,7 +256,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
 
         <div className="mt-4 space-y-3">
-          {/* ETH balance */}
           <div className="bg-zinc-800/50 p-3 rounded-xl border border-zinc-700/50">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -314,14 +290,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             )}
           </div>
 
-          {/* USDC balance */}
           <div className="flex items-center justify-between bg-blue-900/20 p-3 rounded-xl border border-blue-500/30">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white">
                 <Dollar className="w-5 h-5" />
               </div>
               <div>
-                <div className="text-xs text-blue-300">USDC</div>
+                <div className="text-xs text-blue-300">USDC Savings</div>
                 <div className="text-lg font-bold text-blue-100">
                   {usdcBalance ? parseFloat(usdcBalance.formattedBal).toFixed(2) : "0.00"}
                 </div>
@@ -336,7 +311,63 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
       </div>
 
-      
+      {/* VAULT ASSETS */}
+      <div>
+        <div className="flex items-center justify-between px-1 mb-2">
+          <h3 className="font-semibold text-lg flex items-center gap-2">
+            <Wallet className="w-5 h-5 text-blue-500" /> Vault Assets
+          </h3>
+          <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
+            <Refresh className="w-4 h-4 text-zinc-500" />
+          </button>
+        </div>
+        <div className="space-y-2 min-h-[100px]">
+          {loading ? (
+            <div className="text-center py-10 animate-pulse text-zinc-400 text-sm">Loading...</div>
+          ) : tokens.length === 0 ? (
+            <div className="text-center py-10 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">
+              {usdcBalance ? "No other assets." : "Vault is empty."}
+            </div>
+          ) : (
+            currentTokens.map((token, i) => (
+              <div key={i} className="flex items-center justify-between p-3 border border-zinc-100 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 shadow-sm">
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
+                    <TokenLogo token={token} />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
+                    <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {onGoToSwap && (
+                    <button
+                      onClick={() => onGoToSwap({ contractAddress: token.contractAddress, symbol: token.symbol, formattedBal: token.formattedBal, decimals: token.decimals, rawBalance: token.rawBalance })}
+                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-orange-50 text-orange-500 hover:bg-orange-100 dark:bg-orange-900/20 dark:text-orange-400 dark:hover:bg-orange-900/40 flex items-center gap-1 transition-colors"
+                    >
+                      <Flash className="w-3 h-3" /> Swap
+                    </button>
+                  )}
+                  <button onClick={() => handleWithdrawToken(token)} className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 transition-colors">
+                    WD
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        {totalPages > 1 && (
+          <div className="flex justify-center items-center gap-1 mt-3">
+            <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
+            {generatePagination(currentPage, totalPages).map((page, i) =>
+              page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> :
+              <button key={i} onClick={() => setCurrentPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
+            )}
+            <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
+          </div>
+        )}
+      </div>
 
       {/* WALLET ASSETS */}
       <div>
