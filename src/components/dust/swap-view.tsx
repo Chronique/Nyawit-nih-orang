@@ -72,7 +72,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+      const client = await getSmartAccountClient(walletClient);
       const vaultAddr = client.account.address;
       const balances = await alchemy.core.getTokenBalances(vaultAddr);
       const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
@@ -213,7 +213,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     setIncomingToken(null);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getUnifiedSmartAccountClient(walletClient, undefined);
+      const client = await getSmartAccountClient(walletClient);
       const vaultAddress = client.account.address;
 
       const batchCalls: any[] = [];

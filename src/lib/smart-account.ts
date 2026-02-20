@@ -23,17 +23,15 @@ import { base, baseSepolia } from "viem/chains";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // Ganti ke base untuk mainnet, baseSepolia untuk testing
-export const ACTIVE_CHAIN = base; 
-export const IS_TESTNET = ACTIVE_CHAIN.id === base.id;
+export const ACTIVE_CHAIN = base; // Base Mainnet
+export const IS_TESTNET = false;
 
 // Alchemy Light Account Factory
 // Source: https://github.com/alchemyplatform/light-account
 // Sama di semua chain yang support
 const FACTORY_ADDRESS = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
 
-const RPC_URL = IS_TESTNET
-  ? `https://base-sepolia.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`
-  : `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`;
+const RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`;
 
 // ── ABIs ──────────────────────────────────────────────────────────────────────
 const FACTORY_ABI = [
