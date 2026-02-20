@@ -1,25 +1,17 @@
 "use client";
 
+// src/components/providers/wagmi-provider.tsx
+// Updated: Base Sepolia untuk testing
+
 import "@rainbow-me/rainbowkit/styles.css";
-import {
-  RainbowKitProvider,
-  darkTheme,
-  getDefaultConfig,
-} from "@rainbow-me/rainbowkit";
-import {
-  metaMaskWallet,
-  coinbaseWallet,
-  okxWallet,
-  rabbyWallet,
-  injectedWallet,
-} from "@rainbow-me/rainbowkit/wallets";
+import { RainbowKitProvider, darkTheme, getDefaultConfig } from "@rainbow-me/rainbowkit";
+import { metaMaskWallet, coinbaseWallet, okxWallet, rabbyWallet, injectedWallet } from "@rainbow-me/rainbowkit/wallets";
 import { WagmiProvider as WagmiProviderBase } from "wagmi";
 import { base, baseSepolia } from "wagmi/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useConnect, useAccount } from "wagmi";
 import { useEffect, useState } from "react";
 
-// EIP-6963 detection
 if (typeof window !== "undefined") {
   window.addEventListener("eip6963:announceProvider", (event: Event) => {
     const info = (event as CustomEvent).detail?.info;
@@ -33,29 +25,17 @@ if (typeof window !== "undefined") {
   window.dispatchEvent(new Event("eip6963:requestProvider"));
 }
 
-// [FIX] Hapus walletConnectWallet dari daftar — tidak butuh projectId
-// OKX, Rabby, MetaMask, Coinbase semua injected, tidak butuh WalletConnect
 export const wagmiConfig = getDefaultConfig({
   appName: "Nyawit",
-  // [FIX] Pakai placeholder — RainbowKit perlu string non-empty
-  // tapi karena kita tidak include walletConnectWallet, tidak dipakai
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "nyawit-placeholder-00000000000",
-  chains: [base],
+  // Include both — ganti IS_TESTNET di smart-account.ts untuk switch
+  chains: [baseSepolia, base],
   wallets: [
     {
       groupName: "Popular",
-      wallets: [
-        coinbaseWallet,
-        metaMaskWallet,
-        okxWallet,
-        rabbyWallet,
-        // walletConnectWallet DIHAPUS — ini yang butuh projectId valid
-      ],
+      wallets: [coinbaseWallet, metaMaskWallet, okxWallet, rabbyWallet],
     },
-    {
-      groupName: "Other",
-      wallets: [injectedWallet],
-    },
+    { groupName: "Other", wallets: [injectedWallet] },
   ],
   ssr: true,
 });
@@ -99,7 +79,6 @@ export function WagmiProvider({ children }: { children: React.ReactNode }) {
             overlayBlur: "small",
           })}
           modalSize="compact"
-          locale="en-US"
         >
           <AutoConnect />
           {children}

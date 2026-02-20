@@ -1,370 +1,254 @@
 // src/lib/smart-account.ts
 //
-// ARSITEKTUR:
-// - EIP-5792 path (Farcaster, Base App, Coinbase Wallet): wallet_sendCalls langsung
-// - Bundler path (Rabby, MetaMask, OKX): ZeroDev Kernel (ERC-7579) via ZeroDev bundler
+// ARSITEKTUR: Alchemy Light Account (ERC-4337) — user bayar gas dari EOA
 //
-// MULTI-CHAIN:
-// - Base Mainnet (8453)  → NEXT_PUBLIC_ZERODEV_PROJECT_ID_MAINNET
-// - Base Sepolia (84532) → NEXT_PUBLIC_ZERODEV_PROJECT_ID_TESTNET
+// Flow:
+// 1. deriveVaultAddress(owner) → alamat deterministik dari factory
+// 2. deployVault(walletClient)  → EOA deploy via factory, bayar gas dari EOA
+// 3. sendBatch(walletClient, calls) → EOA call executeBatch() di vault
 //
-// Di ZeroDev dashboard, mainnet dan testnet adalah project TERPISAH.
-// Chain dideteksi otomatis dari walletClient.chain.id.
+// Tidak ada bundler, tidak ada UserOp, tidak ada paymaster.
+// Gas selalu dari wallet owner (EOA).
+//
+// MULTI-CHAIN: ganti chain + factory address → support semua EVM
 
 import {
   createPublicClient,
   http,
-  type PublicClient,
-  type Transport,
   type WalletClient,
   type Address,
+  encodeFunctionData,
 } from "viem";
-import { toAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
-import { toCoinbaseSmartAccount } from "viem/account-abstraction";
 
-// ─── ENV ──────────────────────────────────────────────────────────────────────
-const PROJECT_ID_MAINNET = process.env.NEXT_PUBLIC_ZERODEV_PROJECT_ID_MAINNET;
-const PROJECT_ID_TESTNET = process.env.NEXT_PUBLIC_ZERODEV_PROJECT_ID_TESTNET;
+// ── Config ────────────────────────────────────────────────────────────────────
+// Ganti ke base untuk mainnet, baseSepolia untuk testing
+export const ACTIVE_CHAIN = baseSepolia;
+export const IS_TESTNET = ACTIVE_CHAIN.id === baseSepolia.id;
 
-// EntryPoint v0.7 — dipakai ZeroDev Kernel v3
-const ENTRYPOINT = {
-  address: "0x0000000071727De22E5E9d8BAf0edAc6f37da032" as Address,
-  version: "0.7" as const,
-};
+// Alchemy Light Account Factory
+// Source: https://github.com/alchemyplatform/light-account
+// Sama di semua chain yang support
+const FACTORY_ADDRESS = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
 
-// ─── Public clients per chain ─────────────────────────────────────────────────
-// Disimpan sebagai typed const, tapi di ChainConfig kita pakai `any`
-// karena viem meng-embed literal chain type yang tidak bisa di-union
+const RPC_URL = IS_TESTNET
+  ? `https://base-sepolia.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`
+  : `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`;
+
+// ── ABIs ──────────────────────────────────────────────────────────────────────
+const FACTORY_ABI = [
+  {
+    name: "getAddress",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "salt", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    name: "createAccount",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "salt", type: "uint256" },
+    ],
+    outputs: [{ name: "ret", type: "address" }],
+  },
+] as const;
+
+const LIGHT_ACCOUNT_ABI = [
+  // executeBatch: jalankan multiple calls atomic dalam 1 transaksi
+  {
+    name: "executeBatch",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "calls",
+        type: "tuple[]",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "data", type: "bytes" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+  // execute: single call
+  {
+    name: "execute",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "target", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+// ── Public clients ────────────────────────────────────────────────────────────
 export const publicClient = createPublicClient({
   chain: base,
-  transport: http("https://mainnet.base.org"),
+  transport: http(`https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
 });
 
 export const publicClientSepolia = createPublicClient({
   chain: baseSepolia,
-  transport: http("https://sepolia.base.org"),
+  transport: http(`https://base-sepolia.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
 });
 
-// ─── Chain config ─────────────────────────────────────────────────────────────
-// client: any karena viem PublicClient<base> dan PublicClient<baseSepolia>
-// adalah dua tipe literal yang tidak compatible secara TypeScript,
-// meski runtime-nya identik. Cast ke typed client dilakukan di titik penggunaan.
-interface ChainConfig {
-  chain: typeof base | typeof baseSepolia;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  client: any;
-  projectId: string;
-  bundlerRpc: string;
-  paymasterRpc: string;
-}
+// ── Chain helpers ─────────────────────────────────────────────────────────────
+const SUPPORTED_CHAIN_IDS: number[] = [base.id, baseSepolia.id];
 
-const getChainConfig = (chainId: number): ChainConfig => {
-  if (chainId === base.id) {
-    if (!PROJECT_ID_MAINNET) throw new Error("NEXT_PUBLIC_ZERODEV_PROJECT_ID_MAINNET not set");
-    return {
-      chain: base,
-      client: publicClient,
-      projectId: PROJECT_ID_MAINNET,
-      bundlerRpc:   `https://rpc.zerodev.app/api/v2/bundler/${PROJECT_ID_MAINNET}`,
-      paymasterRpc: `https://rpc.zerodev.app/api/v2/paymaster/${PROJECT_ID_MAINNET}`,
-    };
-  }
-  // Default: Base Sepolia (testnet)
-  if (!PROJECT_ID_TESTNET) throw new Error("NEXT_PUBLIC_ZERODEV_PROJECT_ID_TESTNET not set");
-  return {
-    chain: baseSepolia,
-    client: publicClientSepolia,
-    projectId: PROJECT_ID_TESTNET,
-    bundlerRpc:   `https://rpc.zerodev.app/api/v2/bundler/${PROJECT_ID_TESTNET}`,
-    paymasterRpc: `https://rpc.zerodev.app/api/v2/paymaster/${PROJECT_ID_TESTNET}`,
-  };
+export const isSupportedChain = (chainId: number): boolean =>
+  SUPPORTED_CHAIN_IDS.includes(chainId);
+
+export const getChainLabel = (chainId: number): string => {
+  if (chainId === baseSepolia.id) return "Base Sepolia";
+  if (chainId === base.id) return "Base";
+  return `Chain ${chainId}`;
 };
 
-// ─── Interfaces ───────────────────────────────────────────────────────────────
-export interface UnifiedCall {
+// ── Types ─────────────────────────────────────────────────────────────────────
+export interface VaultCall {
   to: Address;
   value: bigint;
   data: `0x${string}`;
 }
 
-export interface UnifiedSmartClient {
-  account: { address: Address };
-  chainId: number;
-  sendUserOperation: (params: { calls: UnifiedCall[] }) => Promise<`0x${string}`>;
-  waitForUserOperationReceipt: (params: { hash: `0x${string}` }) => Promise<{ receipt: any }>;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Derive vault address (tanpa deploy — hanya compute address dari factory)
-// ─────────────────────────────────────────────────────────────────────────────
-const deriveKernelVaultAddress = async (
-  ownerAddress: Address,
-  chainId: number = baseSepolia.id
-): Promise<Address> => {
-  const { createKernelAccount } = await import("@zerodev/sdk");
-  const { signerToEcdsaValidator } = await import("@zerodev/ecdsa-validator");
-  const { KERNEL_V3_1 } = await import("@zerodev/sdk/constants");
-
-  const { client } = getChainConfig(chainId);
-
-  const dummyOwner = toAccount({
-    address: ownerAddress,
-    signMessage: async () => "0x" as `0x${string}`,
-    signTypedData: async () => "0x" as `0x${string}`,
-    signTransaction: async () => { throw new Error("not supported"); },
-  });
-
-  const validator = await signerToEcdsaValidator(client, {
-    signer: dummyOwner,
-    entryPoint: ENTRYPOINT,
-    kernelVersion: KERNEL_V3_1,
-  });
-
-  const account = await createKernelAccount(client, {
-    plugins: { sudo: validator },
-    entryPoint: ENTRYPOINT,
-    kernelVersion: KERNEL_V3_1,
-  });
-
-  return account.address;
-};
-
+// ── 1. Derive vault address (tanpa deploy) ────────────────────────────────────
+// Deterministik: sama owner + salt = sama address, selamanya, di semua chain
 export const deriveVaultAddress = async (
   ownerAddress: Address,
-  method: "eip5792" | "bundler" = "eip5792",
-  chainId: number = baseSepolia.id
+  salt = 0n
 ): Promise<Address> => {
-  if (method === "bundler") {
-    return deriveKernelVaultAddress(ownerAddress, chainId);
-  }
-
-  // Coinbase Smart Account — EIP-5792 path
-  // toCoinbaseSmartAccount butuh typed client, jadi pilih langsung berdasarkan chainId
-  const typedClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const dummyOwner = toAccount({
-    address: ownerAddress,
-    signMessage: async () => "0x" as `0x${string}`,
-    signTypedData: async () => "0x" as `0x${string}`,
-    signTransaction: async () => "0x" as `0x${string}`,
+  const address = await publicClient.readContract({
+    address: FACTORY_ADDRESS,
+    abi: FACTORY_ABI,
+    functionName: "getAddress",
+    args: [ownerAddress, salt],
   });
-  const account = await toCoinbaseSmartAccount({
-    client: typedClient,
-    owners: [dummyOwner],
-    nonce: 0n,
-    version: "1",
-  });
-  return account.address;
+  return address as Address;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Deteksi cara sign
-// ─────────────────────────────────────────────────────────────────────────────
-type SignMethod = "eip5792" | "bundler";
-
-export const detectSignMethod = async (walletClient: WalletClient): Promise<SignMethod> => {
-  try {
-    await walletClient.request({ method: "wallet_getCapabilities" as any });
-    console.log("[SignMethod] wallet_getCapabilities OK → EIP-5792");
-    return "eip5792";
-  } catch (e: any) {
-    const msg = (e?.message ?? e?.details ?? "").toLowerCase();
-    const code = e?.code;
-    const isNotSupported =
-      code === 4200 ||
-      msg.includes("not supported") ||
-      msg.includes("does not support") ||
-      msg.includes("method not found") ||
-      msg.includes("does not exist") ||
-      msg.includes("is not available") ||
-      msg.includes("unsupported method") ||
-      msg.includes("unsupported");
-    if (isNotSupported) {
-      console.log("[SignMethod] EIP-5792 not supported → bundler. Reason:", e?.message);
-      return "bundler";
-    }
-    console.log("[SignMethod] Non-fatal error, assuming EIP-5792:", e?.message);
-    return "eip5792";
-  }
+// ── 2. Cek apakah vault sudah di-deploy ──────────────────────────────────────
+export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> => {
+  const bytecode = await publicClient.getBytecode({ address: vaultAddress });
+  return !!bytecode && bytecode !== "0x";
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Path A: EIP-5792 (Farcaster, Base App, Coinbase Wallet)
-// ─────────────────────────────────────────────────────────────────────────────
-const createEIP5792Client = (
+// ── 3. Deploy vault — EOA bayar gas langsung ──────────────────────────────────
+// Dipanggil sekali saja. Setelah ini vault aktif selamanya.
+export const deployVault = async (
   walletClient: WalletClient,
-  vaultAddress: Address,
-  chainId: number
-): UnifiedSmartClient => ({
-  account: { address: vaultAddress },
-  chainId,
-
-  sendUserOperation: async ({ calls }) => {
-    const chainIdHex = `0x${chainId.toString(16)}`;
-    console.log("[EIP5792] wallet_sendCalls v2.0.0, chain:", chainId, "calls:", calls.length);
-    const bundleId = await walletClient.request({
-      method: "wallet_sendCalls" as any,
-      params: [{
-        version: "2.0.0",
-        chainId: chainIdHex,
-        calls: calls.map((c) => ({
-          to: c.to,
-          value: `0x${(c.value ?? 0n).toString(16)}`,
-          data: c.data || "0x",
-        })),
-      }],
-    });
-    console.log("[EIP5792] bundleId:", bundleId);
-    return bundleId as `0x${string}`;
-  },
-
-  waitForUserOperationReceipt: async ({ hash }) => {
-    const MAX = 60;
-    for (let i = 0; i < MAX; i++) {
-      try {
-        const status = (await walletClient.request({
-          method: "wallet_getCallsStatus" as any,
-          params: [hash],
-        })) as any;
-        console.log(`[EIP5792] Poll ${i + 1}/${MAX}:`, status?.status);
-        const done =
-          status?.status === "CONFIRMED" ||
-          status?.status === "confirmed" ||
-          status?.statusCode === 200 ||
-          status?.receipts?.length > 0;
-        if (done) return { receipt: status.receipts?.[0] ?? status };
-        if (status?.status === "FAILED" || status?.status === "failed")
-          throw new Error("Transaction bundle failed");
-      } catch (e: any) {
-        if (e?.message?.includes("failed")) throw e;
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    throw new Error("Timeout: transaction not confirmed after 2 minutes");
-  },
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Path B: ZeroDev Kernel (ERC-7579) — untuk Rabby, MetaMask, OKX
-// ─────────────────────────────────────────────────────────────────────────────
-const createBundlerPath = async (
-  walletClient: WalletClient,
-  chainId: number
-): Promise<UnifiedSmartClient> => {
+  salt = 0n
+): Promise<`0x${string}`> => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
-  const config = getChainConfig(chainId);
-  console.log(`[ZeroDev] chain=${chainId}, owner=`, walletClient.account.address);
-
-  const { createKernelAccount, createKernelAccountClient, createZeroDevPaymasterClient } =
-    await import("@zerodev/sdk");
-  const { signerToEcdsaValidator } = await import("@zerodev/ecdsa-validator");
-  const { KERNEL_V3_1 } = await import("@zerodev/sdk/constants");
-
-  const signer = toAccount({
-    address: walletClient.account.address,
-    signMessage: ({ message }) =>
-      walletClient.signMessage({ account: walletClient.account!, message }),
-    signTypedData: (params) =>
-      walletClient.signTypedData({ ...(params as any), account: walletClient.account! }),
-    signTransaction: () => { throw new Error("signTransaction not supported"); },
+  const txHash = await walletClient.writeContract({
+    address: FACTORY_ADDRESS,
+    abi: FACTORY_ABI,
+    functionName: "createAccount",
+    args: [walletClient.account.address, salt],
+    chain: ACTIVE_CHAIN,
+    account: walletClient.account,
   });
 
-  // config.client adalah `any` — ZeroDev menerimanya tanpa type conflict
-  const ecdsaValidator = await signerToEcdsaValidator(config.client, {
-    signer,
-    entryPoint: ENTRYPOINT,
-    kernelVersion: KERNEL_V3_1,
+  return txHash;
+};
+
+// ── 4. Send batch — EOA call executeBatch di vault ───────────────────────────
+// Ini pengganti sendUserOperation. Sama hasilnya: atomic multi-call.
+// Gas dari EOA, tidak perlu ETH di dalam vault.
+export const sendBatch = async (
+  walletClient: WalletClient,
+  vaultAddress: Address,
+  calls: VaultCall[]
+): Promise<`0x${string}`> => {
+  if (!walletClient.account) throw new Error("walletClient.account is null");
+
+  // Sanitize
+  const sanitized = calls.map((c) => ({
+    target: c.to,
+    value: c.value ?? 0n,
+    data: (c.data ?? "0x") as `0x${string}`,
+  }));
+
+  console.log("[LightAccount] executeBatch, calls:", sanitized.length);
+
+  const txHash = await walletClient.writeContract({
+    address: vaultAddress,
+    abi: LIGHT_ACCOUNT_ABI,
+    functionName: "executeBatch",
+    args: [sanitized],
+    chain: ACTIVE_CHAIN,
+    account: walletClient.account,
   });
 
-  const account = await createKernelAccount(config.client, {
-    plugins: { sudo: ecdsaValidator },
-    entryPoint: ENTRYPOINT,
-    kernelVersion: KERNEL_V3_1,
+  return txHash;
+};
+
+// ── 5. Single execute (withdraw, dll) ────────────────────────────────────────
+export const sendSingle = async (
+  walletClient: WalletClient,
+  vaultAddress: Address,
+  call: VaultCall
+): Promise<`0x${string}`> => {
+  if (!walletClient.account) throw new Error("walletClient.account is null");
+
+  const txHash = await walletClient.writeContract({
+    address: vaultAddress,
+    abi: LIGHT_ACCOUNT_ABI,
+    functionName: "execute",
+    args: [call.to, call.value ?? 0n, (call.data ?? "0x") as `0x${string}`],
+    chain: ACTIVE_CHAIN,
+    account: walletClient.account,
   });
 
-  console.log(`[ZeroDev] Kernel vault (chain ${chainId}):`, account.address);
+  return txHash;
+};
 
-  const paymasterClient = createZeroDevPaymasterClient({
-    chain: config.chain,
-    transport: http(config.paymasterRpc),
-  });
+// ── 6. Unified client (kompatibel dengan deposit/vault/swap view) ─────────────
+// Wrapper agar deposit-view, vault-view, swap-view tidak perlu banyak diubah
+// Interface sama dengan sebelumnya: sendUserOperation + waitForUserOperationReceipt
+export const getSmartAccountClient = async (walletClient: WalletClient) => {
+  if (!walletClient.account) throw new Error("walletClient.account is null");
 
-  const kernelClient = createKernelAccountClient({
-    account,
-    chain: config.chain,
-    bundlerTransport: http(config.bundlerRpc),
-    paymaster: {
-      getPaymasterData: (userOperation) =>
-        paymasterClient.sponsorUserOperation({ userOperation }),
-    },
-  });
+  // Pilih publicClient sesuai chain wallet
+  const chainId = walletClient.chain?.id ?? ACTIVE_CHAIN.id;
+  const activePublicClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
+  const activeChain = chainId === baseSepolia.id ? baseSepolia : base;
+
+  const vaultAddress = await deriveVaultAddress(walletClient.account.address);
+
+  console.log("[LightAccount] Vault address:", vaultAddress);
+  console.log("[LightAccount] Chain:", activeChain.name);
 
   return {
-    account: { address: account.address },
-    chainId,
+    account: { address: vaultAddress },
 
-    sendUserOperation: async ({ calls }) => {
-      console.log("[ZeroDev] Sending Kernel UserOp, calls:", calls.length);
-      const sanitizedCalls = calls.map((c) => ({
-        to: c.to,
-        value: c.value ?? 0n,
-        data: (c.data ?? "0x") as `0x${string}`,
-      }));
-      const callData = await account.encodeCalls(sanitizedCalls);
-      return kernelClient.sendUserOperation({ callData });
+    sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
+      // Override chain di setiap call agar sesuai chain wallet
+      const callsWithChain = calls.map((c) => ({ ...c }));
+      if (callsWithChain.length === 1) {
+        return sendSingle(walletClient, vaultAddress, callsWithChain[0]);
+      }
+      return sendBatch(walletClient, vaultAddress, callsWithChain);
     },
 
-    waitForUserOperationReceipt: async ({ hash }) => {
-      console.log("[ZeroDev] Waiting for Kernel receipt:", hash);
-      return kernelClient.waitForUserOperationReceipt({ hash });
+    waitForUserOperationReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+      console.log("[LightAccount] Waiting for tx:", hash);
+      const receipt = await activePublicClient.waitForTransactionReceipt({ hash });
+      return { receipt };
     },
+
+    deployVault: () => deployVault(walletClient),
+    isDeployed: () => isVaultDeployed(vaultAddress),
   };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main export
-// ─────────────────────────────────────────────────────────────────────────────
-export const getSmartAccountClient = async (
-  walletClient: WalletClient
-): Promise<UnifiedSmartClient> => {
-  if (!walletClient.account) throw new Error("Wallet not connected");
-
-  const chainId = walletClient.chain?.id ?? baseSepolia.id;
-  const isTestnet = chainId === baseSepolia.id;
-  console.log(`[SmartAccount] owner=${walletClient.account.address}, chain=${chainId}${isTestnet ? " (TESTNET)" : ""}`);
-
-  const method = await detectSignMethod(walletClient);
-  console.log(`[SmartAccount] signMethod=${method}`);
-
-  if (method === "eip5792") {
-    const vaultAddress = await deriveVaultAddress(walletClient.account.address, "eip5792", chainId);
-    console.log("[SmartAccount] Coinbase vault:", vaultAddress);
-    return createEIP5792Client(walletClient, vaultAddress, chainId);
-  }
-
-  console.log("[SmartAccount] Using ZeroDev Kernel bundler path");
-  return createBundlerPath(walletClient, chainId);
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers untuk UI
-// ─────────────────────────────────────────────────────────────────────────────
-export const isVaultDeployed = async (
-  vaultAddress: Address,
-  chainId: number = baseSepolia.id
-): Promise<boolean> => {
-  // Pilih typed client langsung — tidak lewat ChainConfig agar type-safe
-  const client = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const code = await client.getBytecode({ address: vaultAddress });
-  return code !== undefined && code !== null && code !== "0x";
-};
-
-export const isSupportedChain = (chainId: number): boolean =>
-  chainId === base.id || chainId === baseSepolia.id;
-
-export const getChainLabel = (chainId: number): string => {
-  if (chainId === baseSepolia.id) return "Base Sepolia (Testnet)";
-  if (chainId === base.id) return "Base Mainnet";
-  return `Unsupported Chain (${chainId})`;
 };
