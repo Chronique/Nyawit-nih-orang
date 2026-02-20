@@ -8,9 +8,11 @@ import {
   isVaultDeployed,
   deployVault,
   publicClient,
+  publicClientSepolia,
   ACTIVE_CHAIN,
   IS_TESTNET,
 } from "~/lib/smart-account";
+import { baseSepolia } from "viem/chains";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, formatEther, type Address } from "viem";
 import { Rocket, Check, Copy, Refresh } from "iconoir-react";
@@ -74,9 +76,11 @@ export const DustDepositView = () => {
     if (!vaultAddress) return;
     setLoading(true);
     try {
+      // Pakai client sesuai chain — fix ETH balance salah chain
+      const activeClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
       const [deployed, ethBal] = await Promise.all([
         isVaultDeployed(vaultAddress, chainId),
-        publicClient.getBalance({ address: vaultAddress }),
+        activeClient.getBalance({ address: vaultAddress }),
       ]);
       setIsDeployed(deployed);
       setEthBalance(formatEther(ethBal));

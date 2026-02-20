@@ -1,14 +1,12 @@
 "use client";
 
-// src/components/dust/swap-view.tsx
-
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, isSupportedChain, getChainLabel } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { fetchTokenPrices } from "~/lib/price";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { base } from "viem/chains";
 import { Refresh, Flash, ArrowRight, Check } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
@@ -34,22 +32,11 @@ interface SwapViewProps {
   onTokenConsumed?: () => void;
 }
 
-// Mainnet
-const USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const WETH_MAINNET = "0x4200000000000000000000000000000000000006";
-// Sepolia
-const USDC_SEPOLIA  = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-const WETH_SEPOLIA  = "0x4200000000000000000000000000000000000006"; // sama di kedua chain
-
-const LIFI_API_URL   = "https://li.quest/v1";
-const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
+const LIFI_API_URL = "https://li.quest/v1";
+const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
 const FEE_PERCENTAGE = "0.05";
-
-const getTokenAddresses = (chainId: number) => ({
-  usdc: chainId === baseSepolia.id ? USDC_SEPOLIA : USDC_MAINNET,
-  weth: chainId === baseSepolia.id ? WETH_SEPOLIA : WETH_MAINNET,
-  chainIdStr: String(chainId),
-});
 
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(null);
@@ -65,7 +52,8 @@ const TokenLogo = ({ token }: { token: any }) => {
 
 export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) => {
   const { data: walletClient } = useWalletClient();
-  const { chainId = baseSepolia.id } = useAccount();
+  const { chainId } = useAccount();
+  const { switchChainAsync } = useSwitchChain();
 
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
@@ -75,9 +63,10 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [useLifiFallback] = useState(true);
   const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
-
-  const { usdc: usdcAddress, weth: wethAddress, chainIdStr } = getTokenAddresses(chainId);
-  const isTestnet = chainId === baseSepolia.id;
+  // Vault assets (semua token di vault termasuk yang tidak ada likuiditas)
+  const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
+  const [vaultPage, setVaultPage] = useState(1);
+  const VAULT_PER_PAGE = 10;
 
   const loadDustTokens = async () => {
     if (!walletClient) return;
@@ -87,7 +76,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       const vaultAddr = client.account.address;
       const balances = await alchemy.core.getTokenBalances(vaultAddr);
       const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
-        const isUSDC = t.contractAddress.toLowerCase() === usdcAddress.toLowerCase();
+        const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
         return !isUSDC && BigInt(t.tokenBalance || "0") > 0n;
       });
       if (nonZeroTokens.length === 0) { setTokens([]); return; }
@@ -116,8 +105,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         };
       });
 
+      // Semua token di vault (untuk Vault Assets section)
+      formatted.sort((a, b) => b.valueUsd - a.valueUsd);
+      setVaultTokens(formatted);
+      setVaultPage(1);
+
+      // Hanya token dengan value > threshold untuk swap section
       const validDust = formatted.filter((t) => t.valueUsd > 0.000001);
-      validDust.sort((a, b) => b.valueUsd - a.valueUsd);
       setTokens(validDust);
       return validDust;
     } catch (e) {
@@ -127,7 +121,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient, chainId]);
+  useEffect(() => { if (walletClient) loadDustTokens(); }, [walletClient]);
 
   useEffect(() => {
     if (!defaultFromToken) return;
@@ -144,7 +138,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       if (found) {
         setSelectedTokens(new Set([found.contractAddress]));
       } else {
-        setToast({ msg: `${defaultFromToken.symbol} not found in vault.`, type: "error" });
+        setToast({ msg: `${defaultFromToken.symbol} not found in vault — may have already been swapped.`, type: "error" });
       }
       onTokenConsumed?.();
     };
@@ -165,13 +159,33 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     setIncomingToken(null);
   };
 
+  const handleWithdrawToken = async (token: TokenData) => {
+    if (!walletClient) return;
+    const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+    if (!window.confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`)) return;
+    try {
+      const client = await getSmartAccountClient(walletClient);
+      const ownerAddress = walletClient.account?.address as Address;
+      const rawAmount = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
+      const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddress, rawAmount] });
+      const txHash = await client.sendUserOperation({
+        calls: [{ to: token.contractAddress as Address, value: 0n, data }],
+      });
+      setToast({ msg: `Withdrawing ${token.symbol}...`, type: "success" });
+      await client.waitForUserOperationReceipt({ hash: txHash });
+      setToast({ msg: `${token.symbol} withdrawn!`, type: "success" });
+      await loadDustTokens();
+    } catch (e: any) {
+      setToast({ msg: "Withdraw failed: " + (e.shortMessage || e.message), type: "error" });
+    }
+  };
+
   const getZeroExQuote = async (token: TokenData, amount: string) => {
-    // 0x Protocol tidak support testnet — skip kalau di Sepolia
-    if (isTestnet) throw new Error("0x: Testnet not supported");
     const params = new URLSearchParams({
-      chainId: chainIdStr,
+      chainId: "8453",
       sellToken: token.contractAddress,
-      buyToken: wethAddress,
+      buyToken: WETH_ADDRESS,
       sellAmount: amount,
       feeRecipient: FEE_RECIPIENT,
       buyTokenPercentageFee: FEE_PERCENTAGE,
@@ -183,8 +197,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
     const params = new URLSearchParams({
-      fromChain: chainIdStr, toChain: chainIdStr,
-      fromToken: token.contractAddress, toToken: wethAddress,
+      fromChain: "8453", toChain: "8453",
+      fromToken: token.contractAddress, toToken: WETH_ADDRESS,
       fromAmount: amount, fromAddress,
     });
     const res = await fetch(`${LIFI_API_URL}/quote?${params}`);
@@ -194,17 +208,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const handleBatchSwap = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
-
-    if (!isSupportedChain(chainId)) {
-      setToast({ msg: "Switch ke Base atau Base Sepolia dulu.", type: "error" });
-      return;
-    }
-
     setSwapping(true);
     setSwapProgress("Initializing...");
     setIncomingToken(null);
-
     try {
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
       const vaultAddress = client.account.address;
 
@@ -220,11 +228,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           let value = 0n;
 
           try {
+            // Primary: 0x Protocol
             const quote0x = await getZeroExQuote(token, token.rawBalance);
             txData = quote0x.transaction.data;
             toAddress = quote0x.transaction.to;
             value = BigInt(quote0x.transaction.value || 0);
           } catch {
+            // Fallback: LI.FI aggregator
             if (useLifiFallback) {
               const quoteLifi = await getLifiQuote(token, token.rawBalance, vaultAddress);
               txData = quoteLifi.transactionRequest.data;
@@ -249,17 +259,17 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       }
 
       if (batchCalls.length === 0) {
-        setToast({ msg: "No routes found. Di testnet, coba pakai LI.FI saja.", type: "error" });
+        setToast({ msg: "No routes found for selected tokens. Try again later.", type: "error" });
         return;
       }
 
       setSwapProgress(`Signing batch swap (${successCount} asset${successCount > 1 ? "s" : ""})...`);
       const txHash = await client.sendUserOperation({ calls: batchCalls });
 
-      setSwapProgress("Waiting for confirmation...");
+      setSwapProgress("Transaction sent! Waiting for confirmation...");
       await client.waitForUserOperationReceipt({ hash: txHash });
 
-      setToast({ msg: `Swapped ${successCount} asset${successCount > 1 ? "s" : ""} to ETH!`, type: "success" });
+      setToast({ msg: `Successfully swapped ${successCount} asset${successCount > 1 ? "s" : ""} to ETH!`, type: "success" });
       await new Promise((r) => setTimeout(r, 2000));
       await loadDustTokens();
       setSelectedTokens(new Set());
@@ -291,25 +301,21 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       )}
 
       {/* Header */}
-      <div className="bg-gradient-to-r from-blue-900/40 to-purple-900/40 border border-blue-500/20 rounded-2xl p-4 flex items-center justify-between">
+      <div className="bg-gradient-to-t from-green-900 to-red-900 border border-red-800/40 rounded-2xl p-4 flex items-center justify-between">
         <div>
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
-          <p className="text-xs text-zinc-400 mt-1">
-            {isTestnet
-              ? <span className="text-yellow-400">Testnet: routing via LI.FI only</span>
-              : <>Auto-routing via 0x Protocol & LI.FI<br /><span className="text-blue-300">5% platform fee applied.</span></>
-            }
+          <p className="text-xs text-green-200 mt-1">
+            Auto-routing via 0x Protocol & LI.FI
+            <br />
+            <span className="text-green-300">5% platform fee applied.</span>
           </p>
         </div>
-        <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-700">
-          <div className="text-[10px] text-zinc-500 uppercase font-bold text-center">Selected Value</div>
+        <div className="bg-black/30 backdrop-blur-sm p-2 rounded-lg border border-white/20">
+          <div className="text-[10px] text-white/70 uppercase font-bold text-center">Selected Value</div>
           <div className="text-lg font-mono font-bold text-white text-center">
             ${tokens.filter((t) => selectedTokens.has(t.contractAddress)).reduce((a, b) => a + b.valueUsd, 0).toFixed(2)}
-          </div>
-          <div className={`text-[9px] text-center mt-0.5 ${isTestnet ? "text-yellow-400" : "text-blue-400"}`}>
-            {getChainLabel(chainId)}
           </div>
         </div>
       </div>
@@ -379,6 +385,111 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         )}
       </div>
 
+      {/* ── VAULT ASSETS (semua token di vault, termasuk tanpa likuiditas) ── */}
+      {vaultTokens.length > 0 && (
+        <div className="space-y-2 mt-6">
+          <div className="flex items-center justify-between px-1">
+            <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-wide flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" />
+              Vault Assets ({vaultTokens.length})
+            </h3>
+            <span className="text-[10px] text-zinc-500">
+              Page {vaultPage} / {Math.ceil(vaultTokens.length / VAULT_PER_PAGE)}
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            {vaultTokens
+              .slice((vaultPage - 1) * VAULT_PER_PAGE, vaultPage * VAULT_PER_PAGE)
+              .map((token, i) => {
+                const isSelected = selectedTokens.has(token.contractAddress);
+                const isSwappable = token.valueUsd > 0.000001;
+                return (
+                  <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden">
+                        <TokenLogo token={token} />
+                      </div>
+                      <div>
+                        <div className="text-sm font-bold flex items-center gap-1.5">
+                          {token.symbol}
+                          {!isSwappable && (
+                            <span className="text-[9px] bg-zinc-200 dark:bg-zinc-700 text-zinc-500 px-1 rounded">no route</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isSwappable && (
+                        <button
+                          onClick={() => toggleToken(token.contractAddress)}
+                          className={`px-2.5 py-1.5 text-xs font-medium rounded-lg flex items-center gap-1 transition-colors ${
+                            isSelected
+                              ? "bg-blue-600 text-white"
+                              : "bg-orange-50 text-orange-500 hover:bg-orange-100 dark:bg-orange-900/20 dark:text-orange-400"
+                          }`}
+                        >
+                          <Flash className="w-3 h-3" />
+                          {isSelected ? "Selected" : "Swap"}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleWithdrawToken(token)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 transition-colors"
+                      >
+                        WD
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+
+          {/* Pagination */}
+          {Math.ceil(vaultTokens.length / VAULT_PER_PAGE) > 1 && (
+            <div className="flex justify-center items-center gap-1 mt-2 pb-2">
+              <button
+                onClick={() => setVaultPage((p) => Math.max(1, p - 1))}
+                disabled={vaultPage === 1}
+                className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: Math.ceil(vaultTokens.length / VAULT_PER_PAGE) }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === Math.ceil(vaultTokens.length / VAULT_PER_PAGE) || Math.abs(p - vaultPage) <= 2)
+                .reduce((acc: (number | string)[], p, idx, arr) => {
+                  if (idx > 0 && (p as number) - (arr[idx - 1] as number) > 1) acc.push("...");
+                  acc.push(p);
+                  return acc;
+                }, [])
+                .map((p, i) =>
+                  p === "..." ? (
+                    <span key={i} className="px-2 text-zinc-400 text-xs">...</span>
+                  ) : (
+                    <button
+                      key={i}
+                      onClick={() => setVaultPage(p as number)}
+                      className={`w-8 h-8 rounded-lg text-xs font-bold ${
+                        vaultPage === p ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  )
+                )}
+              <button
+                onClick={() => setVaultPage((p) => Math.min(Math.ceil(vaultTokens.length / VAULT_PER_PAGE), p + 1))}
+                disabled={vaultPage === Math.ceil(vaultTokens.length / VAULT_PER_PAGE)}
+                className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
+              >
+                Next →
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Floating swap button */}
       {selectedTokens.size > 0 && (
         <div className="fixed bottom-24 left-4 right-4 z-40 animate-in slide-in-from-bottom-5">
@@ -394,7 +505,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
-            {isTestnet ? "Testnet · LI.FI only" : "5% fee · 0x Protocol & LI.FI"} · {getChainLabel(chainId)}
+            5% fee · Routed via 0x Protocol & LI.FI
           </div>
         </div>
       )}
