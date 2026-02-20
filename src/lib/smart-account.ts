@@ -23,8 +23,8 @@ import { base, baseSepolia } from "viem/chains";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // Ganti ke base untuk mainnet, baseSepolia untuk testing
-export const ACTIVE_CHAIN = baseSepolia;
-export const IS_TESTNET = ACTIVE_CHAIN.id === baseSepolia.id;
+export const ACTIVE_CHAIN = base; 
+export const IS_TESTNET = ACTIVE_CHAIN.id === base.id;
 
 // Alchemy Light Account Factory
 // Source: https://github.com/alchemyplatform/light-account
