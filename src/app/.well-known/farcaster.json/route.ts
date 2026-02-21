@@ -43,6 +43,7 @@ export async function GET() {
         "tags": ["base", "baseapp", "miniapp", "swap" , "dex"]
       },
       "baseBuilder": {
+        "builder": "bc_1x8rrnnv",
         "allowedAddresses": ["0x4fba95e4772be6d37a0c931D00570Fe2c9675524"],
       }
   };
