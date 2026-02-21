@@ -72,14 +72,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getSmartAccountClient(walletClient,);
       const vaultAddr = client.account.address;
       const balances = await alchemy.core.getTokenBalances(vaultAddr);
       const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
         const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
         return !isUSDC && BigInt(t.tokenBalance || "0") > 0n;
       });
-      if (nonZeroTokens.length === 0) { setTokens([]); return; }
+      if (nonZeroTokens.length === 0) { setTokens([]); setVaultTokens([]); return; }
 
       const metadata = await Promise.all(
         nonZeroTokens.map((t: any) => alchemy.core.getTokenMetadata(t.contractAddress))

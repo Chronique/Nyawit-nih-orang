@@ -9,7 +9,7 @@ import { WagmiProvider as WagmiProviderBase } from "wagmi";
 import { base, baseSepolia } from "wagmi/chains";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useConnect, useAccount, useSwitchChain } from "wagmi";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 if (typeof window !== "undefined") {
   window.addEventListener("eip6963:announceProvider", (event: Event) => {
@@ -27,7 +27,7 @@ if (typeof window !== "undefined") {
 export const wagmiConfig = getDefaultConfig({
   appName: "Nyawit",
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "nyawit-placeholder-00000000000",
-  chains: [base, baseSepolia], // Base Mainnet first = default chain
+  chains: [base, baseSepolia],
   wallets: [
     { groupName: "Popular", wallets: [coinbaseWallet, metaMaskWallet, okxWallet, rabbyWallet] },
     { groupName: "Other", wallets: [injectedWallet] },
@@ -36,15 +36,6 @@ export const wagmiConfig = getDefaultConfig({
 });
 
 // ── ChainWatcher ──────────────────────────────────────────────────────────────
-// Automatically follows the wallet's active chain.
-// When the wallet switches to Base → app uses Base.
-// When the wallet switches to Sepolia → app uses Sepolia.
-// If the chain is unsupported → shows a red banner with switch buttons.
-//
-// No extra logic needed for supported chains because:
-// - useAccount().chainId is already reactive
-// - All components (deposit, vault, swap) read chainId from useAccount()
-// - They automatically re-fetch data when chainId changes
 function ChainWatcher() {
   const { chainId, isConnected } = useAccount();
   const { switchChainAsync } = useSwitchChain();
@@ -57,43 +48,75 @@ function ChainWatcher() {
   return (
     <div className="fixed top-0 left-0 right-0 z-[9999] bg-red-600 text-white text-xs font-bold py-2 flex items-center justify-center gap-3 shadow-lg">
       ⚠ Unsupported network (Chain ID: {chainId})
-      <button
-        onClick={() => switchChainAsync({ chainId: base.id })}
-        className="underline hover:no-underline ml-1"
-      >
+      <button onClick={() => switchChainAsync({ chainId: base.id })} className="underline hover:no-underline ml-1">
         Switch to Base
-      </button>
-      <span className="opacity-60">or</span>
-      <button
-        onClick={() => switchChainAsync({ chainId: baseSepolia.id })}
-        className="underline hover:no-underline"
-      >
-        Base Sepolia
       </button>
     </div>
   );
 }
 
-// ── AutoConnect (Farcaster) ───────────────────────────────────────────────────
+// ── AutoConnect ───────────────────────────────────────────────────────────────
+// Prioritas:
+// 1. Farcaster miniapp  → pakai connector farcaster
+// 2. Coinbase Base App  → pakai connector coinbasewallet / injected
+// 3. Browser biasa      → jangan auto connect, biarkan user pilih sendiri
 function AutoConnect() {
   const { connect, connectors } = useConnect();
   const { isConnected } = useAccount();
   const [mounted, setMounted] = useState(false);
+  const tried = useRef(false);
 
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
-    if (!mounted || isConnected) return;
+    if (!mounted || isConnected || tried.current) return;
+    tried.current = true;
+
+    const ua = navigator.userAgent || "";
+    const win = window as any;
+
+    // Deteksi Farcaster / Warpcast miniapp
     const isFarcaster =
-      !!(window as any).FrameSDK ||
-      !!(window as any).farcaster ||
-      navigator.userAgent?.includes("Farcaster") ||
-      navigator.userAgent?.includes("Warpcast");
-    if (!isFarcaster) return;
-    const fc = connectors.find(
-      (c) => c.id === "farcaster" || c.name?.toLowerCase().includes("farcaster")
-    );
-    if (fc) connect({ connector: fc });
+      !!win.FrameSDK ||
+      !!win.farcaster ||
+      ua.includes("Farcaster") ||
+      ua.includes("Warpcast");
+
+    // Deteksi Coinbase Base App / Coinbase Wallet in-app browser
+    const isCoinbaseApp =
+      !!win.__cbswDetected ||
+      ua.includes("CoinbaseWallet") ||
+      ua.includes("CoinbaseBrowser") ||
+      (!!win.ethereum && !!win.ethereum.isCoinbaseWallet);
+
+    if (isFarcaster) {
+      // Cari connector farcaster
+      const fc = connectors.find(
+        (c) => c.id === "farcaster" || c.name?.toLowerCase().includes("farcaster")
+      );
+      if (fc) {
+        console.log("[AutoConnect] Farcaster detected, connecting...");
+        connect({ connector: fc });
+      }
+      return;
+    }
+
+    if (isCoinbaseApp) {
+      // Cari coinbase connector
+      const cb = connectors.find(
+        (c) =>
+          c.id === "coinbaseWallet" ||
+          c.id === "coinbaseWalletSDK" ||
+          c.name?.toLowerCase().includes("coinbase")
+      );
+      if (cb) {
+        console.log("[AutoConnect] Coinbase Base App detected, connecting...");
+        connect({ connector: cb });
+      }
+      return;
+    }
+
+    // Browser biasa — tidak auto connect
   }, [mounted, isConnected, connectors, connect]);
 
   return null;

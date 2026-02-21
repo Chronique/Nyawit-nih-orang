@@ -4,11 +4,9 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
-  deriveVaultAddress,
-  isVaultDeployed,
+  detectVaultAddress,
   deployVault,
   publicClient,
-  publicClientSepolia,
 } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, formatEther, type Address } from "viem";
@@ -61,9 +59,9 @@ export const DustDepositView = () => {
   // Derive vault address
   useEffect(() => {
     if (!ownerAddress) return;
-    deriveVaultAddress(ownerAddress as Address, 0n, chainId).then((addr) => {
-      console.log("[DepositView] Vault address:", addr);
-      setVaultAddress(addr);
+    detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
+      console.log("[DepositView] Vault address:", address, "version:", version);
+      setVaultAddress(address);
     });
   }, [ownerAddress]);
 
@@ -73,7 +71,10 @@ export const DustDepositView = () => {
     try {
       // Pakai client sesuai chain — fix ETH balance salah chain
       const [deployed, ethBal] = await Promise.all([
-        isVaultDeployed(vaultAddress, chainId),
+        (async () => {
+          const code = await publicClient.getBytecode({ address: vaultAddress });
+          return !!code && code !== "0x";
+        })(),
         publicClient.getBalance({ address: vaultAddress }),
       ]);
       setIsDeployed(deployed);
@@ -115,9 +116,8 @@ export const DustDepositView = () => {
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
-      if (chainId !== 8453) {
-        await switchChainAsync({ chainId: 8453 });
-      }
+      // Ensure Base mainnet
+      if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
       setActivating(true);
       setToast({ msg: "Confirm transaction in your wallet...", type: "success" });
 

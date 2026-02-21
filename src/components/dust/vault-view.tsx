@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient, isSupportedChain, getChainLabel } from "~/lib/smart-account";
+import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";

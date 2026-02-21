@@ -22,14 +22,16 @@ import {
 import { base, baseSepolia } from "viem/chains";
 
 // ── Config ────────────────────────────────────────────────────────────────────
-// Ganti ke base untuk mainnet, baseSepolia untuk testing
+// Base Mainnet only — Sepolia dihapus
 export const ACTIVE_CHAIN = base; // Base Mainnet
 export const IS_TESTNET = false;
 
-// Alchemy Light Account Factory
-// Source: https://github.com/alchemyplatform/light-account
-// Sama di semua chain yang support
-const FACTORY_ADDRESS = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
+// Alchemy Light Account Factory — dua versi, auto-detect mana yang deployed
+const FACTORY_V1 = "0x00004EC70002a32400f8ae005A26081065620D20" as Address; // v1.1
+const FACTORY_V2 = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address; // v2.0
+
+// Legacy: dipakai untuk deployVault baru (selalu v2 untuk user baru)
+const FACTORY_ADDRESS = FACTORY_V2;
 
 const RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`;
 
@@ -96,7 +98,7 @@ export const publicClient = createPublicClient({
   transport: http(`https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
 });
 
-export const publicClientSepolia = createPublicClient({
+const publicClientSepolia = createPublicClient({
   chain: baseSepolia,
   transport: http(`https://base-sepolia.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
 });
@@ -125,11 +127,11 @@ export interface VaultCall {
 export const deriveVaultAddress = async (
   ownerAddress: Address,
   salt = 0n,
-  chainId?: number
+  chainId?: number,
+  factory: Address = FACTORY_ADDRESS
 ): Promise<Address> => {
-  const client = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const address = await client.readContract({
-    address: FACTORY_ADDRESS,
+  const address = await publicClient.readContract({
+    address: factory,
     abi: FACTORY_ABI,
     functionName: "getAddress",
     args: [ownerAddress, salt],
@@ -137,10 +139,45 @@ export const deriveVaultAddress = async (
   return address as Address;
 };
 
+// Auto-detect: cek v1.1 dulu (existing users), lalu v2
+// Return { address, factory, version }
+export const detectVaultAddress = async (
+  ownerAddress: Address,
+  salt = 0n,
+  chainId?: number
+): Promise<{ address: Address; factory: Address; version: "v1" | "v2" }> => {
+  // Cek v1.1 dulu (lebih banyak user existing)
+  const [addrV1, addrV2] = await Promise.all([
+    deriveVaultAddress(ownerAddress, salt, undefined, FACTORY_V1),
+    deriveVaultAddress(ownerAddress, salt, undefined, FACTORY_V2),
+  ]);
+
+  const [codeV1, codeV2] = await Promise.all([
+    publicClient.getBytecode({ address: addrV1 }),
+    publicClient.getBytecode({ address: addrV2 }),
+  ]);
+
+  const v1Deployed = !!codeV1 && codeV1 !== "0x";
+  const v2Deployed = !!codeV2 && codeV2 !== "0x";
+
+  // Prioritas: v1 dulu (existing), lalu v2, lalu default ke v2 (untuk user baru)
+  if (v1Deployed) {
+    console.log("[LightAccount] Using v1.1 vault:", addrV1);
+    return { address: addrV1, factory: FACTORY_V1, version: "v1" };
+  }
+  if (v2Deployed) {
+    console.log("[LightAccount] Using v2.0 vault:", addrV2);
+    return { address: addrV2, factory: FACTORY_V2, version: "v2" };
+  }
+
+  // Belum deploy → default ke v2 (user baru pakai v2)
+  console.log("[LightAccount] No vault deployed yet, will use v2:", addrV2);
+  return { address: addrV2, factory: FACTORY_V2, version: "v2" };
+};
+
 // ── 2. Cek apakah vault sudah di-deploy ──────────────────────────────────────
 export const isVaultDeployed = async (vaultAddress: Address, chainId?: number): Promise<boolean> => {
-  const client = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const bytecode = await client.getBytecode({ address: vaultAddress });
+  const bytecode = await publicClient.getBytecode({ address: vaultAddress });
   return !!bytecode && bytecode !== "0x";
 };
 
@@ -157,7 +194,7 @@ export const deployVault = async (
     abi: FACTORY_ABI,
     functionName: "createAccount",
     args: [walletClient.account.address, salt],
-    chain: ACTIVE_CHAIN,
+    chain: base,
     account: walletClient.account,
   });
 
@@ -188,7 +225,7 @@ export const sendBatch = async (
     abi: LIGHT_ACCOUNT_ABI,
     functionName: "executeBatch",
     args: [sanitized],
-    chain: ACTIVE_CHAIN,
+    chain: base,
     account: walletClient.account,
   });
 
@@ -208,7 +245,7 @@ export const sendSingle = async (
     abi: LIGHT_ACCOUNT_ABI,
     functionName: "execute",
     args: [call.to, call.value ?? 0n, (call.data ?? "0x") as `0x${string}`],
-    chain: ACTIVE_CHAIN,
+    chain: base,
     account: walletClient.account,
   });
 
@@ -222,14 +259,15 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
   // Pilih publicClient sesuai chain wallet
-  const chainId = walletClient.chain?.id ?? ACTIVE_CHAIN.id;
-  const activePublicClient = chainId === baseSepolia.id ? publicClientSepolia : publicClient;
-  const activeChain = chainId === baseSepolia.id ? baseSepolia : base;
+  const activePublicClient = publicClient;
+  const activeChain = base;
 
-  const vaultAddress = await deriveVaultAddress(walletClient.account.address);
+  const { address: vaultAddress, factory: vaultFactory, version: vaultVersion } =
+    await detectVaultAddress(walletClient.account.address);
 
   console.log("[LightAccount] Vault address:", vaultAddress);
   console.log("[LightAccount] Chain:", activeChain.name);
+  console.log("[LightAccount] Factory version:", vaultVersion);
 
   return {
     account: { address: vaultAddress },

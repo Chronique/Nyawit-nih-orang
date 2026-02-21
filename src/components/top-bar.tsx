@@ -31,15 +31,19 @@ export function TopBar() {
   };
 
   const handleShare = async () => {
+    const appUrl = "https://nyawit-nih-orang.vercel.app";
+    const castText = `🌴 Nyawit — Sweep your dust tokens into ETH!\n\nBatch swap semua koin receh kamu di Base jadi ETH dalam 1 klik.\n\n${appUrl}`;
     try {
-      if (navigator.share) {
-        await navigator.share({ title: "Nyawit", text: "Sweep dust tokens!", url: window.location.href });
-      } else {
-        await navigator.clipboard.writeText(window.location.href);
-        setToastMsg("Copied! 📋");
+      // Farcaster miniapp: cast langsung
+      await sdk.actions.openUrl(`https://warpcast.com/~/compose?text=${encodeURIComponent(castText)}`);
+    } catch {
+      // Fallback: copy to clipboard
+      try {
+        await navigator.clipboard.writeText(appUrl);
+        setToastMsg("Link copied! 📋");
+      } catch {
+        setToastMsg(appUrl);
       }
-    } catch (e) {
-      console.error(e);
     }
   };
 
@@ -80,7 +84,7 @@ export function TopBar() {
             >
               <Github className="w-4 h-4" />
             </a>
-            <button onClick={handleShare} className="p-2 rounded-full text-zinc-500 hover:text-blue-500 transition-all">
+            <button onClick={handleShare} className="p-2 rounded-full text-zinc-500 hover:text-purple-500 transition-all" title="Share on Farcaster">
               <Share2 className="w-4 h-4" />
             </button>
             <button onClick={toggleTheme} className="p-2 rounded-full text-zinc-500 hover:text-yellow-500 transition-all">
@@ -90,8 +94,6 @@ export function TopBar() {
 
           {/* Connect / Profile */}
           {isConnected ? (
-            // Sudah konek → tampil foto profil Farcaster atau gradient avatar
-            // Klik → view Farcaster profile (kalau di miniapp) atau disconnect
             <button onClick={handleProfileClick} className="relative group transition-transform active:scale-95">
               {userPfp ? (
                 <Image src={userPfp} alt="Profile" width={36} height={36} className="w-9 h-9 rounded-full border-2 border-green-500" />
@@ -102,9 +104,6 @@ export function TopBar() {
               )}
             </button>
           ) : (
-            // Belum konek → RainbowKit ConnectButton custom render
-            // Di web: klik → muncul bottom sheet pilih wallet
-            // Di Farcaster: AutoConnect sudah handle, tombol ini jarang terlihat
             <ConnectButton.Custom>
               {({ openConnectModal, mounted }) => (
                 <button
