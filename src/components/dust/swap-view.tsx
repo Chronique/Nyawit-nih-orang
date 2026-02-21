@@ -5,7 +5,7 @@ import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, maxUint256 } from "viem";
 import { base } from "viem/chains";
 import { Refresh, Flash, ArrowRight, Check } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
@@ -209,7 +209,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       fromAmount: amount,
       fromAddress,
       toAddress:  fromAddress,
-      slippage:   "0.03",
+      slippage:   "0.10",
       // Force allowance-based DEXes only — permit2 tidak bisa dipakai dari vault
       denyExchanges: "paraswap",
     });
@@ -303,11 +303,12 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             // 1. 0x via backend (dengan LI.FI fallback di backend)
             try {
               const params = new URLSearchParams({
-                chainId:    String(chainId || "8453"),
-                sellToken:  token.contractAddress,
-                buyToken:   WETH_ADDRESS,
-                sellAmount: token.rawBalance,
-                taker:      vaultAddress,
+                chainId:           String(chainId || "8453"),
+                sellToken:         token.contractAddress,
+                buyToken:          WETH_ADDRESS,
+                sellAmount:        token.rawBalance,
+                taker:             vaultAddress,
+                slippagePercentage: "0.10", // 10% — Warpcast simulate dulu, harga bisa bergerak
                 feeRecipient:          FEE_RECIPIENT,
                 buyTokenPercentageFee: FEE_PERCENTAGE,
               });
@@ -346,7 +347,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   body: JSON.stringify({
                     routeSummary: routeData.data.routeSummary,
                     sender: vaultAddress, recipient: vaultAddress,
-                    slippageTolerance: 300,
+                    slippageTolerance: 1000,
                   }),
                 }
               );
@@ -378,12 +379,12 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           const routeFound    = true; void routeFound;
 
           if (txData && toAddress) {
-            // approve ke approveTarget (bukan toAddress!)
-            // LI.FI: approveTarget = estimate.approvalAddress, bisa beda dari transactionRequest.to
+            // approve MaxUint256 — hindari revert karena allowance kurang atau leftover
+            // Exact amount bisa gagal kalau ada sisa allowance dari tx sebelumnya
             const approveData = encodeFunctionData({
               abi: erc20Abi,
               functionName: "approve",
-              args: [approveTarget as Address, BigInt(token.rawBalance)],
+              args: [approveTarget as Address, maxUint256],
             });
             batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: approveData });
             batchCalls.push({ to: toAddress as Address, value, data: txData });
