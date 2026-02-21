@@ -84,9 +84,15 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
       // Pakai Moralis — sama seperti vault-view, lebih reliable
       const moralisTokens = await fetchMoralisTokens(detectedAddr);
+      // Filter: exclude USDC, zero balance, dan vault address sendiri
+      // Moralis kadang return vault address sebagai "token" — ini yang bikin approval revert
+      const vaultLower = detectedAddr.toLowerCase();
       const nonZero = moralisTokens.filter((t) => {
-        const isUSDC = t.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
-        return !isUSDC && BigInt(t.balance) > 0n;
+        const addr   = t.token_address.toLowerCase();
+        const isUSDC = addr === USDC_ADDRESS.toLowerCase();
+        const isVault = addr === vaultLower;
+        if (isVault) console.warn("[SwapView] Filtered out vault address from token list:", addr);
+        return !isUSDC && !isVault && BigInt(t.balance) > 0n;
       });
 
       if (nonZero.length === 0) { setTokens([]); setVaultTokens([]); return; }
@@ -378,26 +384,23 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       // ── FASE 2: Batch approve semua sekaligus ─────────────────────────────
       setSwapProgress(`Approving ${routable.length} tokens (1 tx)...`);
 
+      const vaultAddrLower = vaultAddress.toLowerCase();
+      const zeroAddr       = "0x0000000000000000000000000000000000000000";
+
       const approvalCalls = routable
         .map((token) => {
-          const route = routes.get(token.contractAddress)!;
+          const route        = routes.get(token.contractAddress)!;
+          const tokenAddr    = token.contractAddress.toLowerCase();
+          const spenderAddr  = route.approvalAddress.toLowerCase();
 
-          // Validasi: token contract dan approvalAddress harus valid ERC20 address
-          // Bukan vault address, bukan zero address
-          const tokenAddr   = token.contractAddress.toLowerCase();
-          const approvalAddr = route.approvalAddress.toLowerCase();
-          const vaultLower  = vaultAddress.toLowerCase();
-          const zeroAddr    = "0x0000000000000000000000000000000000000000";
-
-          if (
-            tokenAddr === vaultLower ||          // token IS the vault — data corrupt
-            approvalAddr === vaultLower ||        // approval target IS the vault — wrong
-            approvalAddr === zeroAddr ||          // zero address
-            tokenAddr === approvalAddr            // approve to self — wrong
-          ) {
-            console.warn(`[Approve] Skipping ${token.symbol} — invalid addresses`, {
-              token: tokenAddr, approvalTarget: approvalAddr, vault: vaultLower
-            });
+          // GUARD: token address tidak boleh vault
+          if (tokenAddr === vaultAddrLower) {
+            console.error(`[Approve] SKIP ${token.symbol}: token address IS vault — corrupt data`);
+            return null;
+          }
+          // GUARD: spender tidak boleh vault atau zero
+          if (spenderAddr === vaultAddrLower || spenderAddr === zeroAddr) {
+            console.error(`[Approve] SKIP ${token.symbol}: spender is vault/zero — invalid route`);
             return null;
           }
 
@@ -405,8 +408,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             abi: erc20Abi, functionName: "approve",
             args: [route.approvalAddress as Address, maxUint256],
           });
-          console.log(`[Approve] ${token.symbol} → approve(${route.approvalAddress})`);
-          return { to: token.contractAddress as Address, value: 0n, data: data as `0x${string}` };
+          console.log(`[Approve] ${token.symbol}: token=${tokenAddr.slice(0,8)} spender=${spenderAddr.slice(0,8)}`);
+          // Explicit: to = token address (bukan spender, bukan vault)
+          return {
+            to:    token.contractAddress as Address,  // ERC20 contract yang di-approve
+            value: 0n,
+            data:  data as `0x${string}`,
+          };
         })
         .filter((c): c is NonNullable<typeof c> => c !== null);
 
