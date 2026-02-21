@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
-import { alchemy } from "~/lib/alchemy";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";
 import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
@@ -77,26 +76,19 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       setEthBalance(formatEther(bal));
       setIsDeployed(code !== undefined && code !== null && code !== "0x");
 
-      const balances = await alchemy.core.getTokenBalances(addr);
-      const nonZeroTokens = balances.tokenBalances.filter(
-        (t: any) => t.tokenBalance && BigInt(t.tokenBalance) > 0n
-      );
-      const metadata = await Promise.all(
-        nonZeroTokens.map((t: any) => alchemy.core.getTokenMetadata(t.contractAddress))
-      );
-      const formatted = nonZeroTokens.map((t: any, i: number) => {
-        const meta = metadata[i];
-        return {
-          ...t,
-          name: meta.name || "Unknown",
-          symbol: meta.symbol || "???",
-          logo: meta.logo,
-          contractAddress: t.contractAddress,
-          decimals: meta.decimals || 18,
-          rawBalance: t.tokenBalance,
-          formattedBal: formatUnits(BigInt(t.tokenBalance || 0), meta.decimals || 18),
-        };
-      });
+      // Pakai Moralis — 1 call, dapat semua data token sekaligus
+      const moralisTokens = await fetchMoralisTokens(addr);
+      const formatted = moralisTokens
+        .filter((t) => BigInt(t.balance) > 0n)
+        .map((t) => ({
+          contractAddress: t.token_address,
+          name: t.name || "Unknown",
+          symbol: t.symbol || "???",
+          logo: t.logo || null,
+          decimals: t.decimals || 18,
+          rawBalance: t.balance,
+          formattedBal: formatUnits(BigInt(t.balance), t.decimals || 18),
+        }));
 
       const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       const others = formatted.filter((t: any) => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());

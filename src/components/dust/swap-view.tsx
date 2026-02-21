@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, isSupportedChain, getChainLabel } from "~/lib/smart-account";
-import { alchemy } from "~/lib/alchemy";
+import { getSmartAccountClient } from "~/lib/smart-account";
+import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { base } from "viem/chains";
@@ -67,36 +67,40 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
   const [vaultPage, setVaultPage] = useState(1);
   const VAULT_PER_PAGE = 10;
+  const [vaultAddr, setVaultAddr] = useState<string | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
+    setScanError(null);
     try {
-      const client = await getSmartAccountClient(walletClient,);
-      const vaultAddr = client.account.address;
-      const balances = await alchemy.core.getTokenBalances(vaultAddr);
-      const nonZeroTokens = balances.tokenBalances.filter((t: any) => {
-        const isUSDC = t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase();
-        return !isUSDC && BigInt(t.tokenBalance || "0") > 0n;
-      });
-      if (nonZeroTokens.length === 0) { setTokens([]); setVaultTokens([]); return; }
+      const client = await getSmartAccountClient(walletClient);
+      const detectedAddr = client.account.address;
+      setVaultAddr(detectedAddr);
+      console.log("[SwapView] Scanning vault:", detectedAddr);
 
-      const metadata = await Promise.all(
-        nonZeroTokens.map((t: any) => alchemy.core.getTokenMetadata(t.contractAddress))
-      );
-      const addresses = nonZeroTokens.map((t: any) => t.contractAddress);
+      // Pakai Moralis — sama seperti vault-view, lebih reliable
+      const moralisTokens = await fetchMoralisTokens(detectedAddr);
+      const nonZero = moralisTokens.filter((t) => {
+        const isUSDC = t.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
+        return !isUSDC && BigInt(t.balance) > 0n;
+      });
+
+      if (nonZero.length === 0) { setTokens([]); setVaultTokens([]); return; }
+
+      const addresses = nonZero.map((t) => t.token_address);
       const prices = await fetchTokenPrices(addresses);
 
-      const formatted: TokenData[] = nonZeroTokens.map((t: any, i: number) => {
-        const meta = metadata[i];
-        const decimals = meta.decimals || 18;
-        const rawBal = t.tokenBalance || "0";
+      const formatted: TokenData[] = nonZero.map((t) => {
+        const decimals = t.decimals || 18;
+        const rawBal = t.balance;
         const fmtBal = formatUnits(BigInt(rawBal), decimals);
-        const price = prices[t.contractAddress.toLowerCase()] || 0;
+        const price = prices[t.token_address.toLowerCase()] || 0;
         return {
-          contractAddress: t.contractAddress,
-          symbol: meta.symbol || "UNKNOWN",
-          logo: meta.logo || null,
+          contractAddress: t.token_address,
+          symbol: t.symbol || "UNKNOWN",
+          logo: t.logo || null,
           decimals,
           rawBalance: rawBal,
           formattedBal: fmtBal,
@@ -105,17 +109,16 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         };
       });
 
-      // Semua token di vault (untuk Vault Assets section)
       formatted.sort((a, b) => b.valueUsd - a.valueUsd);
       setVaultTokens(formatted);
       setVaultPage(1);
 
-      // Hanya token dengan value > threshold untuk swap section
       const validDust = formatted.filter((t) => t.valueUsd > 0.000001);
       setTokens(validDust);
       return validDust;
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      console.error("[SwapView] Error:", e);
+      setScanError(e?.shortMessage || e?.message || "Unknown error");
     } finally {
       setLoading(false);
     }
@@ -337,8 +340,20 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         {loading ? (
           <div className="text-center py-12 animate-pulse text-zinc-500 text-xs">Scanning dust tokens...</div>
         ) : tokens.length === 0 ? (
-          <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl">
-            No dust tokens found in vault.
+          <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl space-y-2 p-4">
+            {scanError ? (
+              <div className="text-red-400 text-xs">⚠ Error: {scanError}</div>
+            ) : (
+              <div>No dust tokens found in vault.</div>
+            )}
+            {vaultAddr && (
+              <div className="text-[10px] text-zinc-600 font-mono break-all">
+                Vault: {vaultAddr.slice(0,10)}...{vaultAddr.slice(-8)}
+              </div>
+            )}
+            <div className="text-[10px] text-zinc-600">
+              Deposit tokens via tab Panen → Wallet Assets → Deposit
+            </div>
           </div>
         ) : (
           tokens.map((token, i) => {
