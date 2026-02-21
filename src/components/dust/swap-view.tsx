@@ -277,144 +277,197 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     setSwapping(true);
     setSwapProgress("Initializing...");
     setIncomingToken(null);
+
+    const MAX_PER_BATCH = 10; // max token per sesi
+
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const client       = await getSmartAccountClient(walletClient);
       const vaultAddress = client.account.address;
 
-      const batchCalls: any[] = [];
-      const tokensToSwap = tokens.filter((t) => selectedTokens.has(t.contractAddress));
-      let successCount = 0;
+      // Ambil token terpilih, max 10
+      const tokensToSwap = tokens
+        .filter((t) => selectedTokens.has(t.contractAddress))
+        .slice(0, MAX_PER_BATCH);
 
-      for (const token of tokensToSwap) {
-        setSwapProgress(`Finding route for ${token.symbol}...`);
+      // ── FASE 1: Fetch semua quote dulu ─────────────────────────────────────
+      // Quote diambil sebelum approval agar approvalAddress diketahui
+      setSwapProgress(`Fetching routes for ${tokensToSwap.length} tokens...`);
+
+      interface RouteResult {
+        data: `0x${string}`; to: string; value: string; approvalAddress: string; agg: string;
+      }
+      const routes: Map<string, RouteResult> = new Map();
+
+      await Promise.all(tokensToSwap.map(async (token) => {
+        // 1. 0x backend (LI.FI fallback)
         try {
-          let txData = null;
-          let toAddress = null;
-          let value = 0n;
-
-          // Try aggregators: 0x → LI.FI → KyberSwap
-          // RouteResult: { data, to, value, approvalAddress }
-          // approvalAddress BISA BEDA dari `to` (terutama LI.FI)
-          // Harus approve ke approvalAddress, bukan ke to!
-          interface RouteResult { data: string; to: string; value: string; approvalAddress: string; }
-
-          const getRoute = async (): Promise<{ result: RouteResult; agg: string }> => {
-            // 1. 0x via backend (dengan LI.FI fallback di backend)
-            try {
-              const params = new URLSearchParams({
-                chainId:           String(chainId || "8453"),
-                sellToken:         token.contractAddress,
-                buyToken:          WETH_ADDRESS,
-                sellAmount:        token.rawBalance,
-                taker:             vaultAddress,
-                slippagePercentage: "0.10", // 10% — Warpcast simulate dulu, harga bisa bergerak
-                feeRecipient:          FEE_RECIPIENT,
-                buyTokenPercentageFee: FEE_PERCENTAGE,
+          const params = new URLSearchParams({
+            chainId:            String(chainId || "8453"),
+            sellToken:          token.contractAddress,
+            buyToken:           WETH_ADDRESS,
+            sellAmount:         token.rawBalance,
+            taker:              vaultAddress,
+            slippagePercentage: "0.15",
+            feeRecipient:          FEE_RECIPIENT,
+            buyTokenPercentageFee: FEE_PERCENTAGE,
+          });
+          const res = await fetch(`/api/0x/quote?${params}`);
+          if (res.ok) {
+            const q = await res.json();
+            if (!q.error && q.transaction?.data) {
+              routes.set(token.contractAddress, {
+                data:            q.transaction.data as `0x${string}`,
+                to:              q.transaction.to,
+                value:           q.transaction.value || "0",
+                approvalAddress: q.transaction.approvalAddress || q.transaction.to,
+                agg:             q._source === "lifi" ? "LI.FI" : "0x",
               });
-              const res = await fetch(`/api/0x/quote?${params}`);
-              if (!res.ok) throw new Error("0x backend: " + res.status);
-              const q = await res.json();
-              if (q.error) throw new Error("0x: " + q.error);
-              return {
-                agg: q._source === "lifi" ? "LI.FI (via backend)" : "0x",
-                result: {
-                  data:  q.transaction.data,
-                  to:    q.transaction.to,
-                  value: q.transaction.value || "0",
-                  // approvalAddress ada di response kalau backend fallback ke LI.FI
-                  approvalAddress: q.transaction.approvalAddress || q.transaction.to,
-                },
-              };
-            } catch (e: any) {
-              console.warn("[Swap] 0x/LI.FI backend failed:", e?.message);
+              return;
             }
-
-            // 2. KyberSwap direct
-            try {
-              const routeRes = await fetch(
-                `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
-                { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
-              );
-              if (!routeRes.ok) throw new Error("Kyber route " + routeRes.status);
-              const routeData = await routeRes.json();
-              if (!routeData?.data?.routeSummary) throw new Error("Kyber: no route");
-              const buildRes = await fetch(
-                `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
-                {
-                  method: "POST",
-                  headers: { "Accept": "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
-                  body: JSON.stringify({
-                    routeSummary: routeData.data.routeSummary,
-                    sender: vaultAddress, recipient: vaultAddress,
-                    slippageTolerance: 1000,
-                  }),
-                }
-              );
-              if (!buildRes.ok) throw new Error("Kyber build " + buildRes.status);
-              const bd = await buildRes.json();
-              if (!bd?.data?.data) throw new Error("Kyber: no tx data");
-              return {
-                agg: "KyberSwap",
-                result: {
-                  data:            bd.data.data,
-                  to:              bd.data.routerAddress,
-                  value:           "0x0",
-                  approvalAddress: bd.data.routerAddress,
-                },
-              };
-            } catch (e: any) {
-              console.warn("[Swap] KyberSwap failed:", e?.message);
-            }
-
-            throw new Error("No route from any aggregator");
-          };
-
-          const { result: route, agg: usedAgg } = await getRoute();
-          txData    = route.data;
-          toAddress = route.to;
-          value     = BigInt(route.value);
-          console.log(`[Swap] ${token.symbol} → ${usedAgg}, approvalTarget: ${route.approvalAddress}`);
-          const approveTarget = route.approvalAddress;
-          const routeFound    = true; void routeFound;
-
-          if (txData && toAddress) {
-            // approve MaxUint256 — hindari revert karena allowance kurang atau leftover
-            // Exact amount bisa gagal kalau ada sisa allowance dari tx sebelumnya
-            const approveData = encodeFunctionData({
-              abi: erc20Abi,
-              functionName: "approve",
-              args: [approveTarget as Address, maxUint256],
-            });
-            batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: approveData });
-            batchCalls.push({ to: toAddress as Address, value, data: txData });
-            successCount++;
           }
+        } catch {}
+
+        // 2. KyberSwap fallback
+        try {
+          const rRes = await fetch(
+            `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
+            { headers: { Accept: "application/json", "x-client-id": "nyawit" } }
+          );
+          if (!rRes.ok) return;
+          const rd = await rRes.json();
+          if (!rd?.data?.routeSummary) return;
+          const bRes = await fetch(
+            `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
+            {
+              method: "POST",
+              headers: { Accept: "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
+              body: JSON.stringify({
+                routeSummary:      rd.data.routeSummary,
+                sender:            vaultAddress,
+                recipient:         vaultAddress,
+                slippageTolerance: 1500,
+              }),
+            }
+          );
+          if (!bRes.ok) return;
+          const bd = await bRes.json();
+          if (!bd?.data?.data) return;
+          routes.set(token.contractAddress, {
+            data:            bd.data.data as `0x${string}`,
+            to:              bd.data.routerAddress,
+            value:           "0x0",
+            approvalAddress: bd.data.routerAddress,
+            agg:             "KyberSwap",
+          });
+        } catch {}
+      }));
+
+      if (routes.size === 0) {
+        setToast({ msg: "No routes found for any token.", type: "error" });
+        return;
+      }
+
+      // Token yang dapat route
+      const routable = tokensToSwap.filter((t) => routes.has(t.contractAddress));
+      const noRoute  = tokensToSwap.filter((t) => !routes.has(t.contractAddress));
+      if (noRoute.length > 0) {
+        console.log("[Swap] No route for:", noRoute.map(t => t.symbol).join(", "));
+      }
+
+      // ── FASE 2: Batch approve semua sekaligus ─────────────────────────────
+      // Satu tx approve ke semua router — hemat gas
+      setSwapProgress(`Approving ${routable.length} tokens (1 tx)...`);
+
+      const approvalCalls = routable.map((token) => {
+        const route = routes.get(token.contractAddress)!;
+        const data  = encodeFunctionData({
+          abi: erc20Abi, functionName: "approve",
+          args: [route.approvalAddress as Address, maxUint256],
+        });
+        return { to: token.contractAddress as Address, value: 0n, data: data as `0x${string}` };
+      });
+
+      const approveTx = await client.sendUserOperation({ calls: approvalCalls });
+      setSwapProgress("Waiting for approvals...");
+      await client.waitForUserOperationReceipt({ hash: approveTx });
+      console.log("[Swap] Batch approval confirmed ✓");
+
+      // ── FASE 3: Swap satu per satu — isolasi failure ───────────────────────
+      // Quote diambil ULANG tepat sebelum swap untuk hindari stale quote
+      let successCount = 0;
+      let failCount    = 0;
+
+      for (const token of routable) {
+        const routeInfo = routes.get(token.contractAddress)!;
+        setSwapProgress(`[${successCount + failCount + 1}/${routable.length}] Swapping ${token.symbol} via ${routeInfo.agg}...`);
+        try {
+          // Re-fetch quote agar fresh — approval sudah dilakukan, tinggal swap
+          let freshRoute = routeInfo; // fallback ke quote lama kalau re-fetch gagal
+          try {
+            const params = new URLSearchParams({
+              chainId:            String(chainId || "8453"),
+              sellToken:          token.contractAddress,
+              buyToken:           WETH_ADDRESS,
+              sellAmount:         token.rawBalance,
+              taker:              vaultAddress,
+              slippagePercentage: "0.15",
+              feeRecipient:          FEE_RECIPIENT,
+              buyTokenPercentageFee: FEE_PERCENTAGE,
+            });
+            const res = await fetch(`/api/0x/quote?${params}`);
+            if (res.ok) {
+              const q = await res.json();
+              if (!q.error && q.transaction?.data) {
+                freshRoute = {
+                  data:            q.transaction.data as `0x${string}`,
+                  to:              q.transaction.to,
+                  value:           q.transaction.value || "0",
+                  approvalAddress: q.transaction.approvalAddress || q.transaction.to,
+                  agg:             q._source === "lifi" ? "LI.FI" : "0x",
+                };
+              }
+            }
+          } catch {}
+
+          const swapTx = await client.sendUserOperation({
+            calls: [{
+              to:    freshRoute.to as Address,
+              value: BigInt(freshRoute.value),
+              data:  freshRoute.data as `0x${string}`,
+            }],
+          });
+          await client.waitForUserOperationReceipt({ hash: swapTx });
+          console.log(`[Swap] ${token.symbol} ✓`);
+          successCount++;
         } catch (e: any) {
-          console.error(`No route for ${token.symbol}:`, e?.message || e);
-          setSwapProgress(`Skipping ${token.symbol}: no route`);
+          console.error(`[Swap] ${token.symbol} failed:`, e?.message);
+          failCount++;
+          setSwapProgress(`${token.symbol} failed, continuing...`);
           await new Promise(r => setTimeout(r, 500));
         }
       }
 
-      if (batchCalls.length === 0) {
-        setToast({ msg: "No routes found for selected tokens. Try again later.", type: "error" });
-        return;
-      }
+      // Summary
+      const parts = [];
+      if (successCount > 0) parts.push(`${successCount} swapped`);
+      if (failCount > 0)    parts.push(`${failCount} failed`);
+      if (noRoute.length > 0) parts.push(`${noRoute.length} no route`);
+      setToast({
+        msg:  successCount > 0 ? `✓ ${parts.join(", ")}` : `Failed: ${parts.join(", ")}`,
+        type: successCount > 0 ? "success" : "error",
+      });
 
-      setSwapProgress(`Signing batch swap (${successCount} asset${successCount > 1 ? "s" : ""})...`);
-      const txHash = await client.sendUserOperation({ calls: batchCalls });
-
-      setSwapProgress("Transaction sent! Waiting for confirmation...");
-      await client.waitForUserOperationReceipt({ hash: txHash });
-
-      setToast({ msg: `Successfully swapped ${successCount} asset${successCount > 1 ? "s" : ""} to ETH!`, type: "success" });
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 2000));
       await loadDustTokens();
       setSelectedTokens(new Set());
+
     } catch (e: any) {
-      console.error(e);
-      setToast({ msg: "Swap failed: " + (e.shortMessage || e.message), type: "error" });
+      const msg = e?.shortMessage || e?.message || "Unknown";
+      setToast({
+        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Error: " + msg,
+        type: "error",
+      });
     } finally {
       setSwapping(false);
       setSwapProgress("");
@@ -653,7 +706,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             {swapping ? (
               <><Refresh className="w-5 h-5 animate-spin" /><span className="text-sm">{swapProgress}</span></>
             ) : (
-              <><Flash className="w-5 h-5" />Swap {selectedTokens.size} Asset{selectedTokens.size > 1 ? "s" : ""}</>
+              <><Flash className="w-5 h-5" />Sweep {Math.min(selectedTokens.size, 10)} Token{selectedTokens.size > 1 ? "s" : ""} → ETH</>
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
