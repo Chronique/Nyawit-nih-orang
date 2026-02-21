@@ -7,12 +7,12 @@ export const WalletConnectPrompt = () => {
   const { connectors, connect } = useConnect();
 
   const handleConnect = () => {
-    // Fallback untuk user di browser biasa
+    // Prefer injected wallet (Rabby/MetaMask), fallback to Coinbase
+    const injectedConnector = connectors.find((c) => c.id === "injected");
     const coinbaseConnector = connectors.find((c) =>
       c.name.toLowerCase().includes("coinbase")
     );
-    const injectedConnector = connectors.find((c) => c.id === "injected");
-    const preferred = coinbaseConnector ?? injectedConnector ?? connectors[0];
+    const preferred = injectedConnector ?? coinbaseConnector ?? connectors[0];
     if (preferred) connect({ connector: preferred });
   };
 
@@ -34,7 +34,7 @@ export const WalletConnectPrompt = () => {
         </h3>
         <p className="text-zinc-500 text-sm leading-relaxed">
           Connect via <strong>Base App</strong>, <strong>Coinbase Smart Wallet</strong>,
-          atau <strong>Rabby / MetaMask</strong> untuk akses Smart Vault.
+          or <strong>Rabby / MetaMask</strong> to access your Smart Vault.
         </p>
       </div>
 

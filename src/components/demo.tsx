@@ -52,7 +52,7 @@ export default function Demo() {
                <div className="space-y-2 max-w-xs mx-auto">
                   <h2 className="text-2xl font-bold">Welcome to Nyawit</h2>
                   <p className="text-zinc-500">
-                    Connect your wallet (Rabby, MetaMask, or Email) via the top right button to access your Smart Vault.
+                    Connect your wallet (Rabby, MetaMask, or OKX) via the top right button to access your Smart Vault.
                   </p>
                </div>
 

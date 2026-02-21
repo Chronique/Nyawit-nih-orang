@@ -148,7 +148,7 @@ export function SignSiweMessage() {
 
     setVerifyResult(null);
     const message = new SiweMessage({
-      domain: "https://frames-v2-demo-lilac.vercel.app",
+      domain: "https://nyawit-nih-orang.vercel.app",
       address,
       statement: "Sign in with Ethereum to this mini app.",
       uri: window.location.origin,

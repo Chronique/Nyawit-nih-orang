@@ -27,7 +27,7 @@ if (typeof window !== "undefined") {
 export const wagmiConfig = getDefaultConfig({
   appName: "Nyawit",
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "nyawit-placeholder-00000000000",
-  chains: [baseSepolia, base], // Sepolia duluan = default
+  chains: [base, baseSepolia], // Base Mainnet first = default chain
   wallets: [
     { groupName: "Popular", wallets: [coinbaseWallet, metaMaskWallet, okxWallet, rabbyWallet] },
     { groupName: "Other", wallets: [injectedWallet] },
@@ -36,14 +36,15 @@ export const wagmiConfig = getDefaultConfig({
 });
 
 // ── ChainWatcher ──────────────────────────────────────────────────────────────
-// Otomatis ikut chain wallet. Kalau wallet switch ke Base → app pakai Base.
-// Kalau wallet switch ke Sepolia → app pakai Sepolia.
-// Kalau chain tidak didukung sama sekali → tampil banner merah + tombol switch.
+// Automatically follows the wallet's active chain.
+// When the wallet switches to Base → app uses Base.
+// When the wallet switches to Sepolia → app uses Sepolia.
+// If the chain is unsupported → shows a red banner with switch buttons.
 //
-// Tidak perlu lakukan apa-apa untuk chain yang SUPPORTED karena:
-// - useAccount().chainId sudah reaktif
-// - Semua komponen (deposit, vault, swap) sudah pakai chainId dari useAccount()
-// - Mereka otomatis re-fetch data ketika chainId berubah
+// No extra logic needed for supported chains because:
+// - useAccount().chainId is already reactive
+// - All components (deposit, vault, swap) read chainId from useAccount()
+// - They automatically re-fetch data when chainId changes
 function ChainWatcher() {
   const { chainId, isConnected } = useAccount();
   const { switchChainAsync } = useSwitchChain();
@@ -53,22 +54,21 @@ function ChainWatcher() {
   const isSupported = chainId === base.id || chainId === baseSepolia.id;
   if (isSupported) return null;
 
-  // Chain tidak dikenal — tampil banner
   return (
     <div className="fixed top-0 left-0 right-0 z-[9999] bg-red-600 text-white text-xs font-bold py-2 flex items-center justify-center gap-3 shadow-lg">
-      ⚠ Chain tidak didukung (ID: {chainId})
-      <button
-        onClick={() => switchChainAsync({ chainId: baseSepolia.id })}
-        className="underline hover:no-underline ml-1"
-      >
-        Switch ke Base Sepolia
-      </button>
-      <span className="opacity-60">atau</span>
+      ⚠ Unsupported network (Chain ID: {chainId})
       <button
         onClick={() => switchChainAsync({ chainId: base.id })}
+        className="underline hover:no-underline ml-1"
+      >
+        Switch to Base
+      </button>
+      <span className="opacity-60">or</span>
+      <button
+        onClick={() => switchChainAsync({ chainId: baseSepolia.id })}
         className="underline hover:no-underline"
       >
-        Base Mainnet
+        Base Sepolia
       </button>
     </div>
   );
