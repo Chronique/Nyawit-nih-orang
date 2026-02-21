@@ -9,6 +9,7 @@ import {
   publicClient,
 } from "~/lib/smart-account";
 import { alchemy } from "~/lib/alchemy";
+import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, formatEther, type Address } from "viem";
 import { Rocket, Check, Copy, Refresh } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
@@ -240,26 +241,8 @@ export const DustDepositView = () => {
           </p>
         </div>
       )}
-
-      {/* DUST TOKENS IN VAULT */}
-      {dustTokens.length > 0 && (
-        <div className="space-y-2">
-          <div className="text-xs font-semibold text-zinc-500 uppercase tracking-wide px-1">
-            Tokens in Vault
-          </div>
-          {dustTokens.map((token, i) => (
-            <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-              <div className="flex items-center gap-3">
-                <TokenLogo token={token} />
-                <div>
-                  <div className="text-sm font-semibold">{token.symbol}</div>
-                  <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
+
+    
   );
 };

@@ -202,10 +202,21 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     const params = new URLSearchParams({
       fromChain: "8453", toChain: "8453",
       fromToken: token.contractAddress, toToken: WETH_ADDRESS,
-      fromAmount: amount, fromAddress,
+      fromAmount: amount,
+      fromAddress,
+      toAddress: fromAddress,    // output ETH juga ke vault
+      slippage: "0.03",          // 3% slippage tolerance
+      integrator: "nyawit",
+      fee: FEE_PERCENTAGE,
+      referrer: FEE_RECIPIENT,
     });
-    const res = await fetch(`${LIFI_API_URL}/quote?${params}`);
-    if (!res.ok) { const err = await res.json(); throw new Error(err.message || "LI.FI: No route found"); }
+    const res = await fetch(`${LIFI_API_URL}/quote?${params}`, {
+      headers: { "Accept": "application/json" }
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`LI.FI ${res.status}: ${text.slice(0, 100)}`);
+    }
     return res.json();
   };
 
@@ -256,8 +267,10 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             batchCalls.push({ to: toAddress as Address, value, data: txData });
             successCount++;
           }
-        } catch (e) {
-          console.error(`No route for ${token.symbol}:`, e);
+        } catch (e: any) {
+          console.error(`No route for ${token.symbol}:`, e?.message || e);
+          setSwapProgress(`Skipping ${token.symbol}: no route`);
+          await new Promise(r => setTimeout(r, 500));
         }
       }
 
