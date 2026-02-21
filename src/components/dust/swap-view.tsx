@@ -67,9 +67,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
   const [vaultPage, setVaultPage] = useState(1);
   const VAULT_PER_PAGE = 10;
+  const chainIdStr = String(chainId);
   const [vaultAddr, setVaultAddr] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
-
+  const [feeEnabled, setFeeEnabled] = useState(true);
+  
   const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
@@ -200,18 +202,22 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
     const params = new URLSearchParams({
-      fromChain: "8453", toChain: "8453",
-      fromToken: token.contractAddress, toToken: WETH_ADDRESS,
+      fromChain:  chainIdStr,
+      toChain:    chainIdStr,
+      fromToken:  token.contractAddress,
+      toToken:    WETH_ADDRESS,
       fromAmount: amount,
       fromAddress,
-      toAddress: fromAddress,
-      slippage: "0.03",
-      ...(LIFI_API_KEY && {
-        integrator: "nyawit",
-        fee: FEE_PERCENTAGE,
-        referrer: FEE_RECIPIENT,
-      }),
+      toAddress:  fromAddress,
+      slippage:   "0.03",
+      // Force allowance-based DEXes only — permit2 tidak bisa dipakai dari vault
+      denyExchanges: "paraswap",
     });
+    if (LIFI_API_KEY && feeEnabled) {
+      params.set("integrator", "nyawit");
+      params.set("fee",        "0.05");
+      params.set("referrer",   FEE_RECIPIENT);
+    }
     const headers: Record<string, string> = { "Accept": "application/json" };
     if (LIFI_API_KEY) headers["x-lifi-api-key"] = LIFI_API_KEY;
     const res = await fetch(`${LIFI_API_URL}/quote?${params}`, { headers });
@@ -219,7 +225,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       const text = await res.text();
       throw new Error(`LI.FI ${res.status}: ${text.slice(0, 100)}`);
     }
-    return res.json();
+    const data = await res.json();
+    // Reject permit2 — vault tidak support off-chain signature approval
+    const approvalAddr = (data?.estimate?.approvalAddress || "").toLowerCase();
+    if (approvalAddr === "0x000000000022d473030f116ddee9f6b43ac78ba3") {
+      throw new Error("LI.FI: permit2 route not supported in vault — skipping");
+    }
+    return data;
   };
 
   // KyberSwap — gratis, no signup, Base support bagus
