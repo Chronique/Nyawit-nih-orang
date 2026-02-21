@@ -32,19 +32,10 @@ interface SwapViewProps {
   onTokenConsumed?: () => void;
 }
 
-// RouteResult — normalized output dari semua aggregator
-// approvalAddress bisa beda dari `to` (khusus LI.FI)
-interface RouteResult {
-  data:             string;
-  to:               string;
-  value:            string;
-  approvalAddress?: string; // target untuk approve() — pakai ini, bukan `to`
-}
-
-const USDC_ADDRESS  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const WETH_ADDRESS  = "0x4200000000000000000000000000000000000006";
-const LIFI_API_URL  = "https://li.quest/v1";
-const LIFI_API_KEY  = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
+const LIFI_API_URL = "https://li.quest/v1";
+const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
 const FEE_PERCENTAGE = "0.05";
 
@@ -72,13 +63,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [swapProgress, setSwapProgress] = useState("");
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
+  // Vault assets (semua token di vault termasuk yang tidak ada likuiditas)
   const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
   const [vaultPage, setVaultPage] = useState(1);
   const VAULT_PER_PAGE = 10;
   const chainIdStr = String(chainId);
   const [vaultAddr, setVaultAddr] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [feeEnabled] = useState(true); // platform fee always on
+  const [feeEnabled, setFeeEnabled] = useState(true);
 
   const loadDustTokens = async () => {
     if (!walletClient) return;
@@ -90,6 +82,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       setVaultAddr(detectedAddr);
       console.log("[SwapView] Scanning vault:", detectedAddr);
 
+      // Pakai Moralis — sama seperti vault-view, lebih reliable
       const moralisTokens = await fetchMoralisTokens(detectedAddr);
       const nonZero = moralisTokens.filter((t) => {
         const isUSDC = t.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
@@ -193,100 +186,76 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── Quote functions ─────────────────────────────────────────────────────────
-  // Semua return RouteResult dengan approvalAddress yang benar
-
-  // 0x — allowance-holder endpoint, fee dari output ETH
-  const getZeroExQuote = async (token: TokenData, amount: string): Promise<RouteResult> => {
+  const getZeroExQuote = async (token: TokenData, amount: string) => {
     const params = new URLSearchParams({
-      chainId:    String(chainId || "8453"),
-      sellToken:  token.contractAddress,
-      buyToken:   WETH_ADDRESS,
+      chainId: "8453",
+      sellToken: token.contractAddress,
+      buyToken: WETH_ADDRESS,
       sellAmount: amount,
-      taker:      "", // diisi nanti di handleBatchSwap setelah dapat vaultAddress
-      ...(feeEnabled && {
-        feeRecipient:          FEE_RECIPIENT,
-        buyTokenPercentageFee: FEE_PERCENTAGE,
-      }),
+      feeRecipient: FEE_RECIPIENT,
+      buyTokenPercentageFee: FEE_PERCENTAGE,
     });
     const res = await fetch(`/api/0x/quote?${params}`);
     if (!res.ok) throw new Error("0x: No route found");
-    const q = await res.json();
-    return {
-      data:  q.transaction.data,
-      to:    q.transaction.to,
-      value: q.transaction.value || "0",
-      // 0x allowance-holder: approval target = transaction.to (sama)
-      approvalAddress: q.transaction.to,
-    };
+    return res.json();
   };
 
-  // LI.FI — approvalAddress BISA BEDA dari transactionRequest.to
-  // Ini root cause revert sebelumnya — approve ke .to padahal harus ke approvalAddress
-  const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string): Promise<RouteResult> => {
+  const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
     const params = new URLSearchParams({
-      fromChain:     chainIdStr,
-      toChain:       chainIdStr,
-      fromToken:     token.contractAddress,
-      toToken:       WETH_ADDRESS,
-      fromAmount:    amount,
+      fromChain:  chainIdStr,
+      toChain:    chainIdStr,
+      fromToken:  token.contractAddress,
+      toToken:    WETH_ADDRESS,
+      fromAmount: amount,
       fromAddress,
-      toAddress:     fromAddress,
-      slippage:      "0.03",
-      denyExchanges: "paraswap", // paraswap pakai permit2, tidak compatible dengan vault
+      toAddress:  fromAddress,
+      slippage:   "0.03",
+      // Force allowance-based DEXes only — permit2 tidak bisa dipakai dari vault
+      denyExchanges: "paraswap",
     });
     if (LIFI_API_KEY && feeEnabled) {
       params.set("integrator", "nyawit");
-      params.set("fee",        FEE_PERCENTAGE);
+      params.set("fee",        "0.05");
       params.set("referrer",   FEE_RECIPIENT);
     }
     const headers: Record<string, string> = { "Accept": "application/json" };
     if (LIFI_API_KEY) headers["x-lifi-api-key"] = LIFI_API_KEY;
-
     const res = await fetch(`${LIFI_API_URL}/quote?${params}`, { headers });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`LI.FI ${res.status}: ${text.slice(0, 100)}`);
     }
-    const q = await res.json();
-
+    const data = await res.json();
     // Reject permit2 — vault tidak support off-chain signature approval
-    const approvalAddr = (q?.estimate?.approvalAddress || "").toLowerCase();
+    const approvalAddr = (data?.estimate?.approvalAddress || "").toLowerCase();
     if (approvalAddr === "0x000000000022d473030f116ddee9f6b43ac78ba3") {
-      throw new Error("LI.FI: permit2 route — skipping");
+      throw new Error("LI.FI: permit2 route not supported in vault — skipping");
     }
-
-    return {
-      data:  q.transactionRequest.data,
-      to:    q.transactionRequest.to,
-      value: q.transactionRequest.value || "0",
-      // PENTING: approvalAddress dari estimate, bukan dari transactionRequest.to
-      // Tanpa ini approve ke alamat salah → revert #1002
-      approvalAddress: q.estimate?.approvalAddress || q.transactionRequest.to,
-    };
+    return data;
   };
 
-  // KyberSwap — approval ke routerAddress (sama dengan to)
-  const getKyberQuote = async (token: TokenData, amount: string, fromAddress: string): Promise<RouteResult> => {
+  // KyberSwap — gratis, no signup, Base support bagus
+  const getKyberQuote = async (token: TokenData, amount: string, fromAddress: string) => {
+    // Step 1: get route
     const routeRes = await fetch(
-      `https://aggregator-api.kyberswap.com/base/api/v1/routes` +
-      `?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${amount}`,
+      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${amount}&saveGas=false&gasInclude=false`,
       { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
     );
     if (!routeRes.ok) throw new Error(`KyberSwap route ${routeRes.status}`);
     const routeData = await routeRes.json();
     if (!routeData?.data?.routeSummary) throw new Error("KyberSwap: no route");
 
+    // Step 2: build tx
     const buildRes = await fetch(
       `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
       {
         method: "POST",
         headers: { "Accept": "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
         body: JSON.stringify({
-          routeSummary:      routeData.data.routeSummary,
-          sender:            fromAddress,
-          recipient:         fromAddress,
-          slippageTolerance: 300,
+          routeSummary: routeData.data.routeSummary,
+          sender: fromAddress,
+          recipient: fromAddress,
+          slippageTolerance: 300, // 3% in bps
         }),
       }
     );
@@ -295,14 +264,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!buildData?.data?.data) throw new Error("KyberSwap: no tx data");
 
     return {
-      data:            buildData.data.data,
-      to:              buildData.data.routerAddress,
-      value:           "0x0",
-      approvalAddress: buildData.data.routerAddress, // Kyber: approve ke router
+      transactionRequest: {
+        to: buildData.data.routerAddress,
+        data: buildData.data.data,
+        value: "0x0",
+      }
     };
   };
 
-  // ── Batch swap ──────────────────────────────────────────────────────────────
   const handleBatchSwap = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSwapping(true);
@@ -320,76 +289,108 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       for (const token of tokensToSwap) {
         setSwapProgress(`Finding route for ${token.symbol}...`);
         try {
-          // Aggregator chain: 0x → LI.FI → KyberSwap
-          const aggregators: { name: string; fn: () => Promise<RouteResult> }[] = [
-            {
-              name: "0x",
-              fn: async () => {
-                // Inject taker (vault address) untuk 0x allowance-holder
-                const params = new URLSearchParams({
-                  chainId:    String(chainId || "8453"),
-                  sellToken:  token.contractAddress,
-                  buyToken:   WETH_ADDRESS,
-                  sellAmount: token.rawBalance,
-                  taker:      vaultAddress,
-                  ...(feeEnabled && {
-                    feeRecipient:          FEE_RECIPIENT,
-                    buyTokenPercentageFee: FEE_PERCENTAGE,
-                  }),
-                });
-                const res = await fetch(`/api/0x/quote?${params}`);
-                if (!res.ok) throw new Error("0x: no route");
-                const q = await res.json();
-                if (q.error) throw new Error("0x: " + q.error);
-                return {
-                  data:            q.transaction.data,
-                  to:              q.transaction.to,
-                  value:           q.transaction.value || "0",
-                  approvalAddress: q.transaction.to,
-                };
-              },
-            },
-            {
-              name: "LI.FI",
-              fn: () => getLifiQuote(token, token.rawBalance, vaultAddress),
-            },
-            {
-              name: "KyberSwap",
-              fn: () => getKyberQuote(token, token.rawBalance, vaultAddress),
-            },
-          ];
+          let txData = null;
+          let toAddress = null;
+          let value = 0n;
 
-          let route: RouteResult | null = null;
-          let usedAgg = "";
+          // Try aggregators: 0x → LI.FI → KyberSwap
+          // RouteResult: { data, to, value, approvalAddress }
+          // approvalAddress BISA BEDA dari `to` (terutama LI.FI)
+          // Harus approve ke approvalAddress, bukan ke to!
+          interface RouteResult { data: string; to: string; value: string; approvalAddress: string; }
 
-          for (const { name, fn } of aggregators) {
+          const getRoute = async (): Promise<{ result: RouteResult; agg: string }> => {
+            // 1. 0x via backend (dengan LI.FI fallback di backend)
             try {
-              route = await fn();
-              usedAgg = name;
-              break;
+              const params = new URLSearchParams({
+                chainId:    String(chainId || "8453"),
+                sellToken:  token.contractAddress,
+                buyToken:   WETH_ADDRESS,
+                sellAmount: token.rawBalance,
+                taker:      vaultAddress,
+                feeRecipient:          FEE_RECIPIENT,
+                buyTokenPercentageFee: FEE_PERCENTAGE,
+              });
+              const res = await fetch(`/api/0x/quote?${params}`);
+              if (!res.ok) throw new Error("0x backend: " + res.status);
+              const q = await res.json();
+              if (q.error) throw new Error("0x: " + q.error);
+              return {
+                agg: q._source === "lifi" ? "LI.FI (via backend)" : "0x",
+                result: {
+                  data:  q.transaction.data,
+                  to:    q.transaction.to,
+                  value: q.transaction.value || "0",
+                  // approvalAddress ada di response kalau backend fallback ke LI.FI
+                  approvalAddress: q.transaction.approvalAddress || q.transaction.to,
+                },
+              };
             } catch (e: any) {
-              console.warn(`[Swap] ${name} failed for ${token.symbol}:`, e?.message);
+              console.warn("[Swap] 0x/LI.FI backend failed:", e?.message);
             }
+
+            // 2. KyberSwap direct
+            try {
+              const routeRes = await fetch(
+                `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
+                { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
+              );
+              if (!routeRes.ok) throw new Error("Kyber route " + routeRes.status);
+              const routeData = await routeRes.json();
+              if (!routeData?.data?.routeSummary) throw new Error("Kyber: no route");
+              const buildRes = await fetch(
+                `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
+                {
+                  method: "POST",
+                  headers: { "Accept": "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
+                  body: JSON.stringify({
+                    routeSummary: routeData.data.routeSummary,
+                    sender: vaultAddress, recipient: vaultAddress,
+                    slippageTolerance: 300,
+                  }),
+                }
+              );
+              if (!buildRes.ok) throw new Error("Kyber build " + buildRes.status);
+              const bd = await buildRes.json();
+              if (!bd?.data?.data) throw new Error("Kyber: no tx data");
+              return {
+                agg: "KyberSwap",
+                result: {
+                  data:            bd.data.data,
+                  to:              bd.data.routerAddress,
+                  value:           "0x0",
+                  approvalAddress: bd.data.routerAddress,
+                },
+              };
+            } catch (e: any) {
+              console.warn("[Swap] KyberSwap failed:", e?.message);
+            }
+
+            throw new Error("No route from any aggregator");
+          };
+
+          const { result: route, agg: usedAgg } = await getRoute();
+          txData    = route.data;
+          toAddress = route.to;
+          value     = BigInt(route.value);
+          console.log(`[Swap] ${token.symbol} → ${usedAgg}, approvalTarget: ${route.approvalAddress}`);
+          const approveTarget = route.approvalAddress;
+          const routeFound    = true; void routeFound;
+
+          if (txData && toAddress) {
+            // approve ke approveTarget (bukan toAddress!)
+            // LI.FI: approveTarget = estimate.approvalAddress, bisa beda dari transactionRequest.to
+            const approveData = encodeFunctionData({
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [approveTarget as Address, BigInt(token.rawBalance)],
+            });
+            batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: approveData });
+            batchCalls.push({ to: toAddress as Address, value, data: txData });
+            successCount++;
           }
-
-          if (!route) throw new Error("No route from any aggregator");
-          console.log(`[Swap] ${token.symbol} → ${usedAgg}, approvalAddress: ${route.approvalAddress}`);
-
-          // approve ke approvalAddress (bukan ke route.to!)
-          // LI.FI punya intermediate contract sebagai approval target
-          const approveTarget = route.approvalAddress || route.to;
-          const approveData = encodeFunctionData({
-            abi: erc20Abi,
-            functionName: "approve",
-            args: [approveTarget as Address, BigInt(token.rawBalance)],
-          });
-
-          batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: approveData });
-          batchCalls.push({ to: route.to as Address, value: BigInt(route.value), data: route.data });
-          successCount++;
-
         } catch (e: any) {
-          console.error(`[Swap] No route for ${token.symbol}:`, e?.message || e);
+          console.error(`No route for ${token.symbol}:`, e?.message || e);
           setSwapProgress(`Skipping ${token.symbol}: no route`);
           await new Promise(r => setTimeout(r, 500));
         }
@@ -412,13 +413,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       setSelectedTokens(new Set());
     } catch (e: any) {
       console.error(e);
-      const msg = e?.shortMessage || e?.message || "Unknown error";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied")
-          ? "Transaction cancelled."
-          : "Swap failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: "Swap failed: " + (e.shortMessage || e.message), type: "error" });
     } finally {
       setSwapping(false);
       setSwapProgress("");
@@ -492,7 +487,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               </div>
             )}
             <div className="text-[10px] text-zinc-600">
-              Deposit tokens via Vault tab → Wallet Assets → Deposit
+              Deposit tokens via tab Panen → Wallet Assets → Deposit
             </div>
           </div>
         ) : (
@@ -540,7 +535,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         )}
       </div>
 
-      {/* Deposited Dust — no route tokens */}
+      {/* ── DEPOSITED DUST (token tanpa likuiditas / no route) ── */}
       {vaultTokens.filter(t => t.valueUsd <= 0.000001).length > 0 && (
         <div className="space-y-2 mt-6">
           <div className="flex items-center justify-between px-1">
@@ -557,34 +552,90 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             {vaultTokens
               .filter(t => t.valueUsd <= 0.000001)
               .slice((vaultPage - 1) * VAULT_PER_PAGE, vaultPage * VAULT_PER_PAGE)
-              .map((token, i) => (
-                <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
-                  <div className="flex items-center gap-3 overflow-hidden">
-                    <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden">
-                      <TokenLogo token={token} />
-                    </div>
-                    <div>
-                      <div className="text-sm font-bold flex items-center gap-1.5">
-                        {token.symbol}
-                        <span className="text-[9px] bg-zinc-200 dark:bg-zinc-700 text-zinc-500 px-1 rounded">no route</span>
+              .map((token, i) => {
+                const isSelected = selectedTokens.has(token.contractAddress);
+                const isSwappable = false; // no route tokens
+                return (
+                  <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden">
+                        <TokenLogo token={token} />
                       </div>
-                      <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
+                      <div>
+                        <div className="text-sm font-bold flex items-center gap-1.5">
+                          {token.symbol}
+                          {!isSwappable && (
+                            <span className="text-[9px] bg-zinc-200 dark:bg-zinc-700 text-zinc-500 px-1 rounded">no route</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isSwappable && (
+                        <button
+                          onClick={() => toggleToken(token.contractAddress)}
+                          className={`px-2.5 py-1.5 text-xs font-medium rounded-lg flex items-center gap-1 transition-colors ${
+                            isSelected
+                              ? "bg-blue-600 text-white"
+                              : "bg-orange-50 text-orange-500 hover:bg-orange-100 dark:bg-orange-900/20 dark:text-orange-400"
+                          }`}
+                        >
+                          <Flash className="w-3 h-3" />
+                          {isSelected ? "Selected" : "Swap"}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleWithdrawToken(token)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 transition-colors"
+                      >
+                        WD
+                      </button>
                     </div>
                   </div>
-                  <button
-                    onClick={() => handleWithdrawToken(token)}
-                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 transition-colors"
-                  >
-                    WD
-                  </button>
-                </div>
-              ))}
+                );
+              })}
           </div>
 
+          {/* Pagination */}
           {Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) > 1 && (
             <div className="flex justify-center items-center gap-1 mt-2 pb-2">
-              <button onClick={() => setVaultPage((p) => Math.max(1, p - 1))} disabled={vaultPage === 1} className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30">← Prev</button>
-              <button onClick={() => setVaultPage((p) => Math.min(Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE), p + 1))} disabled={vaultPage === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)} className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30">Next →</button>
+              <button
+                onClick={() => setVaultPage((p) => Math.max(1, p - 1))}
+                disabled={vaultPage === 1}
+                className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) || Math.abs(p - vaultPage) <= 2)
+                .reduce((acc: (number | string)[], p, idx, arr) => {
+                  if (idx > 0 && (p as number) - (arr[idx - 1] as number) > 1) acc.push("...");
+                  acc.push(p);
+                  return acc;
+                }, [])
+                .map((p, i) =>
+                  p === "..." ? (
+                    <span key={i} className="px-2 text-zinc-400 text-xs">...</span>
+                  ) : (
+                    <button
+                      key={i}
+                      onClick={() => setVaultPage(p as number)}
+                      className={`w-8 h-8 rounded-lg text-xs font-bold ${
+                        vaultPage === p ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  )
+                )}
+              <button
+                onClick={() => setVaultPage((p) => Math.min(Math.ceil(vaultTokens.length / VAULT_PER_PAGE), p + 1))}
+                disabled={vaultPage === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)}
+                className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
+              >
+                Next →
+              </button>
             </div>
           )}
         </div>
