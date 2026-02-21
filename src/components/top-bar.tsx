@@ -32,7 +32,7 @@ export function TopBar() {
 
   const handleShare = async () => {
     const appUrl = "https://nyawit-nih-orang.vercel.app";
-    const castText = `🌴 Nyawit — Sweep your dust tokens into ETH!\n\nBatch swap semua koin receh kamu di Base jadi ETH dalam 1 klik.\n\n${appUrl}`;
+    const castText = `🌴 Nyawit — Sweep your dust tokens into ETH!\n\nSwap all your small coins on Base to ETH in one click.\n\n${appUrl}`;
     try {
       // Farcaster miniapp: cast langsung
       await sdk.actions.openUrl(`https://warpcast.com/~/compose?text=${encodeURIComponent(castText)}`);
