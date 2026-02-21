@@ -376,29 +376,61 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       }
 
       // ── FASE 2: Batch approve semua sekaligus ─────────────────────────────
-      // Satu tx approve ke semua router — hemat gas
       setSwapProgress(`Approving ${routable.length} tokens (1 tx)...`);
 
-      const approvalCalls = routable.map((token) => {
-        const route = routes.get(token.contractAddress)!;
-        const data  = encodeFunctionData({
-          abi: erc20Abi, functionName: "approve",
-          args: [route.approvalAddress as Address, maxUint256],
-        });
-        return { to: token.contractAddress as Address, value: 0n, data: data as `0x${string}` };
-      });
+      const approvalCalls = routable
+        .map((token) => {
+          const route = routes.get(token.contractAddress)!;
 
+          // Validasi: token contract dan approvalAddress harus valid ERC20 address
+          // Bukan vault address, bukan zero address
+          const tokenAddr   = token.contractAddress.toLowerCase();
+          const approvalAddr = route.approvalAddress.toLowerCase();
+          const vaultLower  = vaultAddress.toLowerCase();
+          const zeroAddr    = "0x0000000000000000000000000000000000000000";
+
+          if (
+            tokenAddr === vaultLower ||          // token IS the vault — data corrupt
+            approvalAddr === vaultLower ||        // approval target IS the vault — wrong
+            approvalAddr === zeroAddr ||          // zero address
+            tokenAddr === approvalAddr            // approve to self — wrong
+          ) {
+            console.warn(`[Approve] Skipping ${token.symbol} — invalid addresses`, {
+              token: tokenAddr, approvalTarget: approvalAddr, vault: vaultLower
+            });
+            return null;
+          }
+
+          const data = encodeFunctionData({
+            abi: erc20Abi, functionName: "approve",
+            args: [route.approvalAddress as Address, maxUint256],
+          });
+          console.log(`[Approve] ${token.symbol} → approve(${route.approvalAddress})`);
+          return { to: token.contractAddress as Address, value: 0n, data: data as `0x${string}` };
+        })
+        .filter((c): c is NonNullable<typeof c> => c !== null);
+
+      if (approvalCalls.length === 0) {
+        setToast({ msg: "No valid tokens to approve.", type: "error" });
+        return;
+      }
+
+      console.log(`[Approve] Batch ${approvalCalls.length} approvals`);
       const approveTx = await client.sendUserOperation({ calls: approvalCalls });
       setSwapProgress("Waiting for approvals...");
       await client.waitForUserOperationReceipt({ hash: approveTx });
-      console.log("[Swap] Batch approval confirmed ✓");
+      console.log("[Approve] Batch confirmed ✓");
+
+      // Update routable to only include validated tokens
+      const validatedAddrs = new Set(approvalCalls.map(c => c.to.toLowerCase()));
+      const validRotable   = routable.filter(t => validatedAddrs.has(t.contractAddress.toLowerCase()));
 
       // ── FASE 3: Swap satu per satu — isolasi failure ───────────────────────
       // Quote diambil ULANG tepat sebelum swap untuk hindari stale quote
       let successCount = 0;
       let failCount    = 0;
 
-      for (const token of routable) {
+      for (const token of validRotable) {
         const routeInfo = routes.get(token.contractAddress)!;
         setSwapProgress(`[${successCount + failCount + 1}/${routable.length}] Swapping ${token.symbol} via ${routeInfo.agg}...`);
         try {
@@ -449,10 +481,12 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       }
 
       // Summary
+      const skipped = routable.length - validRotable.length;
       const parts = [];
       if (successCount > 0) parts.push(`${successCount} swapped`);
       if (failCount > 0)    parts.push(`${failCount} failed`);
       if (noRoute.length > 0) parts.push(`${noRoute.length} no route`);
+      if (skipped > 0)      parts.push(`${skipped} invalid`);
       setToast({
         msg:  successCount > 0 ? `✓ ${parts.join(", ")}` : `Failed: ${parts.join(", ")}`,
         type: successCount > 0 ? "success" : "error",
