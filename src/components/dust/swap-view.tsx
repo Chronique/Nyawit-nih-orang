@@ -35,6 +35,7 @@ interface SwapViewProps {
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
 const LIFI_API_URL = "https://li.quest/v1";
+const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
 const FEE_PERCENTAGE = "0.05";
 
@@ -61,7 +62,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [swapping, setSwapping] = useState(false);
   const [swapProgress, setSwapProgress] = useState("");
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const [useLifiFallback] = useState(true);
   const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
   // Vault assets (semua token di vault termasuk yang tidak ada likuiditas)
   const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
@@ -204,20 +204,60 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       fromToken: token.contractAddress, toToken: WETH_ADDRESS,
       fromAmount: amount,
       fromAddress,
-      toAddress: fromAddress,    // output ETH juga ke vault
-      slippage: "0.03",          // 3% slippage tolerance
-      integrator: "nyawit",
-      fee: FEE_PERCENTAGE,
-      referrer: FEE_RECIPIENT,
+      toAddress: fromAddress,
+      slippage: "0.03",
+      ...(LIFI_API_KEY && {
+        integrator: "nyawit",
+        fee: FEE_PERCENTAGE,
+        referrer: FEE_RECIPIENT,
+      }),
     });
-    const res = await fetch(`${LIFI_API_URL}/quote?${params}`, {
-      headers: { "Accept": "application/json" }
-    });
+    const headers: Record<string, string> = { "Accept": "application/json" };
+    if (LIFI_API_KEY) headers["x-lifi-api-key"] = LIFI_API_KEY;
+    const res = await fetch(`${LIFI_API_URL}/quote?${params}`, { headers });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`LI.FI ${res.status}: ${text.slice(0, 100)}`);
     }
     return res.json();
+  };
+
+  // KyberSwap — gratis, no signup, Base support bagus
+  const getKyberQuote = async (token: TokenData, amount: string, fromAddress: string) => {
+    // Step 1: get route
+    const routeRes = await fetch(
+      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${amount}&saveGas=false&gasInclude=false`,
+      { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
+    );
+    if (!routeRes.ok) throw new Error(`KyberSwap route ${routeRes.status}`);
+    const routeData = await routeRes.json();
+    if (!routeData?.data?.routeSummary) throw new Error("KyberSwap: no route");
+
+    // Step 2: build tx
+    const buildRes = await fetch(
+      `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
+      {
+        method: "POST",
+        headers: { "Accept": "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
+        body: JSON.stringify({
+          routeSummary: routeData.data.routeSummary,
+          sender: fromAddress,
+          recipient: fromAddress,
+          slippageTolerance: 300, // 3% in bps
+        }),
+      }
+    );
+    if (!buildRes.ok) throw new Error(`KyberSwap build ${buildRes.status}`);
+    const buildData = await buildRes.json();
+    if (!buildData?.data?.data) throw new Error("KyberSwap: no tx data");
+
+    return {
+      transactionRequest: {
+        to: buildData.data.routerAddress,
+        data: buildData.data.data,
+        value: "0x0",
+      }
+    };
   };
 
   const handleBatchSwap = async () => {
@@ -241,21 +281,38 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           let toAddress = null;
           let value = 0n;
 
-          try {
-            // Primary: 0x Protocol
-            const quote0x = await getZeroExQuote(token, token.rawBalance);
-            txData = quote0x.transaction.data;
-            toAddress = quote0x.transaction.to;
-            value = BigInt(quote0x.transaction.value || 0);
-          } catch {
-            // Fallback: LI.FI aggregator
-            if (useLifiFallback) {
-              const quoteLifi = await getLifiQuote(token, token.rawBalance, vaultAddress);
-              txData = quoteLifi.transactionRequest.data;
-              toAddress = quoteLifi.transactionRequest.to;
-              value = BigInt(quoteLifi.transactionRequest.value || 0);
-            } else throw new Error("No route available");
+          // Try aggregators in order: 0x → LI.FI → KyberSwap
+          const aggregators = [
+            async () => {
+              const q = await getZeroExQuote(token, token.rawBalance);
+              return { data: q.transaction.data, to: q.transaction.to, value: q.transaction.value || "0" };
+            },
+            async () => {
+              const q = await getLifiQuote(token, token.rawBalance, vaultAddress);
+              return { data: q.transactionRequest.data, to: q.transactionRequest.to, value: q.transactionRequest.value || "0" };
+            },
+            async () => {
+              const q = await getKyberQuote(token, token.rawBalance, vaultAddress);
+              return { data: q.transactionRequest.data, to: q.transactionRequest.to, value: q.transactionRequest.value || "0x0" };
+            },
+          ];
+
+          let routeFound = false;
+          for (const [idx, getQuote] of aggregators.entries()) {
+            const names = ["0x", "LI.FI", "KyberSwap"];
+            try {
+              const q = await getQuote();
+              txData = q.data;
+              toAddress = q.to;
+              value = BigInt(q.value);
+              console.log(`[Swap] Route found via ${names[idx]} for ${token.symbol}`);
+              routeFound = true;
+              break;
+            } catch (e: any) {
+              console.warn(`[Swap] ${names[idx]} failed for ${token.symbol}:`, e?.message);
+            }
           }
+          if (!routeFound) throw new Error("No route from any aggregator");
 
           if (txData && toAddress) {
             const approveData = encodeFunctionData({
