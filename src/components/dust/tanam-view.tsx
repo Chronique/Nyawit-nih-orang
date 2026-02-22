@@ -16,28 +16,29 @@ const LIFI_API_URL = "https://li.quest/v1";
 const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 
 // ── Morpho MetaMorpho Vaults on Base ──────────────────────────────────────────
+// Verified addresses from https://app.morpho.org/base
 const MORPHO_VAULTS = [
   {
     id:           "gauntlet-usdc",
     name:         "Gauntlet USDC Core",
     asset:        "USDC",
     assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address,
-    vaultAddress: "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca" as Address,
+    vaultAddress: "0xc0c5689e6f4D256E861F65465b691aeEcC0dEb12" as Address, // Gauntlet USDC Core Base ✓
     decimals:     6,
     color:        "blue",
     description:  "USDC lending via Morpho Blue. Curated by Gauntlet.",
-    morphoUrl:    "https://app.morpho.org/base/vault?vault=0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",
+    morphoUrl:    "https://app.morpho.org/base/vault/0xc0c5689e6f4D256E861F65465b691aeEcC0dEb12/gauntlet-usdc-core",
   },
   {
     id:           "gauntlet-weth",
     name:         "Gauntlet WETH Core",
     asset:        "WETH",
     assetAddress: "0x4200000000000000000000000000000000000006" as Address,
-    vaultAddress: "0x6b13c060F13Af7D5d5F0E4e2B8B18d01A19A7e7C" as Address,
+    vaultAddress: "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844" as Address, // Gauntlet WETH Core Base ✓
     decimals:     18,
     color:        "indigo",
     description:  "WETH lending via Morpho Blue. Curated by Gauntlet.",
-    morphoUrl:    "https://app.morpho.org/base/vault?vault=0x6b13c060F13Af7D5d5F0E4e2B8B18d01A19A7e7C",
+    morphoUrl:    "https://app.morpho.org/base/vault/0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844/gauntlet-weth-core",
   },
 ] as const;
 
