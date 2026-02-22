@@ -5,25 +5,21 @@ import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, maxUint256, formatEther } from "viem";
+import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther } from "viem";
 import { base } from "viem/chains";
 import { Refresh, Flash, Check, ArrowRight, WarningTriangle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const USDC_ADDRESS   = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const WETH_ADDRESS   = "0x4200000000000000000000000000000000000006";
-const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
-const FEE_PERCENTAGE = "0.05";
-const PLATFORM_FEE_BPS = 500n;   // 5%
-const BPS_DENOM        = 10_000n;
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
 
 const WETH_ABI = [
   { name: "withdraw",  type: "function", stateMutability: "nonpayable", inputs: [{ name: "wad", type: "uint256" }], outputs: [] },
   { name: "balanceOf", type: "function", stateMutability: "view",       inputs: [{ name: "account", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
 ] as const;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 interface TokenData {
   contractAddress: string;
   symbol:          string;
@@ -33,34 +29,6 @@ interface TokenData {
   formattedBal:    string;
   priceUsd:        number;
   valueUsd:        number;
-}
-
-interface RouteResult {
-  data:            `0x${string}`;
-  to:              string;
-  value:           string;
-  approvalAddress: string;
-  agg:             string;
-  estimatedWethOut: bigint;  // estimasi dari quote (buyAmount)
-}
-
-interface SimItem {
-  token:            TokenData;
-  status:           "ok" | "skipped";
-  reason?:          string;
-  route?:           RouteResult;
-  estimatedWethOut: bigint;
-  estimatedFee:     bigint;
-  netWethOut:       bigint;
-}
-
-interface SimSummary {
-  items:          SimItem[];
-  processable:    SimItem[];
-  skipped:        SimItem[];
-  totalNetWeth:   bigint;  // setelah fee
-  totalFee:       bigint;
-  gasEstimate:    bigint;
 }
 
 interface SwapViewProps {
@@ -98,23 +66,20 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [incomingToken, setIncomingToken]   = useState<SwapViewProps["defaultFromToken"]>(null);
   const [toast, setToast]                   = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
-  // Simulation state
   const [simulating, setSimulating]         = useState(false);
-  const [simulation, setSimulation]         = useState<SimSummary | null>(null);
+  const [simulation, setSimulation]         = useState<SimulationResult | null>(null);
 
-  // Execution state
   const [executing, setExecuting]           = useState(false);
   const [execProgress, setExecProgress]     = useState("");
 
   const VAULT_PER_PAGE = 10;
-  const chainIdStr     = String(chainId || "8453");
 
-  // ── Load dust tokens ──────────────────────────────────────────────────────
+  // ── Load dust tokens ───────────────────────────────────────────────────────
   const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
     setScanError(null);
-    setSimulation(null); // reset simulation saat refresh
+    setSimulation(null);
     try {
       const client       = await getSmartAccountClient(walletClient);
       const detectedAddr = client.account.address;
@@ -123,11 +88,10 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       const moralisTokens = await fetchMoralisTokens(detectedAddr);
       const vaultLower    = detectedAddr.toLowerCase();
       const nonZero = moralisTokens.filter(t => {
-        const addr    = t.token_address.toLowerCase();
-        const isUSDC  = addr === USDC_ADDRESS.toLowerCase();
-        const isVault = addr === vaultLower;
-        if (isVault) console.warn("[SwapView] Filtered vault address:", addr);
-        return !isUSDC && !isVault && BigInt(t.balance) > 0n;
+        const addr = t.token_address.toLowerCase();
+        if (addr === USDC_ADDRESS.toLowerCase()) return false;
+        if (addr === vaultLower) return false;
+        return BigInt(t.balance) > 0n;
       });
 
       if (nonZero.length === 0) { setTokens([]); setVaultTokens([]); return; }
@@ -138,17 +102,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         const fmtBal   = formatUnits(BigInt(t.balance), decimals);
         const price    = prices[t.token_address.toLowerCase()] || 0;
         return {
-          contractAddress: t.token_address,
-          symbol:          t.symbol || "UNKNOWN",
-          logo:            t.logo || null,
-          decimals, rawBalance: t.balance, formattedBal: fmtBal,
+          contractAddress: t.token_address, symbol: t.symbol || "UNKNOWN",
+          logo: t.logo || null, decimals, rawBalance: t.balance, formattedBal: fmtBal,
           priceUsd: price, valueUsd: parseFloat(fmtBal) * price,
         };
       });
       formatted.sort((a, b) => b.valueUsd - a.valueUsd);
       setVaultTokens(formatted);
       setVaultPage(1);
-
       const validDust = formatted.filter(t => t.valueUsd > 0.000001);
       setTokens(validDust);
       return validDust;
@@ -184,7 +145,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     const s = new Set(selectedTokens);
     if (s.has(addr)) s.delete(addr); else s.add(addr);
     setSelectedTokens(s);
-    setSimulation(null); // reset preview kalau pilihan berubah
+    setSimulation(null);
     if (incomingToken) setIncomingToken(null);
   };
 
@@ -201,11 +162,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
     if (!window.confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`)) return;
     try {
-      const client      = await getSmartAccountClient(walletClient);
-      const ownerAddr   = walletClient.account?.address as Address;
-      const rawAmount   = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
-      const data        = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddr, rawAmount] });
-      const tx          = await client.sendUserOperation({ calls: [{ to: token.contractAddress as Address, value: 0n, data }] });
+      const client    = await getSmartAccountClient(walletClient);
+      const ownerAddr = walletClient.account?.address as Address;
+      const rawAmount = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
+      const data      = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddr, rawAmount] });
+      const tx        = await client.sendUserOperation({ calls: [{ to: token.contractAddress as Address, value: 0n, data }] });
       setToast({ msg: `Withdrawing ${token.symbol}...`, type: "success" });
       await client.waitForUserOperationReceipt({ hash: tx });
       setToast({ msg: `${token.symbol} withdrawn!`, type: "success" });
@@ -215,289 +176,99 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── SIMULATE: fetch routes, hitung fee & gas estimate ────────────────────
-  // Mirip doc 5 simulateBatch — tapi pakai real quotes dari 0x/KyberSwap
+  // ── SIMULATE: pakai batch-swap.ts lib ─────────────────────────────────────
   const handleSimulate = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSimulating(true);
     setSimulation(null);
-
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client       = await getSmartAccountClient(walletClient);
-      const vaultAddress = client.account.address;
 
       const tokensToSwap = tokens
         .filter(t => selectedTokens.has(t.contractAddress)
           && t.contractAddress.toLowerCase() !== WETH_ADDRESS.toLowerCase())
-        .slice(0, 10);
+        .slice(0, 10)
+        .map(t => ({
+          address: t.contractAddress as Address,
+          symbol:  t.symbol,
+          balance: BigInt(t.rawBalance),
+        }));
 
-      const items: SimItem[] = [];
-
-      // Parallel route fetch — sama seperti FASE 1 execution
-      await Promise.all(tokensToSwap.map(async (token) => {
-        // Try 0x backend
-        try {
-          const params = new URLSearchParams({
-            chainId:            chainIdStr,
-            sellToken:          token.contractAddress,
-            buyToken:           WETH_ADDRESS,
-            sellAmount:         token.rawBalance,
-            taker:              vaultAddress,
-            slippagePercentage: "0.15",
-            feeRecipient:          FEE_RECIPIENT,
-            buyTokenPercentageFee: FEE_PERCENTAGE,
-          });
-          const res = await fetch(`/api/0x/quote?${params}`);
-          if (res.ok) {
-            let q: any = null;
-            try { q = await res.json(); } catch (jsonErr) {
-              console.warn(`[Sim] ${token.symbol}: 0x response is not JSON — API error/rate limit`);
-            }
-            if (q && !q.error && q.transaction?.data) {
-              // ── Cari buyAmount di berbagai field yang mungkin ──────────────
-              // 0x v2: q.buyAmount | LI.FI fallback: q.estimate?.toAmount
-              const rawBuyAmt =
-                q.buyAmount ||
-                q.estimate?.toAmount ||
-                q.toAmount ||
-                q.transaction?.value ||
-                "0";
-              const gross = BigInt(rawBuyAmt);
-
-              // GUARD: kalau gross = 0, quote tidak valid → jangan push, lanjut ke Kyber
-              if (gross === 0n) {
-                console.warn(`[Sim] ${token.symbol}: buyAmount=0 dari 0x/LI.FI — fallback ke Kyber`);
-                // tidak return, jatuh ke Kyber di bawah
-              } else {
-                const fee = (gross * PLATFORM_FEE_BPS) / BPS_DENOM;
-                items.push({
-                  token, status: "ok",
-                  route: {
-                    data:             q.transaction.data,
-                    to:               q.transaction.to,
-                    value:            q.transaction.value || "0",
-                    approvalAddress:  q.transaction.approvalAddress || q.transaction.to,
-                    agg:              q._source === "lifi" ? "LI.FI" : "0x",
-                    estimatedWethOut: gross,
-                  },
-                  estimatedWethOut: gross,
-                  estimatedFee:     fee,
-                  netWethOut:       gross - fee,
-                });
-                return;
-              }
-            }
-          }
-        } catch {}
-
-        // Fallback KyberSwap
-        try {
-          const rRes = await fetch(
-            `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
-            { headers: { Accept: "application/json", "x-client-id": "nyawit" } }
-          );
-          if (!rRes.ok) throw new Error("kyber route fail");
-          const rd = await rRes.json();
-          if (!rd?.data?.routeSummary) throw new Error("no summary");
-
-          const bRes = await fetch(
-            "https://aggregator-api.kyberswap.com/base/api/v1/route/build",
-            {
-              method: "POST",
-              headers: { Accept: "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
-              body: JSON.stringify({
-                routeSummary: rd.data.routeSummary,
-                sender: vaultAddress, recipient: vaultAddress,
-                slippageTolerance: 1500,
-              }),
-            }
-          );
-          if (!bRes.ok) throw new Error("kyber build fail");
-          const bd = await bRes.json();
-          if (!bd?.data?.data) throw new Error("no tx data");
-
-          const gross = BigInt(rd.data.routeSummary.amountOut || "0");
-          const fee   = (gross * PLATFORM_FEE_BPS) / BPS_DENOM;
-          items.push({
-            token, status: "ok",
-            route: {
-              data:             bd.data.data,
-              to:               bd.data.routerAddress,
-              value:            "0x0",
-              approvalAddress:  bd.data.routerAddress,
-              agg:              "KyberSwap",
-              estimatedWethOut: gross,
-            },
-            estimatedWethOut: gross,
-            estimatedFee:     fee,
-            netWethOut:       gross - fee,
-          });
-        } catch {
-          items.push({ token, status: "skipped", reason: "No route found", estimatedWethOut: 0n, estimatedFee: 0n, netWethOut: 0n });
-        }
-      }));
-
-      // WETH yang dipilih langsung (unwrap saja, tidak perlu swap)
-      const wethToken = tokens.find(t => t.contractAddress.toLowerCase() === WETH_ADDRESS.toLowerCase());
-      if (wethToken && selectedTokens.has(wethToken.contractAddress)) {
-        const gross = BigInt(wethToken.rawBalance);
-        items.push({
-          token: wethToken, status: "ok",
-          route: undefined, // tidak perlu swap
-          estimatedWethOut: gross,
-          estimatedFee:     0n, // unwrap tidak kena fee platform
-          netWethOut:       gross,
-        });
-      }
-
-      const processable = items.filter(i => i.status === "ok");
-      const skipped     = items.filter(i => i.status === "skipped");
-      const totalNet    = processable.reduce((a, i) => a + i.netWethOut, 0n);
-      const totalFee    = processable.reduce((a, i) => a + i.estimatedFee, 0n);
-
-      // Gas estimate: ~150k per swap + ~50k approve + ~30k unwrap
-      const gasEstimate = BigInt(processable.filter(i => i.route).length) * 200_000n + 30_000n;
-
-      setSimulation({ items, processable, skipped, totalNetWeth: totalNet, totalFee, gasEstimate });
+      const result = await simulateBatchSwap({
+        walletClient,
+        chainId: chainId ?? 8453,
+        tokens:  tokensToSwap,
+      });
+      setSimulation(result);
     } catch (e: any) {
-      setToast({ msg: "Simulation failed: " + (e.message || "Unknown"), type: "error" });
+      setToast({ msg: "Preview failed: " + (e.message || "Unknown"), type: "error" });
     } finally {
       setSimulating(false);
     }
   };
 
-  // ── EXECUTE: jalankan simulation yang sudah disiapkan ────────────────────
-  // Fase 2: batch approve, Fase 3: sequential swaps, Fase 4: unwrap WETH
+  // ── EXECUTE: 1 UserOp berisi semua approve+swap ───────────────────────────
   const handleExecute = async () => {
-    if (!walletClient || !simulation || simulation.processable.length === 0) return;
+    if (!walletClient || !simulation || simulation.calls.length === 0) return;
     setExecuting(true);
+    setExecProgress("Sending transaction...");
     setIncomingToken(null);
-
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client       = await getSmartAccountClient(walletClient);
-      const vaultAddress = client.account.address;
-      const vaultLower   = vaultAddress.toLowerCase();
-      const zeroAddr     = "0x0000000000000000000000000000000000000000";
 
-      // Hanya token yang butuh swap (bukan WETH existing)
-      const toSwap = simulation.processable.filter(i => i.route !== undefined);
+      setExecProgress(`Executing ${simulation.processable.length} swaps in 1 tx...`);
+      await executeBatchSwap({ walletClient, calls: simulation.calls });
+      console.log("[Swap] Batch UserOp confirmed ✓");
 
-      // ── FASE 2: Batch approve ────────────────────────────────────────────
-      if (toSwap.length > 0) {
-        setExecProgress(`Approving ${toSwap.length} tokens (1 tx)...`);
-
-        const approvalCalls = toSwap
-          .map(item => {
-            const tokenAddr   = item.token.contractAddress.toLowerCase();
-            const spenderAddr = item.route!.approvalAddress.toLowerCase();
-            if (tokenAddr === vaultLower || spenderAddr === vaultLower || spenderAddr === zeroAddr) {
-              console.error(`[Approve] SKIP ${item.token.symbol}: invalid addresses`);
-              return null;
-            }
-            console.log(`[Approve] ${item.token.symbol}: spender ${spenderAddr.slice(0,8)}`);
-            return {
-              to:    item.token.contractAddress as Address,
-              value: 0n,
-              data:  encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [item.route!.approvalAddress as Address, maxUint256] }),
-            };
-          })
-          .filter((c): c is NonNullable<typeof c> => c !== null);
-
-        if (approvalCalls.length > 0) {
-          const approveTx = await client.sendUserOperation({ calls: approvalCalls });
-          setExecProgress("Waiting for approvals...");
-          await client.waitForUserOperationReceipt({ hash: approveTx });
-        }
-      }
-
-      // ── FASE 3: Sequential swaps ─────────────────────────────────────────
-      let successCount = 0;
-      let failCount    = 0;
-
-      for (const item of toSwap) {
-        setExecProgress(`[${successCount + failCount + 1}/${toSwap.length}] ${item.token.symbol} → WETH via ${item.route!.agg}...`);
-        try {
-          // Re-fetch fresh quote tepat sebelum swap
-          // Kalau gagal → pakai route dari simulation (masih valid untuk beberapa menit)
-          let freshRoute = item.route!;
-          try {
-            const params = new URLSearchParams({
-              chainId: chainIdStr, sellToken: item.token.contractAddress,
-              buyToken: WETH_ADDRESS, sellAmount: item.token.rawBalance,
-              taker: vaultAddress, slippagePercentage: "0.15",
-              feeRecipient: FEE_RECIPIENT, buyTokenPercentageFee: FEE_PERCENTAGE,
-            });
-            const res = await fetch(`/api/0x/quote?${params}`);
-            if (res.ok) {
-              let q: any = null;
-              try { q = await res.json(); } catch {}
-              // Hanya update kalau fresh quote valid dan punya tx data
-              if (q && !q.error && q.transaction?.data && q.transaction?.to) {
-                freshRoute = { ...freshRoute, data: q.transaction.data, to: q.transaction.to, value: q.transaction.value || "0" };
-              }
-            }
-          } catch {}
-
-          const swapTx = await client.sendUserOperation({
-            calls: [{ to: freshRoute.to as Address, value: BigInt(freshRoute.value), data: freshRoute.data }],
-          });
-          await client.waitForUserOperationReceipt({ hash: swapTx });
-          console.log(`[Swap] ${item.token.symbol} → WETH ✓`);
-          successCount++;
-        } catch (e: any) {
-          console.error(`[Swap] ${item.token.symbol} failed:`, e?.message);
-          failCount++;
-          setExecProgress(`${item.token.symbol} failed, continuing...`);
-          await new Promise(r => setTimeout(r, 500));
-        }
-      }
-
-      // ── FASE 4: Unwrap WETH → ETH ────────────────────────────────────────
-      setExecProgress("Checking WETH for unwrap...");
+      // Unwrap WETH → ETH setelah semua swap selesai
+      setExecProgress("Unwrapping WETH → ETH...");
       try {
         const { createPublicClient, http } = await import("viem");
-        const pc          = createPublicClient({ chain: base, transport: http() });
-        const wethBalance = await pc.readContract({
-          address: WETH_ADDRESS as Address, abi: WETH_ABI, functionName: "balanceOf", args: [vaultAddress as Address],
+        const client       = await getSmartAccountClient(walletClient);
+        const vaultAddress = client.account.address;
+        const pc           = createPublicClient({ chain: base, transport: http() });
+        const wethBal      = await pc.readContract({
+          address: WETH_ADDRESS as Address, abi: WETH_ABI,
+          functionName: "balanceOf", args: [vaultAddress as Address],
         });
-        if (wethBalance > 0n) {
-          setExecProgress(`Unwrapping ${formatUnits(wethBalance, 18).slice(0, 8)} WETH → ETH...`);
+        if (wethBal > 0n) {
+          setExecProgress(`Unwrapping ${formatUnits(wethBal, 18).slice(0, 8)} WETH → ETH...`);
           const unwrapTx = await client.sendUserOperation({
             calls: [{
               to:    WETH_ADDRESS as Address, value: 0n,
-              data:  encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBalance] }),
+              data:  require("viem").encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBal] }),
             }],
           });
           await client.waitForUserOperationReceipt({ hash: unwrapTx });
           console.log("[Unwrap] WETH → ETH ✓");
         }
-      } catch (e: any) {
-        console.warn("[Unwrap] Failed:", e?.message);
+      } catch (ue: any) {
+        console.warn("[Unwrap] Failed:", ue?.message);
+        // Tidak fatal
       }
 
-      const parts = [];
-      if (successCount > 0) parts.push(`${successCount} swapped`);
-      if (failCount > 0)    parts.push(`${failCount} failed`);
-      if (simulation.skipped.length > 0) parts.push(`${simulation.skipped.length} no route`);
-      setToast({ msg: successCount > 0 ? `✓ ${parts.join(", ")} → ETH` : `All failed: ${parts.join(", ")}`, type: successCount > 0 ? "success" : "error" });
+      const skippedCount = simulation.skipped.length;
+      setToast({
+        msg:  `✓ ${simulation.processable.length} tokens swapped → ETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}`,
+        type: "success",
+      });
 
       await new Promise(r => setTimeout(r, 2000));
       await loadDustTokens();
       setSelectedTokens(new Set());
       setSimulation(null);
-
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Error: " + msg, type: "error" });
+      setToast({
+        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Error: " + msg,
+        type: "error",
+      });
     } finally {
       setExecuting(false);
       setExecProgress("");
     }
   };
 
-  // ── UI helpers ────────────────────────────────────────────────────────────
   const noRouteTokens   = vaultTokens.filter(t => t.valueUsd <= 0.000001);
   const totalNoRoutePgs = Math.ceil(noRouteTokens.length / VAULT_PER_PAGE);
   const selectedValue   = tokens.filter(t => selectedTokens.has(t.contractAddress)).reduce((a, b) => a + b.valueUsd, 0);
@@ -506,7 +277,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     <div className="pb-36 space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
 
-      {/* Banner incoming token */}
+      {/* Banner incoming */}
       {incomingToken && (
         <div className="flex items-center gap-3 p-3 rounded-xl bg-orange-500/10 border border-orange-500/30 animate-in slide-in-from-top-2 duration-300">
           <Flash className="w-4 h-4 text-orange-400 shrink-0" />
@@ -527,7 +298,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
           <p className="text-xs text-green-200 mt-1">Token → WETH → ETH (auto unwrap)</p>
-          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · 0x & KyberSwap</p>
+          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · 0x & KyberSwap · 1 tx</p>
         </div>
         <div className="bg-black/30 p-2 rounded-lg border border-white/20 min-w-[80px]">
           <div className="text-[10px] text-white/70 uppercase font-bold text-center">Selected</div>
@@ -535,93 +306,16 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
-      {/* Token list header */}
-      <div className="flex items-center justify-between px-2">
-        <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
-        <div className="flex items-center gap-2">
-          <button onClick={loadDustTokens} className="text-zinc-500 hover:text-zinc-300"><Refresh className="w-3.5 h-3.5" /></button>
-          <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
-            {selectedTokens.size === tokens.length && tokens.length > 0 ? "Deselect All" : "Select All"}
-          </button>
-        </div>
-      </div>
-
-      {/* Token list */}
-      <div className="space-y-2">
-        {loading ? (
-          <div className="text-center py-12 animate-pulse text-zinc-500 text-xs">Scanning dust tokens...</div>
-        ) : tokens.length === 0 ? (
-          <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl space-y-2 p-4">
-            {scanError ? <div className="text-red-400">⚠ Error: {scanError}</div> : <div>No dust tokens found in vault.</div>}
-            {vaultAddr && <div className="text-[10px] text-zinc-600 font-mono break-all">Vault: {vaultAddr.slice(0,10)}...{vaultAddr.slice(-8)}</div>}
-          </div>
-        ) : (
-          tokens.map((token, i) => {
-            const isSelected = selectedTokens.has(token.contractAddress);
-            const isIncoming = incomingToken?.contractAddress.toLowerCase() === token.contractAddress.toLowerCase();
-            const isWeth     = token.contractAddress.toLowerCase() === WETH_ADDRESS.toLowerCase();
-            // Cek apakah token ini ada di simulasi result
-            const simItem    = simulation?.items.find(s => s.token.contractAddress === token.contractAddress);
-            const simOk      = simItem?.status === "ok";
-            const simSkip    = simItem?.status === "skipped";
-
-            return (
-              <div
-                key={i}
-                onClick={() => toggleToken(token.contractAddress)}
-                className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
-                  isSelected
-                    ? isIncoming
-                      ? "bg-orange-900/20 border-orange-500/50"
-                      : simSkip
-                        ? "bg-red-900/10 border-red-500/30"
-                        : "bg-blue-900/20 border-blue-500/50"
-                    : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
-                    isSelected
-                      ? simSkip ? "bg-red-500 border-red-500 text-white" : isIncoming ? "bg-orange-500 border-orange-500 text-white" : "bg-blue-500 border-blue-500 text-white"
-                      : "border-zinc-600 text-transparent"
-                  }`}>
-                    <Check className="w-3 h-3" strokeWidth={4} />
-                  </div>
-                  <TokenLogo token={token} />
-                  <div>
-                    <div className="text-sm font-bold dark:text-white flex items-center gap-1.5">
-                      {token.symbol}
-                      {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">UNWRAP</span>}
-                      {isIncoming && <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>}
-                      {simSkip && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">NO ROUTE</span>}
-                    </div>
-                    <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300">${token.valueUsd.toFixed(2)}</div>
-                  {/* Tampilkan estimasi ETH kalau ada simulasi */}
-                  {simOk && simItem?.netWethOut && simItem.netWethOut > 0n ? (
-                    <div className="text-[10px] text-green-400 font-mono">
-                      ~{parseFloat(formatEther(simItem.netWethOut)).toFixed(5)} ETH
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1 justify-end opacity-50">
-                      <ArrowRight className="w-3 h-3 text-zinc-300" />
-                      <div className="text-[10px] font-bold text-zinc-400">ETH</div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      {/* ── SIMULATION SUMMARY CARD ── */}
+      {/* ── SIMULATION SUMMARY CARD — di atas token list ── */}
       {simulation && (
-        <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3 animate-in slide-in-from-bottom-2 duration-200">
-          <div className="text-xs font-bold text-zinc-400 uppercase tracking-wide">Swap Preview</div>
+        <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3 animate-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-bold text-zinc-400 uppercase tracking-wide">Swap Preview</div>
+            <button
+              onClick={() => setSimulation(null)}
+              className="text-zinc-600 hover:text-zinc-400 text-xs"
+            >✕ Reset</button>
+          </div>
 
           {/* Stats grid */}
           <div className="grid grid-cols-2 gap-2">
@@ -650,10 +344,12 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           </div>
 
           {/* Gas estimate */}
-          <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
-            <span>Est. gas units</span>
-            <span className="font-mono">{simulation.gasEstimate.toLocaleString()}</span>
-          </div>
+          {simulation.gasEstimate && (
+            <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
+              <span>Est. gas (callGasLimit)</span>
+              <span className="font-mono">{simulation.gasEstimate.callGasLimit.toLocaleString()}</span>
+            </div>
+          )}
 
           {/* Per-token breakdown */}
           {simulation.processable.length > 0 && (
@@ -661,7 +357,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               <div className="text-[10px] text-zinc-500 uppercase font-bold px-1">Breakdown</div>
               {simulation.processable.map((item, i) => (
                 <div key={i} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded-lg px-2.5 py-1.5">
-                  <span className="font-bold text-zinc-200">{item.token.symbol}</span>
+                  <span className="font-bold text-zinc-200">{item.symbol}</span>
                   <div className="flex items-center gap-2">
                     <span className="text-zinc-500 text-[9px]">{item.route?.agg ?? "unwrap"}</span>
                     <span className="text-green-400 font-mono">
@@ -681,7 +377,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               </div>
               {simulation.skipped.map((item, i) => (
                 <div key={i} className="flex items-center justify-between text-xs bg-red-900/10 rounded-lg px-2.5 py-1.5">
-                  <span className="font-bold text-red-300">{item.token.symbol}</span>
+                  <span className="font-bold text-red-300">{item.symbol}</span>
                   <span className="text-zinc-500 text-[9px]">{item.reason}</span>
                 </div>
               ))}
@@ -696,16 +392,94 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               className="w-full py-3 rounded-xl font-bold text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white flex items-center justify-center gap-2 transition-colors"
             >
               {executing ? (
-                <><Refresh className="w-4 h-4 animate-spin" /><span>{execProgress}</span></>
+                <><Refresh className="w-4 h-4 animate-spin" /><span className="text-sm">{execProgress}</span></>
               ) : (
-                <><Flash className="w-4 h-4" />Confirm & Swap {simulation.processable.length} Token{simulation.processable.length > 1 ? "s" : ""}</>
+                <><Flash className="w-4 h-4" />Confirm & Swap {simulation.processable.length} Token{simulation.processable.length > 1 ? "s" : ""} — 1 tx</>
               )}
             </button>
           )}
         </div>
       )}
 
-      {/* ── Deposited Dust (no route tokens) ── */}
+      {/* Token list header */}
+      <div className="flex items-center justify-between px-2">
+        <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
+        <div className="flex items-center gap-2">
+          <button onClick={loadDustTokens} className="text-zinc-500 hover:text-zinc-300"><Refresh className="w-3.5 h-3.5" /></button>
+          <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
+            {selectedTokens.size === tokens.length && tokens.length > 0 ? "Deselect All" : "Select All"}
+          </button>
+        </div>
+      </div>
+
+      {/* Token list */}
+      <div className="space-y-2">
+        {loading ? (
+          <div className="text-center py-12 animate-pulse text-zinc-500 text-xs">Scanning dust tokens...</div>
+        ) : tokens.length === 0 ? (
+          <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl space-y-2 p-4">
+            {scanError ? <div className="text-red-400">⚠ Error: {scanError}</div> : <div>No dust tokens found in vault.</div>}
+            {vaultAddr && <div className="text-[10px] text-zinc-600 font-mono break-all">Vault: {vaultAddr.slice(0,10)}...{vaultAddr.slice(-8)}</div>}
+          </div>
+        ) : (
+          tokens.map((token, i) => {
+            const isSelected = selectedTokens.has(token.contractAddress);
+            const isIncoming = incomingToken?.contractAddress.toLowerCase() === token.contractAddress.toLowerCase();
+            const isWeth     = token.contractAddress.toLowerCase() === WETH_ADDRESS.toLowerCase();
+            const simItem    = simulation?.candidates.find(c => c.token.toLowerCase() === token.contractAddress.toLowerCase());
+            const simSkip    = simItem?.status === "skip";
+            const simOk      = simItem?.status === "ok";
+            return (
+              <div
+                key={i}
+                onClick={() => toggleToken(token.contractAddress)}
+                className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
+                  isSelected
+                    ? simSkip
+                      ? "bg-red-900/10 border-red-500/30"
+                      : isIncoming
+                        ? "bg-orange-900/20 border-orange-500/50"
+                        : "bg-blue-900/20 border-blue-500/50"
+                    : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
+                    isSelected
+                      ? simSkip ? "bg-red-500 border-red-500 text-white" : isIncoming ? "bg-orange-500 border-orange-500 text-white" : "bg-blue-500 border-blue-500 text-white"
+                      : "border-zinc-600 text-transparent"
+                  }`}>
+                    <Check className="w-3 h-3" strokeWidth={4} />
+                  </div>
+                  <TokenLogo token={token} />
+                  <div>
+                    <div className="text-sm font-bold dark:text-white flex items-center gap-1.5">
+                      {token.symbol}
+                      {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">UNWRAP</span>}
+                      {isIncoming && <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>}
+                      {simSkip && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">NO ROUTE</span>}
+                    </div>
+                    <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300">${token.valueUsd.toFixed(2)}</div>
+                  {simOk && simItem?.netWethOut && simItem.netWethOut > 0n ? (
+                    <div className="text-[10px] text-green-400 font-mono">~{parseFloat(formatEther(simItem.netWethOut)).toFixed(5)} ETH</div>
+                  ) : (
+                    <div className="flex items-center gap-1 justify-end opacity-50">
+                      <ArrowRight className="w-3 h-3 text-zinc-300" />
+                      <div className="text-[10px] font-bold text-zinc-400">ETH</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Deposited Dust (no route) */}
       {noRouteTokens.length > 0 && (
         <div className="space-y-2 mt-6">
           <div className="flex items-center justify-between px-1">
@@ -762,13 +536,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       )}
 
-      {/* ── Floating Preview button (muncul kalau ada token dipilih & belum simulate) ── */}
+      {/* Floating Preview button */}
       {selectedTokens.size > 0 && !simulation && (
         <div className="fixed bottom-24 left-4 right-4 z-40 animate-in slide-in-from-bottom-5">
           <button
             onClick={handleSimulate}
             disabled={simulating}
-            className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white shadow-xl py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-colors"
+            className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-700 text-white shadow-xl py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 transition-colors"
           >
             {simulating ? (
               <><Refresh className="w-5 h-5 animate-spin" /><span className="text-sm">Fetching routes...</span></>
