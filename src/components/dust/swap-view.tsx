@@ -250,25 +250,43 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           });
           const res = await fetch(`/api/0x/quote?${params}`);
           if (res.ok) {
-            const q = await res.json();
-            if (!q.error && q.transaction?.data) {
-              const gross = BigInt(q.buyAmount || "0");
-              const fee   = (gross * PLATFORM_FEE_BPS) / BPS_DENOM;
-              items.push({
-                token, status: "ok",
-                route: {
-                  data:             q.transaction.data,
-                  to:               q.transaction.to,
-                  value:            q.transaction.value || "0",
-                  approvalAddress:  q.transaction.approvalAddress || q.transaction.to,
-                  agg:              q._source === "lifi" ? "LI.FI" : "0x",
+            let q: any = null;
+            try { q = await res.json(); } catch (jsonErr) {
+              console.warn(`[Sim] ${token.symbol}: 0x response is not JSON — API error/rate limit`);
+            }
+            if (q && !q.error && q.transaction?.data) {
+              // ── Cari buyAmount di berbagai field yang mungkin ──────────────
+              // 0x v2: q.buyAmount | LI.FI fallback: q.estimate?.toAmount
+              const rawBuyAmt =
+                q.buyAmount ||
+                q.estimate?.toAmount ||
+                q.toAmount ||
+                q.transaction?.value ||
+                "0";
+              const gross = BigInt(rawBuyAmt);
+
+              // GUARD: kalau gross = 0, quote tidak valid → jangan push, lanjut ke Kyber
+              if (gross === 0n) {
+                console.warn(`[Sim] ${token.symbol}: buyAmount=0 dari 0x/LI.FI — fallback ke Kyber`);
+                // tidak return, jatuh ke Kyber di bawah
+              } else {
+                const fee = (gross * PLATFORM_FEE_BPS) / BPS_DENOM;
+                items.push({
+                  token, status: "ok",
+                  route: {
+                    data:             q.transaction.data,
+                    to:               q.transaction.to,
+                    value:            q.transaction.value || "0",
+                    approvalAddress:  q.transaction.approvalAddress || q.transaction.to,
+                    agg:              q._source === "lifi" ? "LI.FI" : "0x",
+                    estimatedWethOut: gross,
+                  },
                   estimatedWethOut: gross,
-                },
-                estimatedWethOut: gross,
-                estimatedFee:     fee,
-                netWethOut:       gross - fee,
-              });
-              return;
+                  estimatedFee:     fee,
+                  netWethOut:       gross - fee,
+                });
+                return;
+              }
             }
           }
         } catch {}
@@ -402,6 +420,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         setExecProgress(`[${successCount + failCount + 1}/${toSwap.length}] ${item.token.symbol} → WETH via ${item.route!.agg}...`);
         try {
           // Re-fetch fresh quote tepat sebelum swap
+          // Kalau gagal → pakai route dari simulation (masih valid untuk beberapa menit)
           let freshRoute = item.route!;
           try {
             const params = new URLSearchParams({
@@ -412,8 +431,10 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             });
             const res = await fetch(`/api/0x/quote?${params}`);
             if (res.ok) {
-              const q = await res.json();
-              if (!q.error && q.transaction?.data) {
+              let q: any = null;
+              try { q = await res.json(); } catch {}
+              // Hanya update kalau fresh quote valid dan punya tx data
+              if (q && !q.error && q.transaction?.data && q.transaction?.to) {
                 freshRoute = { ...freshRoute, data: q.transaction.data, to: q.transaction.to, value: q.transaction.value || "0" };
               }
             }
