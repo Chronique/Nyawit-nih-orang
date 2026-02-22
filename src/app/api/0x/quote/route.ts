@@ -1,5 +1,4 @@
 // src/app/api/0x/quote/route.ts
-// Fixed: proper non-JSON error handling + multi-field buyAmount extraction + debug logging
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -15,7 +14,8 @@ export async function GET(req: NextRequest) {
   const buyToken           = searchParams.get("buyToken")           || "";
   const sellAmount         = searchParams.get("sellAmount")         || "";
   const taker              = searchParams.get("taker")              || "";
-  const slippagePercentage = searchParams.get("slippagePercentage") || "0.15";
+  // ✅ FIX: default slippage 1.5% (bukan 15%)
+  const slippagePercentage = searchParams.get("slippagePercentage") || "0.015";
   const feeRecipient       = searchParams.get("feeRecipient")       || "";
   const buyTokenPctFee     = searchParams.get("buyTokenPercentageFee") || "";
 
@@ -31,11 +31,14 @@ export async function GET(req: NextRequest) {
       buyToken,
       sellAmount,
       taker:              taker || "0x0000000000000000000000000000000000000001",
-      slippagePercentage,
+      // ✅ 0x v2 pakai "slippageBps" (integer basis points), bukan slippagePercentage
+      // slippagePercentage 0.015 = 1.5% = 150 bps
+      slippageBps:        String(Math.round(parseFloat(slippagePercentage) * 10_000)),
     });
     if (feeRecipient && buyTokenPctFee) {
-      params.set("feeRecipient", feeRecipient);
-      params.set("buyTokenPercentageFee", buyTokenPctFee);
+      params.set("affiliateAddress", feeRecipient);
+      // 0x v2 pakai "affiliateFee" dalam bps: 0.05 = 5% = 500 bps
+      params.set("affiliateFeeBps", String(Math.round(parseFloat(buyTokenPctFee) * 10_000)));
     }
 
     const res = await fetch(`https://api.0x.org/swap/permit2/quote?${params}`, {
@@ -46,7 +49,6 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    // ── Handle non-JSON response (rate limit, auth error, HTML page) ──────
     const contentType = res.headers.get("content-type") || "";
     if (!contentType.includes("application/json")) {
       const text = await res.text();
@@ -58,19 +60,15 @@ export async function GET(req: NextRequest) {
 
     if (!res.ok || data.code || data.reason) {
       console.warn(`[0x] API error:`, data.reason || data.code || data);
-      throw new Error(data.reason || "0x quote failed");
+      throw new Error(data.reason || data.message || "0x quote failed");
     }
 
-    // ── Extract buyAmount — 0x v2 uses different field names ─────────────
-    // v1: data.buyAmount | v2: data.buyAmount or data.minBuyAmount
     const buyAmount =
       data.buyAmount       ||
       data.minBuyAmount    ||
       data.grossBuyAmount  ||
-      data.expectedSellAmount || // some versions
       "0";
 
-    // ── Extract approvalAddress from allowanceTarget ──────────────────────
     const approvalAddress =
       data.transaction?.allowanceTarget ||
       data.allowanceTarget              ||
@@ -87,7 +85,7 @@ export async function GET(req: NextRequest) {
         to:              data.transaction?.to,
         value:           data.transaction?.value || "0",
         gas:             data.transaction?.gas,
-        approvalAddress, // explicit field untuk komponen
+        approvalAddress,
       },
     });
 
@@ -98,15 +96,14 @@ export async function GET(req: NextRequest) {
   // ── Fallback: LI.FI ───────────────────────────────────────────────────────
   try {
     const params = new URLSearchParams({
-      fromChain:  chainId,
-      toChain:    chainId,
-      fromToken:  sellToken,
-      toToken:    buyToken,
-      fromAmount: sellAmount,
-      fromAddress: taker || "0x0000000000000000000000000000000000000001",
-      toAddress:   taker || "0x0000000000000000000000000000000000000001",
-      slippage:   slippagePercentage,
-      // Deny permit2 — vault tidak support off-chain signature
+      fromChain:     chainId,
+      toChain:       chainId,
+      fromToken:     sellToken,
+      toToken:       buyToken,
+      fromAmount:    sellAmount,
+      fromAddress:   taker || "0x0000000000000000000000000000000000000001",
+      toAddress:     taker || "0x0000000000000000000000000000000000000001",
+      slippage:      slippagePercentage,
       denyExchanges: "paraswap",
     });
     if (LIFI_API_KEY && feeRecipient && buyTokenPctFee) {
@@ -134,7 +131,7 @@ export async function GET(req: NextRequest) {
       throw new Error(data?.message || "LI.FI quote failed");
     }
 
-    // LI.FI permit2 guard
+    // Permit2 guard
     const approvalAddr = (data?.estimate?.approvalAddress || "").toLowerCase();
     if (approvalAddr === "0x000000000022d473030f116ddee9f6b43ac78ba3") {
       throw new Error("LI.FI: permit2 route not supported in vault");
@@ -158,7 +155,7 @@ export async function GET(req: NextRequest) {
         to:              data.transactionRequest?.to,
         value:           data.transactionRequest?.value || "0",
         gasLimit:        data.transactionRequest?.gasLimit,
-        approvalAddress, // explicit field untuk komponen
+        approvalAddress,
       },
     });
 
@@ -166,9 +163,8 @@ export async function GET(req: NextRequest) {
     console.error(`[LI.FI] Fetch error:`, elifi?.message || elifi);
   }
 
-  // Kedua agregator gagal
   return NextResponse.json(
     { error: "No route found", reason: "Both 0x and LI.FI failed to return a valid quote" },
-    { status: 200 } // return 200 agar komponen bisa handle gracefully
+    { status: 200 }
   );
 }

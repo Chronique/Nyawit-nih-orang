@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient } from "~/lib/smart-account";
+import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
@@ -176,7 +176,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── SIMULATE: pakai batch-swap.ts lib ─────────────────────────────────────
+  // ── SIMULATE ─────────────────────────────────────────────────────────────────
   const handleSimulate = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSimulating(true);
@@ -207,7 +207,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── EXECUTE: 1 UserOp berisi semua approve+swap ───────────────────────────
+  // ── EXECUTE ───────────────────────────────────────────────────────────────────
   const handleExecute = async () => {
     if (!walletClient || !simulation || simulation.calls.length === 0) return;
     setExecuting(true);
@@ -223,20 +223,32 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       // Unwrap WETH → ETH setelah semua swap selesai
       setExecProgress("Unwrapping WETH → ETH...");
       try {
-        const { createPublicClient, http } = await import("viem");
         const client       = await getSmartAccountClient(walletClient);
         const vaultAddress = client.account.address;
-        const pc           = createPublicClient({ chain: base, transport: http() });
-        const wethBal      = await pc.readContract({
-          address: WETH_ADDRESS as Address, abi: WETH_ABI,
-          functionName: "balanceOf", args: [vaultAddress as Address],
+
+        // ✅ FIX: Gunakan publicClient yang sudah di-import, bukan dynamic import
+        const wethBal = await publicClient.readContract({
+          address: WETH_ADDRESS as Address,
+          abi: WETH_ABI,
+          functionName: "balanceOf",
+          args: [vaultAddress as Address],
         });
+
         if (wethBal > 0n) {
           setExecProgress(`Unwrapping ${formatUnits(wethBal, 18).slice(0, 8)} WETH → ETH...`);
+
+          // ✅ FIX: Gunakan encodeFunctionData yang sudah di-import (bukan require("viem"))
+          const unwrapData = encodeFunctionData({
+            abi: WETH_ABI,
+            functionName: "withdraw",
+            args: [wethBal],
+          });
+
           const unwrapTx = await client.sendUserOperation({
             calls: [{
-              to:    WETH_ADDRESS as Address, value: 0n,
-              data:  require("viem").encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBal] }),
+              to:    WETH_ADDRESS as Address,
+              value: 0n,
+              data:  unwrapData,
             }],
           });
           await client.waitForUserOperationReceipt({ hash: unwrapTx });
@@ -244,7 +256,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         }
       } catch (ue: any) {
         console.warn("[Unwrap] Failed:", ue?.message);
-        // Tidak fatal
+        // Tidak fatal — swap sudah berhasil
       }
 
       const skippedCount = simulation.skipped.length;
@@ -306,18 +318,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
-      {/* ── SIMULATION SUMMARY CARD — di atas token list ── */}
+      {/* ── SIMULATION SUMMARY CARD ── */}
       {simulation && (
         <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3 animate-in slide-in-from-top-2 duration-200">
           <div className="flex items-center justify-between">
             <div className="text-xs font-bold text-zinc-400 uppercase tracking-wide">Swap Preview</div>
-            <button
-              onClick={() => setSimulation(null)}
-              className="text-zinc-600 hover:text-zinc-400 text-xs"
-            >✕ Reset</button>
+            <button onClick={() => setSimulation(null)} className="text-zinc-600 hover:text-zinc-400 text-xs">✕ Reset</button>
           </div>
 
-          {/* Stats grid */}
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-zinc-800 rounded-xl p-3">
               <div className="text-[10px] text-zinc-500 mb-0.5">Will Process</div>
@@ -343,7 +351,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           </div>
 
-          {/* Gas estimate */}
           {simulation.gasEstimate && (
             <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
               <span>Est. gas (callGasLimit)</span>
@@ -351,7 +358,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
-          {/* Per-token breakdown */}
           {simulation.processable.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-zinc-500 uppercase font-bold px-1">Breakdown</div>
@@ -369,7 +375,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
-          {/* Skipped list */}
           {simulation.skipped.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-red-500 uppercase font-bold px-1 flex items-center gap-1">
@@ -384,7 +389,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
-          {/* Confirm button */}
           {simulation.processable.length > 0 && (
             <button
               onClick={handleExecute}
