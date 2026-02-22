@@ -8,47 +8,13 @@ import {
   deployVault,
   publicClient,
 } from "~/lib/smart-account";
+import { alchemy } from "~/lib/alchemy";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
-import { formatUnits, formatEther, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { Rocket, Check, Copy, Refresh, WarningTriangle, Shield } from "iconoir-react";
+import { formatUnits, formatEther, type Address } from "viem";
+import { Rocket, Check, Copy, Refresh } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
-// Router addresses yang pernah/mungkin di-approve oleh vault di Base
-// Vault bisa batch-revoke semua sekaligus
-const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  { label: "0x ExchangeProxy",            address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
-  { label: "KyberSwap MetaAggregator",    address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
-  { label: "KyberSwap Router v2",         address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
-  { label: "LI.FI Diamond",              address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
-  { label: "Permit2",                     address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
-  { label: "Uniswap v3 SwapRouter",       address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
-  { label: "Uniswap UniversalRouter",     address: "0x6fF5693b99B238D47c0B9a11F4B340a18B83a4C8" },
-];
-
-// Allowance ABI — minimal untuk baca & revoke
-const ALLOWANCE_ABI = [
-  {
-    name: "allowance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "owner",   type: "address" },
-      { name: "spender", type: "address" },
-    ],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
-interface ActiveApproval {
-  tokenAddress:  string;
-  tokenSymbol:   string;
-  spenderAddress: string;
-  spenderLabel:  string;
-  allowance:     bigint;
-}
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC Base mainnet
 
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(token.logo || null);
@@ -66,24 +32,22 @@ export const DustDepositView = () => {
   const { address: ownerAddress, chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
 
-  const [vaultAddress, setVaultAddress]     = useState<Address | null>(null);
-  const [vaultVersion, setVaultVersion]     = useState<"v1" | "v2" | null>(null);
-  const [isDeployed, setIsDeployed]         = useState(false);
-  const [ethBalance, setEthBalance]         = useState("0");
-  const [usdcBalance, setUsdcBalance]       = useState("0");
-  const [dustTokens, setDustTokens]         = useState<any[]>([]);
-  const [loading, setLoading]               = useState(false);
-  const [activating, setActivating]         = useState(false);
-  const [deployTxHash, setDeployTxHash]     = useState<`0x${string}` | undefined>();
-  const [toast, setToast]                   = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [vaultAddress, setVaultAddress] = useState<Address | null>(null);
+  const [isDeployed, setIsDeployed] = useState(false);
+  const [ethBalance, setEthBalance] = useState("0");
+  const [usdcBalance, setUsdcBalance] = useState("0");
+  const [dustTokens, setDustTokens] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [deployTxHash, setDeployTxHash] = useState<`0x${string}` | undefined>();
+  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
-  // Revoke state
-  const [approvals, setApprovals]           = useState<ActiveApproval[]>([]);
-  const [loadingApprovals, setLoadingApprovals] = useState(false);
-  const [revoking, setRevoking]             = useState(false);
+  // Watch deploy tx confirmation
+  const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({
+    hash: deployTxHash,
+  });
 
-  // Watch deploy tx
-  const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
+  // Auto-refresh setelah deploy confirmed
   useEffect(() => {
     if (deployConfirmed) {
       setIsDeployed(true);
@@ -93,46 +57,52 @@ export const DustDepositView = () => {
     }
   }, [deployConfirmed]);
 
-  // Auto-detect vault version (v1 atau v2)
+  // Derive vault address
   useEffect(() => {
     if (!ownerAddress) return;
     detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
-      console.log("[DepositView] Vault:", address, "version:", version);
+      console.log("[DepositView] Vault address:", address, "version:", version);
       setVaultAddress(address);
-      setVaultVersion(version);
     });
   }, [ownerAddress]);
 
-  // ── Fetch vault data ───────────────────────────────────────────────────────
   const fetchVaultData = useCallback(async () => {
     if (!vaultAddress) return;
     setLoading(true);
     try {
-      const [code, ethBal] = await Promise.all([
-        publicClient.getBytecode({ address: vaultAddress }),
+      // Pakai client sesuai chain — fix ETH balance salah chain
+      const [deployed, ethBal] = await Promise.all([
+        (async () => {
+          const code = await publicClient.getBytecode({ address: vaultAddress });
+          return !!code && code !== "0x";
+        })(),
         publicClient.getBalance({ address: vaultAddress }),
       ]);
-      const deployed = !!code && code !== "0x";
       setIsDeployed(deployed);
       setEthBalance(formatEther(ethBal));
 
-      const moralisTokens = await fetchMoralisTokens(vaultAddress);
-      const formatted = moralisTokens
-        .filter(t => BigInt(t.balance) > 0n)
-        .map(t => ({
-          contractAddress: t.token_address,
-          symbol:          t.symbol || "???",
-          logo:            t.logo || null,
-          decimals:        t.decimals || 18,
-          formattedBal:    formatUnits(BigInt(t.balance), t.decimals || 18),
-        }));
+      const balances = await alchemy.core.getTokenBalances(vaultAddress);
+      const nonZero = balances.tokenBalances.filter(
+        (t: any) => t.tokenBalance && BigInt(t.tokenBalance) > 0n
+      );
+      const metadata = await Promise.all(
+        nonZero.map((t: any) => alchemy.core.getTokenMetadata(t.contractAddress))
+      );
+      const formatted = nonZero.map((t: any, i: number) => ({
+        contractAddress: t.contractAddress,
+        symbol: metadata[i].symbol || "???",
+        logo: metadata[i].logo,
+        decimals: metadata[i].decimals || 18,
+        formattedBal: formatUnits(BigInt(t.tokenBalance || 0), metadata[i].decimals || 18),
+      }));
 
-      const usdc = formatted.find(t => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
+      const usdc = formatted.find(
+        (t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase()
+      );
       setUsdcBalance(usdc ? parseFloat(usdc.formattedBal).toFixed(2) : "0");
-      setDustTokens(formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase()));
-
-      // Cek approvals setelah data vault loaded
-      if (deployed) fetchApprovals(vaultAddress, formatted);
+      setDustTokens(formatted.filter(
+        (t: any) => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase()
+      ));
     } catch (e) {
       console.error(e);
     } finally {
@@ -142,108 +112,28 @@ export const DustDepositView = () => {
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
 
-  // ── Cek approvals: untuk tiap token × tiap known spender ─────────────────
-  // Vault bisa execute batch revoke — satu tx untuk semua
-  const fetchApprovals = async (vault: Address, tokens: any[]) => {
-    if (tokens.length === 0) return;
-    setLoadingApprovals(true);
-    try {
-      const found: ActiveApproval[] = [];
-
-      // Parallel check semua kombinasi token × spender
-      await Promise.all(
-        tokens.flatMap(token =>
-          KNOWN_SPENDERS.map(async spender => {
-            try {
-              const allowance = await publicClient.readContract({
-                address:      token.contractAddress as Address,
-                abi:          ALLOWANCE_ABI,
-                functionName: "allowance",
-                args:         [vault, spender.address],
-              });
-              if (allowance > 0n) {
-                found.push({
-                  tokenAddress:   token.contractAddress,
-                  tokenSymbol:    token.symbol,
-                  spenderAddress: spender.address,
-                  spenderLabel:   spender.label,
-                  allowance,
-                });
-              }
-            } catch {
-              // Token mungkin tidak implement allowance standar — skip
-            }
-          })
-        )
-      );
-
-      console.log(`[Revoke] Found ${found.length} active approvals`);
-      setApprovals(found);
-    } catch (e) {
-      console.error("[Revoke] Error checking approvals:", e);
-    } finally {
-      setLoadingApprovals(false);
-    }
-  };
-
-  // ── Revoke All: batch approve(spender, 0) via smart vault ────────────────
-  // Karena smart vault bisa executeBatch, semua revoke dalam 1 tx
-  const handleRevokeAll = async () => {
-    if (!walletClient || approvals.length === 0) return;
-    if (!window.confirm(`Revoke ${approvals.length} token approval${approvals.length > 1 ? "s" : ""}? This uses 1 transaction from your vault.`)) return;
-
-    setRevoking(true);
-    try {
-      if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
-      const client = await getSmartAccountClient(walletClient);
-
-      // Build revoke calls: approve(spender, 0) untuk tiap approval
-      const revokeCalls = approvals.map(approval => ({
-        to:    approval.tokenAddress as Address,
-        value: 0n,
-        data:  encodeFunctionData({
-          abi:          erc20Abi,
-          functionName: "approve",
-          args:         [approval.spenderAddress as Address, 0n],
-        }),
-      }));
-
-      console.log(`[Revoke] Batch ${revokeCalls.length} revokes in 1 tx`);
-      const txHash = await client.sendUserOperation({ calls: revokeCalls });
-      setToast({ msg: "Revoking approvals...", type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
-
-      setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
-      setApprovals([]); // clear UI immediately
-      // Re-check setelah beberapa saat
-      setTimeout(() => vaultAddress && fetchApprovals(vaultAddress, dustTokens), 5000);
-    } catch (e: any) {
-      const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Revoke failed: " + msg,
-        type: "error",
-      });
-    } finally {
-      setRevoking(false);
-    }
-  };
-
-  // ── Activate vault ─────────────────────────────────────────────────────────
+  // Aktivasi: EOA deploy vault langsung, bayar gas dari EOA
+  // TIDAK perlu deposit ETH ke vault dulu
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
+      // Ensure Base mainnet
       if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
       setActivating(true);
       setToast({ msg: "Confirm transaction in your wallet...", type: "success" });
+
+      // EOA memanggil factory.createAccount() langsung
+      // Gas dari EOA, bukan dari vault
       const txHash = await deployVault(walletClient);
       setDeployTxHash(txHash);
       setToast({ msg: "Activation sent! Waiting for confirmation...", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
-      setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Activation error: " + msg,
-        type: "error",
-      });
+      if (msg.includes("User rejected") || msg.includes("user denied")) {
+        setToast({ msg: "Cancelled by user.", type: "error" });
+      } else {
+        setToast({ msg: "Activation error: " + msg, type: "error" });
+      }
       setActivating(false);
     }
   };
@@ -255,27 +145,14 @@ export const DustDepositView = () => {
       {/* VAULT ADDRESS CARD */}
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-xs text-zinc-500 font-medium uppercase tracking-wide">Smart Vault</span>
-          <div className="flex items-center gap-2">
-            {/* Version badge — auto-detected */}
-            {vaultVersion && (
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-                vaultVersion === "v1"
-                  ? "text-zinc-400 border-zinc-600 bg-zinc-800"
-                  : "text-blue-400 border-blue-600 bg-blue-900/30"
-              }`}>
-                Light Account {vaultVersion === "v1" ? "v1.1" : "v2.0"}
-              </span>
-            )}
-            {/* Deploy status badge */}
-            <div className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-full border ${
-              isDeployed
-                ? "text-green-400 border-green-500/40 bg-green-500/10"
-                : "text-orange-400 border-orange-500/40 bg-orange-500/10"
-            }`}>
-              {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
-              {isDeployed ? "Active" : "Inactive"}
-            </div>
+          <span className="text-xs text-zinc-500 font-medium uppercase tracking-wide">Smart Vault Address</span>
+          <div className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-full border ${
+            isDeployed
+              ? "text-green-400 border-green-500/40 bg-green-500/10"
+              : "text-orange-400 border-orange-500/40 bg-orange-500/10"
+          }`}>
+            {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
+            {isDeployed ? "Active" : "Inactive"}
           </div>
         </div>
 
@@ -318,70 +195,6 @@ export const DustDepositView = () => {
         )}
       </div>
 
-      {/* ── REVOKE ALL — hanya muncul kalau ada active approval ── */}
-      {isDeployed && (approvals.length > 0 || loadingApprovals) && (
-        <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <Shield className="w-4 h-4 text-yellow-400 shrink-0" />
-            <div>
-              <p className="text-sm font-semibold text-yellow-300">
-                {loadingApprovals ? "Checking approvals..." : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
-              </p>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                {loadingApprovals
-                  ? "Scanning token allowances..."
-                  : "DEX routers can still spend your vault tokens. Revoke to protect your funds."}
-              </p>
-            </div>
-          </div>
-
-          {/* List approvals */}
-          {!loadingApprovals && approvals.length > 0 && (
-            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-              {/* Group by token untuk tampilan lebih ringkas */}
-              {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
-                const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
-                const symbol = tokenApprovals[0].tokenSymbol;
-                return (
-                  <div key={tokenAddr} className="flex items-center justify-between text-xs bg-yellow-500/10 rounded-lg px-2.5 py-1.5">
-                    <span className="font-bold text-yellow-200">{symbol}</span>
-                    <span className="text-zinc-400">
-                      {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}:&nbsp;
-                      {tokenApprovals.map(a => a.spenderLabel.split(" ")[0]).join(", ")}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <button
-            onClick={handleRevokeAll}
-            disabled={revoking || loadingApprovals || approvals.length === 0}
-            className="w-full py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors
-              bg-yellow-500 hover:bg-yellow-400 text-black
-              disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
-          >
-            {revoking ? (
-              <><Refresh className="w-4 h-4 animate-spin" /> Revoking...</>
-            ) : (
-              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx</>
-            )}
-          </button>
-          <p className="text-[10px] text-zinc-500 text-center">
-            Smart vault batches all revokes into 1 transaction · Free (only gas)
-          </p>
-        </div>
-      )}
-
-      {/* Approved & clean state */}
-      {isDeployed && !loadingApprovals && approvals.length === 0 && dustTokens.length > 0 && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-500/5 border border-green-500/20">
-          <Shield className="w-3.5 h-3.5 text-green-400 shrink-0" />
-          <p className="text-xs text-green-400">No active approvals found. Vault is clean.</p>
-        </div>
-      )}
-
       {/* ACTIVATION SECTION */}
       {!isDeployed && (
         <div className="rounded-2xl border border-orange-500/30 bg-orange-500/5 p-4 space-y-3">
@@ -421,9 +234,6 @@ export const DustDepositView = () => {
         <div className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4 space-y-2">
           <p className="text-sm font-semibold text-green-400 flex items-center gap-2">
             <Check className="w-4 h-4" /> Smart Wallet Active
-            {vaultVersion && (
-              <span className="text-[9px] font-normal text-green-600">({vaultVersion === "v1" ? "Light Account v1.1" : "Light Account v2.0"})</span>
-            )}
           </p>
           <p className="text-xs text-zinc-400">
             Send dust tokens to the vault address above.
@@ -432,5 +242,7 @@ export const DustDepositView = () => {
         </div>
       )}
     </div>
+
+    
   );
 };

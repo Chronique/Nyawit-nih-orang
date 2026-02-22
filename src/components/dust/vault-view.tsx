@@ -48,49 +48,52 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const { writeContractAsync } = useWriteContract();
   const { switchChainAsync } = useSwitchChain();
 
-  const [vaultAddress, setVaultAddress]               = useState<string | null>(null);
-  const [ethBalance, setEthBalance]                   = useState("0");
-  const [usdcBalance, setUsdcBalance]                 = useState<any>(null);
-  const [tokens, setTokens]                           = useState<any[]>([]);
-  const [ownerTokens, setOwnerTokens]                 = useState<MoralisToken[]>([]);
-  const [isDeployed, setIsDeployed]                   = useState(false);
-  const [loading, setLoading]                         = useState(false);
-  const [loadingOwnerTokens, setLoadingOwnerTokens]   = useState(false);
-  const [actionLoading, setActionLoading]             = useState<string | null>(null);
-  const [toast, setToast]                             = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const [currentPage, setCurrentPage]                 = useState(1);
-  const [currentOwnerPage, setCurrentOwnerPage]       = useState(1);
-  const [showEthWithdraw, setShowEthWithdraw]         = useState(false);
-  const [ethWithdrawAmount, setEthWithdrawAmount]     = useState("");
+  const [vaultAddress, setVaultAddress] = useState<string | null>(null);
+  const [ethBalance, setEthBalance] = useState("0");
+  const [usdcBalance, setUsdcBalance] = useState<any>(null);
+  const [tokens, setTokens] = useState<any[]>([]);
+  const [ownerTokens, setOwnerTokens] = useState<MoralisToken[]>([]);
+  const [isDeployed, setIsDeployed] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingOwnerTokens, setLoadingOwnerTokens] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [currentOwnerPage, setCurrentOwnerPage] = useState(1);
+  const [showEthWithdraw, setShowEthWithdraw] = useState(false);
+  const [ethWithdrawAmount, setEthWithdrawAmount] = useState("");
   const [selectedOwnerTokens, setSelectedOwnerTokens] = useState<Set<string>>(new Set());
+
+
 
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
     try {
       const client = await getSmartAccountClient(walletClient);
-      const addr   = client.account.address;
-      const bal    = await publicClient.getBalance({ address: addr });
-      const code   = await publicClient.getBytecode({ address: addr });
+      const addr = client.account.address;
+      const bal = await publicClient.getBalance({ address: addr });
+      const code = await publicClient.getBytecode({ address: addr });
 
       setVaultAddress(addr);
       setEthBalance(formatEther(bal));
       setIsDeployed(code !== undefined && code !== null && code !== "0x");
 
+      // Pakai Moralis — 1 call, dapat semua data token sekaligus
       const moralisTokens = await fetchMoralisTokens(addr);
       const formatted = moralisTokens
         .filter((t) => BigInt(t.balance) > 0n)
         .map((t) => ({
           contractAddress: t.token_address,
-          name:            t.name || "Unknown",
-          symbol:          t.symbol || "???",
-          logo:            t.logo || null,
-          decimals:        t.decimals || 18,
-          rawBalance:      t.balance,
-          formattedBal:    formatUnits(BigInt(t.balance), t.decimals || 18),
+          name: t.name || "Unknown",
+          symbol: t.symbol || "???",
+          logo: t.logo || null,
+          decimals: t.decimals || 18,
+          rawBalance: t.balance,
+          formattedBal: formatUnits(BigInt(t.balance), t.decimals || 18),
         }));
 
-      const usdc   = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
+      const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       const others = formatted.filter((t: any) => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());
       others.sort((a: any, b: any) => parseFloat(b.formattedBal) - parseFloat(a.formattedBal));
 
@@ -145,8 +148,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
-      const client  = await getSmartAccountClient(walletClient);
-      const txHash  = await client.sendUserOperation({
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
       setToast({ msg: "ETH withdrawal sent!", type: "success" });
@@ -169,13 +172,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${token.symbol}...`);
-      const rawAmount    = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
+      const rawAmount = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
       const transferData = encodeFunctionData({
         abi: erc20Abi, functionName: "transfer",
         args: [ownerAddress as Address, rawAmount],
       });
-      const client  = await getSmartAccountClient(walletClient);
-      const txHash  = await client.sendUserOperation({
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
       setToast({ msg: "Withdrawal processed!", type: "success" });
@@ -188,7 +191,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Single deposit — EOA sign langsung, tidak perlu Smart Account
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     if (!window.confirm(`Deposit ${token.symbol} to vault?`)) return;
@@ -196,14 +198,12 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
       await writeContractAsync({
-        address:  token.token_address as Address,
-        abi:      erc20Abi,
-        functionName: "transfer",
-        args:     [vaultAddress as Address, BigInt(token.balance)],
-        chainId:  base.id,
+        address: token.token_address as Address,
+        abi: erc20Abi, functionName: "transfer",
+        args: [vaultAddress as Address, BigInt(token.balance)],
+        chainId: base.id,
       });
       setToast({ msg: "Deposit sent! Updating balances...", type: "success" });
-      // Tunggu konfirmasi sebelum refresh
       await new Promise((r) => setTimeout(r, 8000));
       await Promise.all([fetchVaultData(), fetchOwnerData()]);
     } catch (e: any) {
@@ -213,87 +213,75 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Batch deposit — EOA harus sign satu per satu, tidak bisa atomic
-  // User akan diminta sign sebanyak jumlah token yang dipilih
-  const handleBatchDeposit = async () => {
+  const currentTokens = tokens.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+  const currentOwnerTokens = ownerTokens.slice((currentOwnerPage - 1) * ITEMS_PER_PAGE, currentOwnerPage * ITEMS_PER_PAGE);
+  const totalPages = Math.ceil(tokens.length / ITEMS_PER_PAGE);
+  const totalOwnerPages = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
+
+  const toggleOwnerToken = (addr: string) => {
+  const newSet = new Set(selectedOwnerTokens);
+  if (newSet.has(addr)) newSet.delete(addr);
+  else newSet.add(addr);
+  setSelectedOwnerTokens(newSet);
+};
+
+const handleBatchDeposit = async () => {
+    // Filter token mana saja yang masuk dalam daftar seleksi
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
+    
     if (tokensToDeposit.length === 0) return;
 
-    if (!window.confirm(
-      `Deposit ${tokensToDeposit.length} token${tokensToDeposit.length > 1 ? "s" : ""} to vault?\n` +
-      (tokensToDeposit.length > 1 ? `⚠️ You will sign ${tokensToDeposit.length} transactions one by one.` : "")
-    )) return;
+    if (!window.confirm(`Deposit ${tokensToDeposit.length} tokens to vault? You will need to sign each transaction.`)) return;
 
     try {
       await ensureNetwork();
-      let successCount = 0;
-
+      
       for (const token of tokensToDeposit) {
         try {
-          setActionLoading(`[${successCount + 1}/${tokensToDeposit.length}] Depositing ${token.symbol}...`);
-
+          setActionLoading(`Depositing ${token.symbol}...`);
+          
+          // Memanggil fungsi deposit yang sudah ada
           await writeContractAsync({
-            address:      token.token_address as Address,
-            abi:          erc20Abi,
+            address: token.token_address as Address,
+            abi: erc20Abi,
             functionName: "transfer",
-            args:         [vaultAddress as Address, BigInt(token.balance)],
-            chainId:      base.id,
+            args: [vaultAddress as Address, BigInt(token.balance)],
+            chainId: base.id,
           });
 
-          // Hapus dari seleksi jika berhasil
+          // Hapus dari seleksi jika berhasil (opsional)
           const newSet = new Set(selectedOwnerTokens);
           newSet.delete(token.token_address);
           setSelectedOwnerTokens(newSet);
-          successCount++;
 
-          setToast({ msg: `${token.symbol} deposited! (${successCount}/${tokensToDeposit.length})`, type: "success" });
-
-          // ✅ Perbaikan: delay 5s antar token — beri waktu tx konfirmasi
-          // tanpa ini Moralis belum update saat refresh → tampil balance salah
-          if (successCount < tokensToDeposit.length) {
-            await new Promise((r) => setTimeout(r, 5000));
-          }
+          setToast({ msg: `${token.symbol} deposited!`, type: "success" });
+          
+          // Beri jeda sedikit agar provider wallet tidak bentrok
+          await new Promise((r) => setTimeout(r, 2000));
         } catch (err: any) {
           console.error(`Failed to deposit ${token.symbol}:`, err);
           setToast({ msg: `Failed to deposit ${token.symbol}`, type: "error" });
-          // Stop kalau user reject wallet popup
+          // Kita break jika user menolak salah satu transaksi (User Rejected)
           if (err.code === 4001 || err.message?.includes("rejected")) break;
-          // Kalau error lain (network, gas), coba lanjut ke token berikutnya
-          await new Promise((r) => setTimeout(r, 2000));
         }
       }
-
-      if (successCount > 0) {
-        setToast({ msg: `Done! ${successCount} token${successCount > 1 ? "s" : ""} deposited. Refreshing...`, type: "success" });
-        await new Promise((r) => setTimeout(r, 5000));
-        await Promise.all([fetchVaultData(), fetchOwnerData()]);
-      }
+      
+      setToast({ msg: "Batch deposit process finished.", type: "success" });
+      await Promise.all([fetchVaultData(), fetchOwnerData()]);
     } catch (e: any) {
-      setToast({ msg: "Batch deposit failed: " + e.message, type: "error" });
+      setToast({ msg: "Batch deposit failed: " + (e.message), type: "error" });
     } finally {
       setActionLoading(null);
     }
   };
 
-  const toggleOwnerToken = (addr: string) => {
-    const newSet = new Set(selectedOwnerTokens);
-    if (newSet.has(addr)) newSet.delete(addr);
-    else newSet.add(addr);
-    setSelectedOwnerTokens(newSet);
-  };
-
-  const selectAllOwnerTokens = () => {
-    if (selectedOwnerTokens.size === ownerTokens.length) {
-      setSelectedOwnerTokens(new Set());
-    } else {
-      setSelectedOwnerTokens(new Set(ownerTokens.map((t) => t.token_address)));
-    }
-  };
-
-  const currentTokens      = tokens.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
-  const currentOwnerTokens = ownerTokens.slice((currentOwnerPage - 1) * ITEMS_PER_PAGE, currentOwnerPage * ITEMS_PER_PAGE);
-  const totalPages         = Math.ceil(tokens.length / ITEMS_PER_PAGE);
-  const totalOwnerPages    = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
+const selectAllOwnerTokens = () => {
+  if (selectedOwnerTokens.size === ownerTokens.length) {
+    setSelectedOwnerTokens(new Set());
+  } else {
+    setSelectedOwnerTokens(new Set(ownerTokens.map((t) => t.token_address)));
+  }
+};
 
   return (
     <div className="pb-28 space-y-6 relative min-h-[50vh]">
@@ -327,7 +315,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
 
         <div className="mt-4 space-y-3">
-          {/* ETH Balance */}
           <div className="bg-zinc-800/50 p-3 rounded-xl border border-zinc-700/50">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -362,7 +349,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             )}
           </div>
 
-          {/* USDC Balance */}
           <div className="flex items-center justify-between bg-blue-900/20 p-3 rounded-xl border border-blue-500/30">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white">
@@ -384,144 +370,95 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
       </div>
 
-      {/* VAULT TOKEN LIST */}
-      {tokens.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between px-1 mb-2">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <Flash className="w-5 h-5 text-yellow-500" /> Vault Tokens
-            </h3>
-            <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg">
-              <Refresh className="w-4 h-4 text-zinc-500" />
-            </button>
-          </div>
-          <div className="space-y-2">
-            {currentTokens.map((token, i) => (
-              <div key={i} className="flex items-center justify-between p-3 bg-white dark:bg-zinc-900 border border-zinc-100 dark:border-zinc-800 rounded-xl">
-                <div className="flex items-center gap-3 overflow-hidden">
-                  <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden">
-                    <TokenLogo token={token} />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-sm">{token.symbol}</div>
-                    <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {onGoToSwap && (
-                    <button
-                      onClick={() => onGoToSwap(token)}
-                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-yellow-50 text-yellow-600 hover:bg-yellow-100 dark:bg-yellow-900/20 dark:text-yellow-400 flex items-center gap-1"
-                    >
-                      <Flash className="w-3 h-3" /> Swap
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleWithdrawToken(token)}
-                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400"
-                  >
-                    WD
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          {totalPages > 1 && (
-            <div className="flex justify-center items-center gap-1 mt-3">
-              <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
-              {generatePagination(currentPage, totalPages).map((page, i) =>
-                page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> :
-                <button key={i} onClick={() => setCurrentPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
-              )}
-              <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* WALLET ASSETS */}
-      <div>
-        <div className="flex items-center justify-between px-1 mb-2">
-          <div className="flex flex-col">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
-            </h3>
-            {ownerTokens.length > 0 && (
-              <button
-                onClick={selectAllOwnerTokens}
-                className="text-[10px] text-blue-500 font-bold uppercase tracking-wider text-left mt-1"
-              >
-                {selectedOwnerTokens.size === ownerTokens.length ? "Deselect All" : "Select All Assets"}
-              </button>
-            )}
+<div>
+  <div className="flex items-center justify-between px-1 mb-2">
+    <div className="flex flex-col">
+       <h3 className="font-semibold text-lg flex items-center gap-2">
+         <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
+       </h3>
+       {/* Tombol Select All Kecil */}
+       {ownerTokens.length > 0 && (
+         <button 
+           onClick={selectAllOwnerTokens} 
+           className="text-[10px] text-blue-500 font-bold uppercase tracking-wider text-left mt-1"
+         >
+           {selectedOwnerTokens.size === ownerTokens.length ? "Deselect All" : "Select All Assets"}
+         </button>
+       )}
+    </div>
+    <button onClick={fetchOwnerData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
+      <Refresh className="w-4 h-4 text-zinc-500" />
+    </button>
+  </div>
+
+  <div className="space-y-2 min-h-[60px]">
+    {loadingOwnerTokens ? (
+      <div className="text-center py-6 animate-pulse text-zinc-400 text-sm">Scanning wallet...</div>
+    ) : ownerTokens.length === 0 ? (
+      <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">No tokens in wallet.</div>
+    ) : (
+      currentOwnerTokens.map((token, i) => {
+        const isSelected = selectedOwnerTokens.has(token.token_address);
+        return (
+          <div 
+            key={i} 
+            onClick={() => toggleOwnerToken(token.token_address)}
+            className={`flex items-center justify-between p-3 border rounded-xl transition-all cursor-pointer ${
+              isSelected ? "bg-blue-50/50 border-blue-200 dark:bg-blue-900/10 dark:border-blue-800" : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800"
+            }`}
+          >
+            <div className="flex items-center gap-3 overflow-hidden">
+              {/* Checkbox Indikator */}
+              <div className={`w-4 h-4 rounded border flex items-center justify-center ${isSelected ? "bg-blue-600 border-blue-600" : "border-zinc-300"}`}>
+                {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={4} />}
+              </div>
+              
+              <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
+                <TokenLogo token={token} />
+              </div>
+              <div>
+                <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
+                <div className="text-xs text-zinc-500">{parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}</div>
+              </div>
+            </div>
+            {vaultAddress && !isSelected && ( // Tambahkan !isSelected agar tombol kecil hilang saat dipilih
+  <button 
+    onClick={(e) => {
+      e.stopPropagation();
+      handleDeposit(token);
+    }} 
+    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-green-50 text-green-600 hover:bg-green-100"
+  >
+    Deposit
+  </button>
+)}
           </div>
-          <button onClick={fetchOwnerData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
-            <Refresh className="w-4 h-4 text-zinc-500" />
-          </button>
-        </div>
+        );
+      })
+    )}
+  </div>
 
-        <div className="space-y-2 min-h-[60px]">
-          {loadingOwnerTokens ? (
-            <div className="text-center py-6 animate-pulse text-zinc-400 text-sm">Scanning wallet...</div>
-          ) : ownerTokens.length === 0 ? (
-            <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">No tokens in wallet.</div>
-          ) : (
-            currentOwnerTokens.map((token, i) => {
-              const isSelected = selectedOwnerTokens.has(token.token_address);
-              return (
-                <div
-                  key={i}
-                  onClick={() => toggleOwnerToken(token.token_address)}
-                  className={`flex items-center justify-between p-3 border rounded-xl transition-all cursor-pointer ${
-                    isSelected
-                      ? "bg-blue-50/50 border-blue-200 dark:bg-blue-900/10 dark:border-blue-800"
-                      : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800"
-                  }`}
-                >
-                  <div className="flex items-center gap-3 overflow-hidden">
-                    <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${isSelected ? "bg-blue-600 border-blue-600" : "border-zinc-300"}`}>
-                      {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={4} />}
-                    </div>
-                    <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
-                      <TokenLogo token={token} />
-                    </div>
-                    <div>
-                      <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
-                      <div className="text-xs text-zinc-500">{parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}</div>
-                    </div>
-                  </div>
-                  {vaultAddress && !isSelected && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDeposit(token); }}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-green-50 text-green-600 hover:bg-green-100 dark:bg-green-900/20 dark:text-green-400"
-                    >
-                      Deposit
-                    </button>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Batch deposit button */}
-        {selectedOwnerTokens.size >= 1 && (
-          <div className="mt-4 animate-in fade-in slide-in-from-bottom-2">
-            <button
-              onClick={handleBatchDeposit}
-              className="w-full py-3 bg-green-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-green-500/20 flex items-center justify-center gap-2"
-            >
-              <Upload className="w-4 h-4" />
-              Deposit {selectedOwnerTokens.size === 1 ? "Selected Asset" : `Selected Assets (${selectedOwnerTokens.size})`}
-            </button>
-            {selectedOwnerTokens.size > 1 && (
-              <p className="text-[9px] text-zinc-500 text-center mt-2 italic">
-                ⚠ You will sign {selectedOwnerTokens.size} transactions one by one.
-              </p>
-            )}
-          </div>
-        )}
-
+  {/* Tombol Batch Deposit (Muncul jika ada minimal 1 yang dipilih) */}
+{selectedOwnerTokens.size >= 1 && (
+  <div className="mt-4 animate-in fade-in slide-in-from-bottom-2">
+    <button 
+      onClick={handleBatchDeposit}
+      className="w-full py-3 bg-green-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-green-500/20 flex items-center justify-center gap-2"
+    >
+      <Upload className="w-4 h-4" /> 
+      Deposit {selectedOwnerTokens.size === 1 ? "Selected Asset" : `Selected Assets (${selectedOwnerTokens.size})`}
+    </button>
+    
+    {/* Tampilkan note hanya jika lebih dari 1, agar tidak membingungkan jika cuma 1 asset */}
+    {selectedOwnerTokens.size > 1 && (
+      <p className="text-[9px] text-zinc-500 text-center mt-2 italic">
+        Note: You will need to sign {selectedOwnerTokens.size} transactions manually.
+      </p>
+    )}
+  </div>
+)}
         {totalOwnerPages > 1 && (
           <div className="flex justify-center items-center gap-1 mt-3">
             <button onClick={() => setCurrentOwnerPage((p) => Math.max(1, p - 1))} disabled={currentOwnerPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
