@@ -525,11 +525,11 @@ export const TanamView = () => {
                 {/* Morpho position */}
                 {hasPos && (
                   <div className="flex items-center justify-between text-xs bg-green-500/10 rounded-xl px-3 py-2 border border-green-500/20">
-                    <div className="flex items-center gap-1.5 text-green-400">
+                    <div className="flex items-center gap-1.5 text-white">
                       <Sprout className="w-3 h-3" strokeWidth={2.5} />
                       <span>Earning at Morpho</span>
                     </div>
-                    <span className="font-bold text-green-300">{posDisplay} {vault.asset}</span>
+                    <span className="font-bold text-white">{posDisplay} {vault.asset}</span>
                   </div>
                 )}
 
