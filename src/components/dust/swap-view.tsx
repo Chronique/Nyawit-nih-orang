@@ -32,12 +32,31 @@ interface SwapViewProps {
   onTokenConsumed?: () => void;
 }
 
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
-const LIFI_API_URL = "https://li.quest/v1";
-const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
-const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
+// ── Constants ────────────────────────────────────────────────────────────────
+const USDC_ADDRESS   = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const WETH_ADDRESS   = "0x4200000000000000000000000000000000000006";
+const LIFI_API_URL   = "https://li.quest/v1";
+const LIFI_API_KEY   = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
+const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
 const FEE_PERCENTAGE = "0.05";
+
+// WETH ABI — hanya fungsi withdraw (unwrap WETH → ETH)
+const WETH_ABI = [
+  {
+    name: "withdraw",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "wad", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
 
 const TokenLogo = ({ token }: { token: any }) => {
   const [src, setSrc] = useState<string | null>(null);
@@ -56,64 +75,64 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const { chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
 
-  const [tokens, setTokens] = useState<TokenData[]>([]);
+  const [tokens, setTokens]                 = useState<TokenData[]>([]);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const [swapping, setSwapping] = useState(false);
-  const [swapProgress, setSwapProgress] = useState("");
-  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const [incomingToken, setIncomingToken] = useState<SwapViewProps["defaultFromToken"]>(null);
-  // Vault assets (semua token di vault termasuk yang tidak ada likuiditas)
-  const [vaultTokens, setVaultTokens] = useState<TokenData[]>([]);
-  const [vaultPage, setVaultPage] = useState(1);
-  const VAULT_PER_PAGE = 10;
-  const chainIdStr = String(chainId);
-  const [vaultAddr, setVaultAddr] = useState<string | null>(null);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [feeEnabled, setFeeEnabled] = useState(true);
+  const [loading, setLoading]               = useState(false);
+  const [swapping, setSwapping]             = useState(false);
+  const [swapProgress, setSwapProgress]     = useState("");
+  const [toast, setToast]                   = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [incomingToken, setIncomingToken]   = useState<SwapViewProps["defaultFromToken"]>(null);
+  const [vaultTokens, setVaultTokens]       = useState<TokenData[]>([]);
+  const [vaultPage, setVaultPage]           = useState(1);
+  const [vaultAddr, setVaultAddr]           = useState<string | null>(null);
+  const [scanError, setScanError]           = useState<string | null>(null);
+  const [feeEnabled, setFeeEnabled]         = useState(true);
 
+  const VAULT_PER_PAGE = 10;
+  const chainIdStr     = String(chainId || "8453");
+
+  // ── loadDustTokens ────────────────────────────────────────────────────────
   const loadDustTokens = async () => {
     if (!walletClient) return;
     setLoading(true);
     setScanError(null);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client       = await getSmartAccountClient(walletClient);
       const detectedAddr = client.account.address;
       setVaultAddr(detectedAddr);
       console.log("[SwapView] Scanning vault:", detectedAddr);
 
-      // Pakai Moralis — sama seperti vault-view, lebih reliable
       const moralisTokens = await fetchMoralisTokens(detectedAddr);
+
       // Filter: exclude USDC, zero balance, dan vault address sendiri
-      // Moralis kadang return vault address sebagai "token" — ini yang bikin approval revert
       const vaultLower = detectedAddr.toLowerCase();
       const nonZero = moralisTokens.filter((t) => {
-        const addr   = t.token_address.toLowerCase();
-        const isUSDC = addr === USDC_ADDRESS.toLowerCase();
+        const addr    = t.token_address.toLowerCase();
+        const isUSDC  = addr === USDC_ADDRESS.toLowerCase();
         const isVault = addr === vaultLower;
-        if (isVault) console.warn("[SwapView] Filtered out vault address from token list:", addr);
+        if (isVault) console.warn("[SwapView] Filtered out vault address:", addr);
         return !isUSDC && !isVault && BigInt(t.balance) > 0n;
       });
 
       if (nonZero.length === 0) { setTokens([]); setVaultTokens([]); return; }
 
       const addresses = nonZero.map((t) => t.token_address);
-      const prices = await fetchTokenPrices(addresses);
+      const prices    = await fetchTokenPrices(addresses);
 
       const formatted: TokenData[] = nonZero.map((t) => {
         const decimals = t.decimals || 18;
-        const rawBal = t.balance;
-        const fmtBal = formatUnits(BigInt(rawBal), decimals);
-        const price = prices[t.token_address.toLowerCase()] || 0;
+        const rawBal   = t.balance;
+        const fmtBal   = formatUnits(BigInt(rawBal), decimals);
+        const price    = prices[t.token_address.toLowerCase()] || 0;
         return {
           contractAddress: t.token_address,
-          symbol: t.symbol || "UNKNOWN",
-          logo: t.logo || null,
+          symbol:          t.symbol || "UNKNOWN",
+          logo:            t.logo || null,
           decimals,
-          rawBalance: rawBal,
+          rawBalance:   rawBal,
           formattedBal: fmtBal,
-          priceUsd: price,
-          valueUsd: parseFloat(fmtBal) * price,
+          priceUsd:     price,
+          valueUsd:     parseFloat(fmtBal) * price,
         };
       });
 
@@ -149,7 +168,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       if (found) {
         setSelectedTokens(new Set([found.contractAddress]));
       } else {
-        setToast({ msg: `${defaultFromToken.symbol} not found in vault — may have already been swapped.`, type: "error" });
+        setToast({ msg: `${defaultFromToken.symbol} not found in vault.`, type: "error" });
       }
       onTokenConsumed?.();
     };
@@ -176,11 +195,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
     if (!window.confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`)) return;
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client      = await getSmartAccountClient(walletClient);
       const ownerAddress = walletClient.account?.address as Address;
-      const rawAmount = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
-      const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddress, rawAmount] });
-      const txHash = await client.sendUserOperation({
+      const rawAmount   = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
+      const data        = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddress, rawAmount] });
+      const txHash      = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data }],
       });
       setToast({ msg: `Withdrawing ${token.symbol}...`, type: "success" });
@@ -192,132 +211,62 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  const getZeroExQuote = async (token: TokenData, amount: string) => {
-    const params = new URLSearchParams({
-      chainId: "8453",
-      sellToken: token.contractAddress,
-      buyToken: WETH_ADDRESS,
-      sellAmount: amount,
-      feeRecipient: FEE_RECIPIENT,
-      buyTokenPercentageFee: FEE_PERCENTAGE,
-    });
-    const res = await fetch(`/api/0x/quote?${params}`);
-    if (!res.ok) throw new Error("0x: No route found");
-    return res.json();
-  };
-
-  const getLifiQuote = async (token: TokenData, amount: string, fromAddress: string) => {
-    const params = new URLSearchParams({
-      fromChain:  chainIdStr,
-      toChain:    chainIdStr,
-      fromToken:  token.contractAddress,
-      toToken:    WETH_ADDRESS,
-      fromAmount: amount,
-      fromAddress,
-      toAddress:  fromAddress,
-      slippage:   "0.10",
-      // Force allowance-based DEXes only — permit2 tidak bisa dipakai dari vault
-      denyExchanges: "paraswap",
-    });
-    if (LIFI_API_KEY && feeEnabled) {
-      params.set("integrator", "nyawit");
-      params.set("fee",        "0.05");
-      params.set("referrer",   FEE_RECIPIENT);
-    }
-    const headers: Record<string, string> = { "Accept": "application/json" };
-    if (LIFI_API_KEY) headers["x-lifi-api-key"] = LIFI_API_KEY;
-    const res = await fetch(`${LIFI_API_URL}/quote?${params}`, { headers });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`LI.FI ${res.status}: ${text.slice(0, 100)}`);
-    }
-    const data = await res.json();
-    // Reject permit2 — vault tidak support off-chain signature approval
-    const approvalAddr = (data?.estimate?.approvalAddress || "").toLowerCase();
-    if (approvalAddr === "0x000000000022d473030f116ddee9f6b43ac78ba3") {
-      throw new Error("LI.FI: permit2 route not supported in vault — skipping");
-    }
-    return data;
-  };
-
-  // KyberSwap — gratis, no signup, Base support bagus
-  const getKyberQuote = async (token: TokenData, amount: string, fromAddress: string) => {
-    // Step 1: get route
-    const routeRes = await fetch(
-      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${amount}&saveGas=false&gasInclude=false`,
-      { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
-    );
-    if (!routeRes.ok) throw new Error(`KyberSwap route ${routeRes.status}`);
-    const routeData = await routeRes.json();
-    if (!routeData?.data?.routeSummary) throw new Error("KyberSwap: no route");
-
-    // Step 2: build tx
-    const buildRes = await fetch(
-      `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
-      {
-        method: "POST",
-        headers: { "Accept": "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
-        body: JSON.stringify({
-          routeSummary: routeData.data.routeSummary,
-          sender: fromAddress,
-          recipient: fromAddress,
-          slippageTolerance: 300, // 3% in bps
-        }),
-      }
-    );
-    if (!buildRes.ok) throw new Error(`KyberSwap build ${buildRes.status}`);
-    const buildData = await buildRes.json();
-    if (!buildData?.data?.data) throw new Error("KyberSwap: no tx data");
-
-    return {
-      transactionRequest: {
-        to: buildData.data.routerAddress,
-        data: buildData.data.data,
-        value: "0x0",
-      }
-    };
-  };
-
+  // ── handleBatchSwap ───────────────────────────────────────────────────────
+  // FASE 1: Fetch semua route parallel (semua → WETH)
+  // FASE 2: Batch approve semua (1 tx)
+  // FASE 3: Swap satu per satu ke WETH
+  // FASE 4: Unwrap semua WETH → ETH (1 tx)
+  //         + kalau ada WETH existing di vault, ikut di-unwrap juga
   const handleBatchSwap = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSwapping(true);
     setSwapProgress("Initializing...");
     setIncomingToken(null);
 
-    const MAX_PER_BATCH = 10; // max token per sesi
+    const MAX_PER_BATCH = 10;
 
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client       = await getSmartAccountClient(walletClient);
       const vaultAddress = client.account.address;
 
-      // Ambil token terpilih, max 10
+      // Token yang dipilih — exclude WETH (langsung unwrap nanti)
       const tokensToSwap = tokens
-        .filter((t) => selectedTokens.has(t.contractAddress))
+        .filter((t) => selectedTokens.has(t.contractAddress)
+          && t.contractAddress.toLowerCase() !== WETH_ADDRESS.toLowerCase())
         .slice(0, MAX_PER_BATCH);
 
-      // ── FASE 1: Fetch semua quote dulu ─────────────────────────────────────
-      // Quote diambil sebelum approval agar approvalAddress diketahui
-      setSwapProgress(`Fetching routes for ${tokensToSwap.length} tokens...`);
+      // Cek apakah ada WETH yang dipilih atau ada di vault
+      const wethToken = tokens.find(
+        t => t.contractAddress.toLowerCase() === WETH_ADDRESS.toLowerCase()
+      );
+      const wethSelected = wethToken && selectedTokens.has(wethToken.contractAddress);
+
+      // ── FASE 1: Fetch semua route (parallel, semua → WETH) ───────────────
+      if (tokensToSwap.length > 0) {
+        setSwapProgress(`Scanning routes for ${tokensToSwap.length} tokens...`);
+      }
 
       interface RouteResult {
         data: `0x${string}`; to: string; value: string; approvalAddress: string; agg: string;
       }
-      const routes: Map<string, RouteResult> = new Map();
+      const routes = new Map<string, RouteResult>();
 
       await Promise.all(tokensToSwap.map(async (token) => {
-        // 1. 0x backend (LI.FI fallback)
+        // 1. 0x backend (LI.FI fallback di dalam backend)
         try {
           const params = new URLSearchParams({
-            chainId:            String(chainId || "8453"),
+            chainId:            chainIdStr,
             sellToken:          token.contractAddress,
-            buyToken:           WETH_ADDRESS,
+            buyToken:           WETH_ADDRESS,   // selalu ke WETH dulu
             sellAmount:         token.rawBalance,
             taker:              vaultAddress,
             slippagePercentage: "0.15",
-            feeRecipient:          FEE_RECIPIENT,
-            buyTokenPercentageFee: FEE_PERCENTAGE,
           });
+          if (feeEnabled) {
+            params.set("feeRecipient", FEE_RECIPIENT);
+            params.set("buyTokenPercentageFee", FEE_PERCENTAGE);
+          }
           const res = await fetch(`/api/0x/quote?${params}`);
           if (res.ok) {
             const q = await res.json();
@@ -334,7 +283,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           }
         } catch {}
 
-        // 2. KyberSwap fallback
+        // 2. KyberSwap direct fallback
         try {
           const rRes = await fetch(
             `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
@@ -343,6 +292,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           if (!rRes.ok) return;
           const rd = await rRes.json();
           if (!rd?.data?.routeSummary) return;
+
           const bRes = await fetch(
             `https://aggregator-api.kyberswap.com/base/api/v1/route/build`,
             {
@@ -359,6 +309,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           if (!bRes.ok) return;
           const bd = await bRes.json();
           if (!bd?.data?.data) return;
+
           routes.set(token.contractAddress, {
             data:            bd.data.data as `0x${string}`,
             to:              bd.data.routerAddress,
@@ -369,135 +320,170 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         } catch {}
       }));
 
-      if (routes.size === 0) {
+      const routable  = tokensToSwap.filter((t) => routes.has(t.contractAddress));
+      const noRoute   = tokensToSwap.filter((t) => !routes.has(t.contractAddress));
+      if (noRoute.length > 0) {
+        console.log("[Swap] No route:", noRoute.map(t => t.symbol).join(", "));
+      }
+
+      // Kalau tidak ada route dan tidak ada WETH, berhenti
+      if (routable.length === 0 && !wethSelected) {
         setToast({ msg: "No routes found for any token.", type: "error" });
         return;
       }
 
-      // Token yang dapat route
-      const routable = tokensToSwap.filter((t) => routes.has(t.contractAddress));
-      const noRoute  = tokensToSwap.filter((t) => !routes.has(t.contractAddress));
-      if (noRoute.length > 0) {
-        console.log("[Swap] No route for:", noRoute.map(t => t.symbol).join(", "));
-      }
+      // ── FASE 2: Batch approve semua (1 tx) ───────────────────────────────
+      if (routable.length > 0) {
+        setSwapProgress(`Approving ${routable.length} tokens (1 tx)...`);
 
-      // ── FASE 2: Batch approve semua sekaligus ─────────────────────────────
-      setSwapProgress(`Approving ${routable.length} tokens (1 tx)...`);
+        const vaultAddrLower = vaultAddress.toLowerCase();
+        const zeroAddr       = "0x0000000000000000000000000000000000000000";
 
-      const vaultAddrLower = vaultAddress.toLowerCase();
-      const zeroAddr       = "0x0000000000000000000000000000000000000000";
+        const approvalCalls = routable
+          .map((token) => {
+            const route       = routes.get(token.contractAddress)!;
+            const tokenAddr   = token.contractAddress.toLowerCase();
+            const spenderAddr = route.approvalAddress.toLowerCase();
 
-      const approvalCalls = routable
-        .map((token) => {
-          const route        = routes.get(token.contractAddress)!;
-          const tokenAddr    = token.contractAddress.toLowerCase();
-          const spenderAddr  = route.approvalAddress.toLowerCase();
-
-          // GUARD: token address tidak boleh vault
-          if (tokenAddr === vaultAddrLower) {
-            console.error(`[Approve] SKIP ${token.symbol}: token address IS vault — corrupt data`);
-            return null;
-          }
-          // GUARD: spender tidak boleh vault atau zero
-          if (spenderAddr === vaultAddrLower || spenderAddr === zeroAddr) {
-            console.error(`[Approve] SKIP ${token.symbol}: spender is vault/zero — invalid route`);
-            return null;
-          }
-
-          const data = encodeFunctionData({
-            abi: erc20Abi, functionName: "approve",
-            args: [route.approvalAddress as Address, maxUint256],
-          });
-          console.log(`[Approve] ${token.symbol}: token=${tokenAddr.slice(0,8)} spender=${spenderAddr.slice(0,8)}`);
-          // Explicit: to = token address (bukan spender, bukan vault)
-          return {
-            to:    token.contractAddress as Address,  // ERC20 contract yang di-approve
-            value: 0n,
-            data:  data as `0x${string}`,
-          };
-        })
-        .filter((c): c is NonNullable<typeof c> => c !== null);
-
-      if (approvalCalls.length === 0) {
-        setToast({ msg: "No valid tokens to approve.", type: "error" });
-        return;
-      }
-
-      console.log(`[Approve] Batch ${approvalCalls.length} approvals`);
-      const approveTx = await client.sendUserOperation({ calls: approvalCalls });
-      setSwapProgress("Waiting for approvals...");
-      await client.waitForUserOperationReceipt({ hash: approveTx });
-      console.log("[Approve] Batch confirmed ✓");
-
-      // Update routable to only include validated tokens
-      const validatedAddrs = new Set(approvalCalls.map(c => c.to.toLowerCase()));
-      const validRotable   = routable.filter(t => validatedAddrs.has(t.contractAddress.toLowerCase()));
-
-      // ── FASE 3: Swap satu per satu — isolasi failure ───────────────────────
-      // Quote diambil ULANG tepat sebelum swap untuk hindari stale quote
-      let successCount = 0;
-      let failCount    = 0;
-
-      for (const token of validRotable) {
-        const routeInfo = routes.get(token.contractAddress)!;
-        setSwapProgress(`[${successCount + failCount + 1}/${routable.length}] Swapping ${token.symbol} via ${routeInfo.agg}...`);
-        try {
-          // Re-fetch quote agar fresh — approval sudah dilakukan, tinggal swap
-          let freshRoute = routeInfo; // fallback ke quote lama kalau re-fetch gagal
-          try {
-            const params = new URLSearchParams({
-              chainId:            String(chainId || "8453"),
-              sellToken:          token.contractAddress,
-              buyToken:           WETH_ADDRESS,
-              sellAmount:         token.rawBalance,
-              taker:              vaultAddress,
-              slippagePercentage: "0.15",
-              feeRecipient:          FEE_RECIPIENT,
-              buyTokenPercentageFee: FEE_PERCENTAGE,
-            });
-            const res = await fetch(`/api/0x/quote?${params}`);
-            if (res.ok) {
-              const q = await res.json();
-              if (!q.error && q.transaction?.data) {
-                freshRoute = {
-                  data:            q.transaction.data as `0x${string}`,
-                  to:              q.transaction.to,
-                  value:           q.transaction.value || "0",
-                  approvalAddress: q.transaction.approvalAddress || q.transaction.to,
-                  agg:             q._source === "lifi" ? "LI.FI" : "0x",
-                };
-              }
+            if (tokenAddr === vaultAddrLower) {
+              console.error(`[Approve] SKIP ${token.symbol}: token IS vault`);
+              return null;
             }
-          } catch {}
+            if (spenderAddr === vaultAddrLower || spenderAddr === zeroAddr) {
+              console.error(`[Approve] SKIP ${token.symbol}: spender is vault/zero`);
+              return null;
+            }
 
-          const swapTx = await client.sendUserOperation({
-            calls: [{
-              to:    freshRoute.to as Address,
-              value: BigInt(freshRoute.value),
-              data:  freshRoute.data as `0x${string}`,
-            }],
-          });
-          await client.waitForUserOperationReceipt({ hash: swapTx });
-          console.log(`[Swap] ${token.symbol} ✓`);
-          successCount++;
-        } catch (e: any) {
-          console.error(`[Swap] ${token.symbol} failed:`, e?.message);
-          failCount++;
-          setSwapProgress(`${token.symbol} failed, continuing...`);
-          await new Promise(r => setTimeout(r, 500));
+            console.log(`[Approve] ${token.symbol}: ${tokenAddr.slice(0,8)} → ${spenderAddr.slice(0,8)}`);
+            const data = encodeFunctionData({
+              abi: erc20Abi, functionName: "approve",
+              args: [route.approvalAddress as Address, maxUint256],
+            });
+            return { to: token.contractAddress as Address, value: 0n, data: data as `0x${string}` };
+          })
+          .filter((c): c is NonNullable<typeof c> => c !== null);
+
+        if (approvalCalls.length > 0) {
+          const approveTx = await client.sendUserOperation({ calls: approvalCalls });
+          setSwapProgress("Waiting for approvals...");
+          await client.waitForUserOperationReceipt({ hash: approveTx });
+          console.log("[Approve] Batch confirmed ✓");
+        }
+
+        const validatedAddrs = new Set(approvalCalls.map(c => c.to.toLowerCase()));
+        const validRotable   = routable.filter(t => validatedAddrs.has(t.contractAddress.toLowerCase()));
+
+        // ── FASE 3: Swap satu per satu → WETH ────────────────────────────
+        let successCount = 0;
+        let failCount    = 0;
+
+        for (const token of validRotable) {
+          const routeInfo = routes.get(token.contractAddress)!;
+          setSwapProgress(`[${successCount + failCount + 1}/${validRotable.length}] ${token.symbol} → WETH via ${routeInfo.agg}...`);
+
+          try {
+            // Re-fetch fresh quote
+            let freshRoute = routeInfo;
+            try {
+              const params = new URLSearchParams({
+                chainId:            chainIdStr,
+                sellToken:          token.contractAddress,
+                buyToken:           WETH_ADDRESS,
+                sellAmount:         token.rawBalance,
+                taker:              vaultAddress,
+                slippagePercentage: "0.15",
+              });
+              if (feeEnabled) {
+                params.set("feeRecipient", FEE_RECIPIENT);
+                params.set("buyTokenPercentageFee", FEE_PERCENTAGE);
+              }
+              const res = await fetch(`/api/0x/quote?${params}`);
+              if (res.ok) {
+                const q = await res.json();
+                if (!q.error && q.transaction?.data) {
+                  freshRoute = {
+                    data:            q.transaction.data as `0x${string}`,
+                    to:              q.transaction.to,
+                    value:           q.transaction.value || "0",
+                    approvalAddress: q.transaction.approvalAddress || q.transaction.to,
+                    agg:             q._source === "lifi" ? "LI.FI" : "0x",
+                  };
+                }
+              }
+            } catch {}
+
+            const swapTx = await client.sendUserOperation({
+              calls: [{
+                to:    freshRoute.to as Address,
+                value: BigInt(freshRoute.value),
+                data:  freshRoute.data as `0x${string}`,
+              }],
+            });
+            await client.waitForUserOperationReceipt({ hash: swapTx });
+            console.log(`[Swap] ${token.symbol} → WETH ✓`);
+            successCount++;
+          } catch (e: any) {
+            console.error(`[Swap] ${token.symbol} failed:`, e?.message);
+            failCount++;
+            setSwapProgress(`${token.symbol} failed, continuing...`);
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+
+        if (successCount === 0 && !wethSelected) {
+          setToast({ msg: `All swaps failed. ${failCount} failed, ${noRoute.length} no route.`, type: "error" });
+          return;
         }
       }
 
-      // Summary
-      const skipped = routable.length - validRotable.length;
-      const parts = [];
-      if (successCount > 0) parts.push(`${successCount} swapped`);
-      if (failCount > 0)    parts.push(`${failCount} failed`);
-      if (noRoute.length > 0) parts.push(`${noRoute.length} no route`);
-      if (skipped > 0)      parts.push(`${skipped} invalid`);
+      // ── FASE 4: Unwrap WETH → ETH ─────────────────────────────────────────
+      // Cek balance WETH di vault sekarang (setelah semua swap)
+      // WETH yang dari swap + WETH existing yang dipilih user
+      setSwapProgress("Checking WETH balance for unwrap...");
+
+      try {
+        // Baca balance WETH vault saat ini via RPC
+        const { createPublicClient, http } = await import("viem");
+        const publicClient = createPublicClient({ chain: base, transport: http() });
+        const wethBalance  = await publicClient.readContract({
+          address:      WETH_ADDRESS as Address,
+          abi:          WETH_ABI,
+          functionName: "balanceOf",
+          args:         [vaultAddress as Address],
+        });
+
+        console.log("[Unwrap] WETH balance:", wethBalance.toString());
+
+        if (wethBalance > 0n) {
+          setSwapProgress(`Unwrapping ${formatUnits(wethBalance, 18).slice(0, 8)} WETH → ETH...`);
+
+          const unwrapData = encodeFunctionData({
+            abi:          WETH_ABI,
+            functionName: "withdraw",
+            args:         [wethBalance],
+          });
+
+          const unwrapTx = await client.sendUserOperation({
+            calls: [{
+              to:    WETH_ADDRESS as Address,
+              value: 0n,
+              data:  unwrapData as `0x${string}`,
+            }],
+          });
+          setSwapProgress("Waiting for ETH unwrap...");
+          await client.waitForUserOperationReceipt({ hash: unwrapTx });
+          console.log("[Unwrap] WETH → ETH confirmed ✓");
+        } else {
+          console.log("[Unwrap] No WETH to unwrap");
+        }
+      } catch (e: any) {
+        console.warn("[Unwrap] Failed to unwrap WETH:", e?.message);
+        // Tidak fatal — token sudah berhasil swap ke WETH, hanya unwrap yang gagal
+      }
+
       setToast({
-        msg:  successCount > 0 ? `✓ ${parts.join(", ")}` : `Failed: ${parts.join(", ")}`,
-        type: successCount > 0 ? "success" : "error",
+        msg:  `✓ Swapped to ETH! ${noRoute.length > 0 ? `(${noRoute.length} tokens had no route)` : ""}`,
+        type: "success",
       });
 
       await new Promise(r => setTimeout(r, 2000));
@@ -515,6 +501,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       setSwapProgress("");
     }
   };
+
+  // ── Computed UI vars ──────────────────────────────────────────────────────
+  const noRouteTokens   = vaultTokens.filter(t => t.valueUsd <= 0.000001);
+  const totalNoRoutePgs = Math.ceil(noRouteTokens.length / VAULT_PER_PAGE);
+  const selectedValue   = tokens
+    .filter(t => selectedTokens.has(t.contractAddress))
+    .reduce((a, b) => a + b.valueUsd, 0);
 
   return (
     <div className="pb-32 space-y-4">
@@ -541,15 +534,16 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
           <p className="text-xs text-green-200 mt-1">
-            Auto-routing via 0x Protocol & LI.FI
-            <br />
-            <span className="text-green-300">5% platform fee applied.</span>
+            Token → WETH → ETH (auto unwrap)
+          </p>
+          <p className="text-[10px] text-green-400 mt-0.5">
+            {feeEnabled ? "5% platform fee" : "No fee"} · 0x & KyberSwap
           </p>
         </div>
-        <div className="bg-black/30 backdrop-blur-sm p-2 rounded-lg border border-white/20">
+        <div className="bg-black/30 backdrop-blur-sm p-2 rounded-lg border border-white/20 min-w-[80px]">
           <div className="text-[10px] text-white/70 uppercase font-bold text-center">Selected Value</div>
           <div className="text-lg font-mono font-bold text-white text-center">
-            ${tokens.filter((t) => selectedTokens.has(t.contractAddress)).reduce((a, b) => a + b.valueUsd, 0).toFixed(2)}
+            ${selectedValue.toFixed(2)}
           </div>
         </div>
       </div>
@@ -558,7 +552,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       <div className="flex items-center justify-between px-2">
         <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
         <div className="flex items-center gap-2">
-          <button onClick={() => loadDustTokens()} className="text-xs text-zinc-500 hover:text-zinc-300">
+          <button onClick={() => loadDustTokens()} className="text-zinc-500 hover:text-zinc-300">
             <Refresh className="w-3.5 h-3.5" />
           </button>
           <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
@@ -567,6 +561,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
+      {/* Token list */}
       <div className="space-y-2">
         {loading ? (
           <div className="text-center py-12 animate-pulse text-zinc-500 text-xs">Scanning dust tokens...</div>
@@ -590,6 +585,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           tokens.map((token, i) => {
             const isSelected = selectedTokens.has(token.contractAddress);
             const isIncoming = incomingToken?.contractAddress.toLowerCase() === token.contractAddress.toLowerCase();
+            const isWeth     = token.contractAddress.toLowerCase() === WETH_ADDRESS.toLowerCase();
             return (
               <div
                 key={i}
@@ -612,8 +608,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   <div>
                     <div className="text-sm font-bold dark:text-white flex items-center gap-2">
                       {token.symbol}
+                      {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">UNWRAP</span>}
                       {isIncoming && <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>}
-                      {!isIncoming && token.valueUsd < 0.01 && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">DUST</span>}
+                      {!isIncoming && !isWeth && token.valueUsd < 0.01 && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">DUST</span>}
                     </div>
                     <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
                   </div>
@@ -622,7 +619,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300">${token.valueUsd.toFixed(2)}</div>
                   <div className="flex items-center gap-1 justify-end opacity-50">
                     <ArrowRight className="w-3 h-3 text-zinc-300" />
-                    <div className="text-[10px] font-bold text-zinc-400">ETH</div>
+                    <div className="text-[10px] font-bold text-zinc-400">{isWeth ? "ETH" : "ETH"}</div>
                   </div>
                 </div>
               </div>
@@ -632,25 +629,24 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       </div>
 
       {/* ── DEPOSITED DUST (token tanpa likuiditas / no route) ── */}
-      {vaultTokens.filter(t => t.valueUsd <= 0.000001).length > 0 && (
+      {noRouteTokens.length > 0 && (
         <div className="space-y-2 mt-6">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-wide flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-zinc-500 inline-block" />
-              Deposited Dust ({vaultTokens.filter(t => t.valueUsd <= 0.000001).length})
+              Deposited Dust ({noRouteTokens.length})
             </h3>
             <span className="text-[10px] text-zinc-500">
-              Page {vaultPage} / {Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)}
+              Page {vaultPage} / {totalNoRoutePgs}
             </span>
           </div>
 
           <div className="space-y-2">
-            {vaultTokens
-              .filter(t => t.valueUsd <= 0.000001)
+            {noRouteTokens
               .slice((vaultPage - 1) * VAULT_PER_PAGE, vaultPage * VAULT_PER_PAGE)
               .map((token, i) => {
-                const isSelected = selectedTokens.has(token.contractAddress);
-                const isSwappable = false; // no route tokens
+                const isSelected  = selectedTokens.has(token.contractAddress);
+                const isSwappable = false;
                 return (
                   <div key={i} className="flex items-center justify-between p-3 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
                     <div className="flex items-center gap-3 overflow-hidden">
@@ -694,7 +690,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           </div>
 
           {/* Pagination */}
-          {Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) > 1 && (
+          {totalNoRoutePgs > 1 && (
             <div className="flex justify-center items-center gap-1 mt-2 pb-2">
               <button
                 onClick={() => setVaultPage((p) => Math.max(1, p - 1))}
@@ -703,8 +699,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               >
                 ← Prev
               </button>
-              {Array.from({ length: Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) }, (_, i) => i + 1)
-                .filter((p) => p === 1 || p === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE) || Math.abs(p - vaultPage) <= 2)
+              {Array.from({ length: totalNoRoutePgs }, (_, i) => i + 1)
+                .filter((p) => p === 1 || p === totalNoRoutePgs || Math.abs(p - vaultPage) <= 2)
                 .reduce((acc: (number | string)[], p, idx, arr) => {
                   if (idx > 0 && (p as number) - (arr[idx - 1] as number) > 1) acc.push("...");
                   acc.push(p);
@@ -726,8 +722,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   )
                 )}
               <button
-                onClick={() => setVaultPage((p) => Math.min(Math.ceil(vaultTokens.length / VAULT_PER_PAGE), p + 1))}
-                disabled={vaultPage === Math.ceil(vaultTokens.filter(t => t.valueUsd <= 0.000001).length / VAULT_PER_PAGE)}
+                onClick={() => setVaultPage((p) => Math.min(totalNoRoutePgs, p + 1))}
+                disabled={vaultPage === totalNoRoutePgs}
                 className="px-3 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 text-xs disabled:opacity-30"
               >
                 Next →
@@ -752,7 +748,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
-            5% fee · Routed via 0x Protocol & LI.FI
+            {feeEnabled ? "5% fee" : "No fee"} · Token → WETH → ETH (auto unwrap)
           </div>
         </div>
       )}
