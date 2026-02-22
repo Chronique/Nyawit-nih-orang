@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { detectVaultAddress } from "~/lib/smart-account";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { base } from "viem/chains";
 import { Sprout, RefreshCw, ArrowRight, TrendingUp, Wallet, Zap } from "lucide-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
@@ -225,16 +225,15 @@ export const TanamView = () => {
   const handleSwapAndDeposit = async (vault: typeof MORPHO_VAULTS[number]) => {
     if (!walletClient || !vaultAddress || !chainId) return;
 
-    // Reserve a small amount of ETH for gas — don't swap everything
-    const GAS_RESERVE = parseEther("0.001");
-    const swapAmount  = ethBalance > GAS_RESERVE ? ethBalance - GAS_RESERVE : 0n;
+    // Owner pays gas via ERC-4337 — swap the full ETH balance
+    const swapAmount  = ethBalance;
     if (swapAmount === 0n) {
-      setToast({ msg: "Not enough ETH in vault (need > 0.001 ETH for gas).", type: "error" });
+      setToast({ msg: "No ETH in vault to swap.", type: "error" });
       return;
     }
 
     const ethDisplay = parseFloat(formatUnits(swapAmount, 18)).toFixed(6);
-    if (!window.confirm(`Swap ${ethDisplay} ETH → ${vault.asset} via LI.FI, then deposit to Morpho?\n\n0.001 ETH reserved for gas.`)) return;
+    if (!window.confirm(`Swap ${ethDisplay} ETH → ${vault.asset} via LI.FI, then deposit to Morpho?`)) return;
 
     setSwapping(vault.id);
     setSwapProgress("Getting quote...");
@@ -392,8 +391,8 @@ export const TanamView = () => {
   const getPosition = (id: string) => positions.find(p => p.vaultId === id);
   const isBusy      = (id: string) => depositing === id || withdrawing === id || swapping === id;
 
-  // Show ETH banner if vault has more than dust ETH
-  const hasEth     = ethBalance > parseEther("0.0001");
+  // Show ETH banner if vault has more than dust ETH (> 0.0001 ETH = 100000000000000 wei)
+  const hasEth     = ethBalance > 100000000000000n;
   const ethDisplay = parseFloat(formatUnits(ethBalance, 18)).toFixed(6);
 
   return (
@@ -447,11 +446,11 @@ export const TanamView = () => {
 
       {/* ── ETH balance banner ── */}
       {hasEth && (
-        <div className="flex items-center gap-3 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/30">
-          <Zap className="w-4 h-4 text-yellow-400 shrink-0" />
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-blue-500/10 border border-blue-500/30">
+          <Zap className="w-4 h-4 text-blue-400 shrink-0" />
           <div className="flex-1 min-w-0">
-            <div className="text-xs font-bold text-yellow-300">{ethDisplay} ETH in vault</div>
-            <div className="text-[10px] text-yellow-200/70">
+            <div className="text-xs font-bold text-blue-300">{ethDisplay} ETH in vault</div>
+            <div className="text-[10px] text-blue-200/70">
               Use "Swap & Deposit" below to convert to WETH or USDC and earn yield
             </div>
           </div>
@@ -532,7 +531,7 @@ export const TanamView = () => {
                       onClick={() => handleSwapAndDeposit(vault)}
                       disabled={busy}
                       className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors
-                        bg-yellow-500/20 border border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/30
+                        bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30
                         disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {swapping === vault.id ? (
