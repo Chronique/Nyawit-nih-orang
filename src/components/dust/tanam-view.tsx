@@ -273,19 +273,24 @@ export const TanamView = () => {
 
       const depositDisplay = parseFloat(formatUnits(depositAmt, vault.decimals)).toFixed(4);
 
-      // Step 4: Approve + deposit
-      setSwapProgress(`Depositing ${depositDisplay} ${vault.asset}...`);
+      // Phase 1: Approve — confirm first so bundler can simulate deposit
+      setSwapProgress(`Approving ${vault.asset} for Morpho...`);
       const approveData = encodeFunctionData({
         abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, depositAmt],
       });
+      const approveTx = await client.sendUserOperation({
+        calls: [{ to: vault.assetAddress, value: 0n, data: approveData }],
+      });
+      await client.waitForUserOperationReceipt({ hash: approveTx });
+      console.log(`[Tanam] Approve ${vault.asset} for Morpho confirmed ✓`);
+
+      // Phase 2: Deposit — allowance exists on-chain now
+      setSwapProgress(`Depositing ${depositDisplay} ${vault.asset}...`);
       const depositData = encodeFunctionData({
         abi: ERC4626_ABI, functionName: "deposit", args: [depositAmt, vaultAddress],
       });
       const depositTx = await client.sendUserOperation({
-        calls: [
-          { to: vault.assetAddress, value: 0n, data: approveData },
-          { to: vault.vaultAddress, value: 0n, data: depositData },
-        ],
+        calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }],
       });
       await client.waitForUserOperationReceipt({ hash: depositTx });
 
@@ -322,17 +327,22 @@ export const TanamView = () => {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
 
+      // Phase 1: Approve — must confirm before deposit so bundler can simulate allowance
       const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, amount] });
-      const depositData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "deposit", args: [amount, vaultAddress] });
-
-      const txHash = await client.sendUserOperation({
-        calls: [
-          { to: vault.assetAddress, value: 0n, data: approveData },
-          { to: vault.vaultAddress, value: 0n, data: depositData },
-        ],
+      setToast({ msg: `Approving ${vault.asset}...`, type: "success" });
+      const approveTx = await client.sendUserOperation({
+        calls: [{ to: vault.assetAddress, value: 0n, data: approveData }],
       });
+      await client.waitForUserOperationReceipt({ hash: approveTx });
+      console.log(`[Tanam] Approve ${vault.asset} confirmed ✓`);
+
+      // Phase 2: Deposit — allowance now exists on-chain, simulation succeeds
+      const depositData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "deposit", args: [amount, vaultAddress] });
       setToast({ msg: `Depositing ${display} ${vault.asset}...`, type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
+      const depositTx = await client.sendUserOperation({
+        calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }],
+      });
+      await client.waitForUserOperationReceipt({ hash: depositTx });
       setToast({ msg: `✓ ${display} ${vault.asset} deposited to Morpho!`, type: "success" });
 
       await new Promise(r => setTimeout(r, 3000));
