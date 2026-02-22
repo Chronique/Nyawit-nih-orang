@@ -17,7 +17,7 @@ import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, isSupportedChain, getChainLabel } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, maxUint256 } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { Refresh, Flash, ArrowRight, Check } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
@@ -340,14 +340,25 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     };
   };
 
-  // ── 2. Batch swap — SEMUA dalam 1 UserOp (atomic) ─────────────────────────
+  // ── handleBatchSwap — 2 FASE ──────────────────────────────────────────────
   //
-  // Per token: [approve → swap → fee_transfer]
-  // Semua token masuk batchCalls → 1 UserOp → atomic
-  // Kalau 1 token revert → SEMUA revert (termasuk fee)
-  // Fee dalam token asli (bukan ETH), 5% dari rawBalance
+  // MASALAH atomic (approve+swap 1 UserOp):
+  //   ERC-4337 bundler simulate setiap call secara independen — ketika
+  //   swap disimulasi, approval dari call sebelumnya belum "terbaca" di storage.
+  //   Hasilnya: bundler reject UserOp karena allowance = 0.
   //
-  // PENTING: approve ke approvalAddress (bukan ke router/to)
+  // SOLUSI 2-fase:
+  //   FASE 1 (1 UserOp): batch semua approve maxUint256 → confirm dulu
+  //   FASE 2 (1 UserOp): batch semua [swap → fee_transfer] → atomic
+  //
+  //   Fase 2 tetap atomic: kalau 1 swap revert → SEMUA revert termasuk fee.
+  //   Fee hanya sampai kalau SEMUA swap sukses.
+  //
+  // KENAPA swapAmount = 95%?
+  //   approve maxUint256 → router boleh tarik berapa pun
+  //   swap pakai 95% → vault masih punya 5%
+  //   fee_transfer 5% → vault kosong
+  //   Kalau swap 100% dulu baru fee_transfer → vault kosong → revert
   const handleBatchSwap = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     if (!isSupportedChain(chainId)) {
@@ -365,121 +376,121 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       const vaultLower   = vaultAddress.toLowerCase();
       const zeroAddr     = "0x0000000000000000000000000000000000000000";
 
-      const batchCalls: any[]  = [];
-      const tokensToSwap       = tokens.filter((t) => selectedTokens.has(t.contractAddress));
-      let successCount         = 0;
-      let skippedCount         = 0;
+      const tokensToSwap = tokens.filter((t) => selectedTokens.has(t.contractAddress));
 
+      // ── Pre-compute amounts ───────────────────────────────────────────────
+      // Hitung fee/swapAmount tiap token di awal biar konsisten
+      const tokenAmounts = new Map<string, { rawBig: bigint; feeAmount: bigint; swapAmount: string }>();
       for (const token of tokensToSwap) {
-        setSwapProgress(`Finding route for ${token.symbol}...`);
-        try {
-          // Guard: skip kalau token address = vault (data corrupt dari Moralis)
-          if (token.contractAddress.toLowerCase() === vaultLower) {
-            console.error(`[Swap] SKIP ${token.symbol}: token address IS vault`);
-            skippedCount++;
-            continue;
-          }
-
-          // Fee dideduct SEBELUM swap:
-          //   feeAmount  = 5% dari rawBalance
-          //   swapAmount = 95% (yang masuk ke aggregator)
-          // Urutan call yang benar:
-          //   approve(router, swapAmount)  → router boleh pakai 95%
-          //   swap(swapAmount)             → 95% keluar dari vault
-          //   transfer(fee, feeAmount)     → 5% masih ada di vault ✓
-          // Kalau dibalik (swap 100% lalu transfer 5%) → revert karena vault sudah kosong
-          const rawBig         = BigInt(token.rawBalance);
-          const feeAmount      = feeEnabled ? rawBig * FEE_BPS / FEE_DIVISOR : 0n;
-          const swapAmountBig  = rawBig - feeAmount;
-          const swapAmount     = swapAmountBig.toString();
-
-          // Coba aggregator satu per satu sampai ada yang berhasil (quote untuk 95%)
-          const aggregators = [
-            { name: "0x",        fn: () => getZeroExQuote(token, swapAmount, vaultAddress) },
-            { name: "LI.FI",     fn: () => getLifiQuote(token, swapAmount, vaultAddress)   },
-            { name: "KyberSwap", fn: () => getKyberQuote(token, swapAmount, vaultAddress)  },
-          ];
-
-          let route: { data: string; to: string; value: string; approvalAddress: string } | null = null;
-          let usedAgg = "";
-
-          for (const { name, fn } of aggregators) {
-            try {
-              route  = await fn();
-              usedAgg = name;
-              break;
-            } catch (e: any) {
-              console.warn(`[Swap] ${name} failed for ${token.symbol}:`, e?.message);
-            }
-          }
-
-          if (!route) {
-            skippedCount++;
-            setSwapProgress(`No route for ${token.symbol}, skipping...`);
-            await new Promise(r => setTimeout(r, 400));
-            continue;
-          }
-
-          // Guard: approvalAddress tidak boleh vault atau zero
-          const spender = route.approvalAddress.toLowerCase();
-          if (spender === vaultLower || spender === zeroAddr) {
-            console.error(`[Swap] SKIP ${token.symbol}: spender is vault/zero — invalid route`);
-            skippedCount++;
-            continue;
-          }
-
-          console.log(`[Swap] ${token.symbol} → ${usedAgg} | approvalAddress: ${spender.slice(0,10)} | swapAmt: ${swapAmount} | fee: ${feeAmount}`);
-
-          // Call 1: approve ke approvalAddress untuk swapAmount
-          // LI.FI punya intermediate contract yang berbeda dari router
-          const approveData = encodeFunctionData({
-            abi: erc20Abi, functionName: "approve",
-            args: [route.approvalAddress as Address, swapAmountBig],
-          });
-
-          batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: approveData });
-          batchCalls.push({ to: route.to as Address, value: BigInt(route.value), data: route.data });
-
-          // Call 3 (optional): fee transfer — hanya kalau feeEnabled
-          // 5% masih ada di vault karena swapAmount = 95%
-          // Atomic: kalau swap revert → fee juga revert
-          if (feeEnabled && feeAmount > 0n) {
-            const feeData = encodeFunctionData({
-              abi: erc20Abi, functionName: "transfer",
-              args: [FEE_RECIPIENT as Address, feeAmount],
-            });
-            batchCalls.push({ to: token.contractAddress as Address, value: 0n, data: feeData });
-          }
-
-          successCount++;
-        } catch (e: any) {
-          console.error(`[Swap] Unexpected error for ${token.symbol}:`, e);
-          skippedCount++;
-        }
+        const rawBig    = BigInt(token.rawBalance);
+        const feeAmount = feeEnabled ? rawBig * FEE_BPS / FEE_DIVISOR : 0n;
+        tokenAmounts.set(token.contractAddress, {
+          rawBig, feeAmount, swapAmount: (rawBig - feeAmount).toString(),
+        });
       }
 
-      if (batchCalls.length === 0) {
+      // ── FASE 1: Fetch semua quote (parallel) ──────────────────────────────
+      setSwapProgress(`Finding routes for ${tokensToSwap.length} tokens...`);
+
+      type RouteInfo = { data: string; to: string; value: string; approvalAddress: string; agg: string };
+      const routes = new Map<string, RouteInfo>();
+
+      await Promise.all(tokensToSwap.map(async (token) => {
+        if (token.contractAddress.toLowerCase() === vaultLower) return;
+
+        const { swapAmount } = tokenAmounts.get(token.contractAddress)!;
+        const aggregators = [
+          { name: "0x",        fn: () => getZeroExQuote(token, swapAmount, vaultAddress)  },
+          { name: "LI.FI",     fn: () => getLifiQuote(token, swapAmount, vaultAddress)    },
+          { name: "KyberSwap", fn: () => getKyberQuote(token, swapAmount, vaultAddress)   },
+        ];
+
+        for (const { name, fn } of aggregators) {
+          try {
+            const r = await fn();
+            const spender = r.approvalAddress.toLowerCase();
+            if (spender === vaultLower || spender === zeroAddr) continue;
+            routes.set(token.contractAddress, { ...r, agg: name });
+            console.log(`[Route] ${token.symbol} → ${name} | spender: ${spender.slice(0,10)}`);
+            break;
+          } catch (e: any) {
+            console.warn(`[Route] ${name} failed for ${token.symbol}:`, e?.message);
+          }
+        }
+      }));
+
+      if (routes.size === 0) {
         setToast({ msg: "No routes found for selected tokens.", type: "error" });
         return;
       }
 
-      const label = `${successCount} asset${successCount > 1 ? "s" : ""}`;
-      setSwapProgress(`Signing batch swap (${label})...`);
+      const routable  = tokensToSwap.filter(t => routes.has(t.contractAddress));
+      const noRoute   = tokensToSwap.filter(t => !routes.has(t.contractAddress));
+      if (noRoute.length > 0) {
+        console.log("[Swap] No route:", noRoute.map(t => t.symbol).join(", "));
+      }
 
-      // SEMUA calls dalam 1 UserOp = 1 signature dari user = atomic
-      const txHash = await client.sendUserOperation({ calls: batchCalls });
+      // ── FASE 2: Batch approve semua sekaligus (1 UserOp, confirm dulu) ────
+      // Pakai maxUint256 agar tidak perlu hitung exact amount per token
+      // Ini HARUS di-confirm sebelum swap — bundler tidak bisa simulate approve+swap sekaligus
+      setSwapProgress(`Approving ${routable.length} token${routable.length > 1 ? "s" : ""}...`);
 
-      setSwapProgress("Waiting for confirmation...");
-      await client.waitForUserOperationReceipt({ hash: txHash });
+      const approveCalls = routable.map(token => {
+        const route = routes.get(token.contractAddress)!;
+        const approveData = encodeFunctionData({
+          abi: erc20Abi, functionName: "approve",
+          args: [route.approvalAddress as Address, maxUint256],
+        });
+        return { to: token.contractAddress as Address, value: 0n, data: approveData };
+      });
 
-      const msg = skippedCount > 0
-        ? `✓ Swapped ${label} → ${buyTokenLabel}. ${skippedCount} skipped (no route).`
-        : `✓ Successfully swapped ${label} → ${buyTokenLabel}!`;
+      const approveTx = await client.sendUserOperation({ calls: approveCalls });
+      setSwapProgress("Waiting for approval confirmation...");
+      await client.waitForUserOperationReceipt({ hash: approveTx });
+      console.log("[Approve] Batch confirmed ✓");
+
+      // ── FASE 3: Batch swap + fee transfer (1 UserOp, atomic) ──────────────
+      // Semua [swap → fee] dalam 1 UserOp → kalau 1 revert → SEMUA revert
+      // Fee hanya sampai kalau SEMUA swap sukses (fully atomic)
+      setSwapProgress(`Swapping ${routable.length} token${routable.length > 1 ? "s" : ""}...`);
+
+      const swapCalls: any[] = [];
+      for (const token of routable) {
+        const route     = routes.get(token.contractAddress)!;
+        const { feeAmount } = tokenAmounts.get(token.contractAddress)!;
+
+        // Call A: swap
+        swapCalls.push({
+          to:    route.to as Address,
+          value: BigInt(route.value),
+          data:  route.data,
+        });
+
+        // Call B: fee transfer (hanya kalau feeEnabled, 5% masih ada di vault)
+        if (feeEnabled && feeAmount > 0n) {
+          const feeData = encodeFunctionData({
+            abi: erc20Abi, functionName: "transfer",
+            args: [FEE_RECIPIENT as Address, feeAmount],
+          });
+          swapCalls.push({ to: token.contractAddress as Address, value: 0n, data: feeData });
+        }
+      }
+
+      const swapTx = await client.sendUserOperation({ calls: swapCalls });
+      setSwapProgress("Waiting for swap confirmation...");
+      await client.waitForUserOperationReceipt({ hash: swapTx });
+
+      const swapped = routable.length;
+      const skipped = noRoute.length;
+      const msg = skipped > 0
+        ? `✓ Swapped ${swapped} token${swapped > 1 ? "s" : ""} → ${buyTokenLabel}. ${skipped} skipped (no route).`
+        : `✓ Swapped ${swapped} token${swapped > 1 ? "s" : ""} → ${buyTokenLabel}!`;
       setToast({ msg, type: "success" });
 
       await new Promise(r => setTimeout(r, 2000));
       await loadDustTokens();
       setSelectedTokens(new Set());
+
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
       if (msg.includes("User rejected") || msg.includes("user denied") || msg.includes("rejected")) {
@@ -554,21 +565,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         ))}
       </div>
 
-      {/* ── Fee toggle ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-1 py-2 rounded-xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700">
-        <div className="text-xs text-zinc-500">
-          <span className="font-semibold text-zinc-700 dark:text-zinc-300">Platform Fee</span>
-          <span className="ml-2 text-[10px]">
-            {feeEnabled ? "5% · enables Smart Vault routing" : "Disabled · standard swap"}
-          </span>
-        </div>
-        <button
-          onClick={() => setFeeEnabled(f => !f)}
-          className={`relative w-10 h-5 rounded-full transition-colors ${feeEnabled ? "bg-blue-500" : "bg-zinc-300 dark:bg-zinc-600"}`}
-        >
-          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${feeEnabled ? "translate-x-5" : "translate-x-0.5"}`} />
-        </button>
-      </div>
+      
 
       {/* ── Swappable tokens list ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-2">
