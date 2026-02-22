@@ -1,6 +1,9 @@
 import React from "react";
 
-export type TabType = "deposit" | "vault" | "swap";
+// ~/types/index.ts
+// Tambah "tanam" ke TabType
+
+export type TabType = "deposit" | "swap" | "vault" | "tanam";
 export type ActionPageType = "list" | "signin" | "quickauth" | "openurl" | "dustsweeper" | "openminiapp" | "farcaster" | "viewprofile" | "viewtoken" | "swaptoken" | "sendtoken" | "viewcast" | "composecast" | "addminiapp" | "closeminiapp" | "runtime" | "requestcameramicrophone" | "haptics" | "spendpermission";
 export type WalletPageType = "list" | "basepay" | "wallet";
 
