@@ -461,51 +461,32 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         return;
       }
 
-      // ── FASE 2: Approve satu per satu (1 UserOp per token) ───────────────
-      // Sequential — non-standard tokens sudah difilter di atas.
-      // Masih pakai try/catch fallback: beberapa ERC20 valid tapi revert di maxUint256 (USDT-style).
-      const approvedTokens = new Set<string>();
+      // ── FASE 2: Batch approve semua standard ERC20 (1 UserOp = 1 popup) ──
+      // Non-standard sudah difilter di atas via allowance() check.
+      // Semua approve dikumpul jadi 1 UserOp → user cukup 1x sign.
+      setSwapProgress(`Approving ${standardErc20.length} token${standardErc20.length > 1 ? "s" : ""} (1 tx)...`);
 
-      for (let i = 0; i < standardErc20.length; i++) {
-        const token = standardErc20[i]!;
+      const approveCalls = standardErc20.map(token => {
         const route = routes.get(token.contractAddress)!;
-        setSwapProgress(`Approving ${token.symbol} (${i + 1}/${routable.length})...`);
+        const approveData = encodeFunctionData({
+          abi: erc20Abi, functionName: "approve",
+          args: [route.approvalAddress as Address, maxUint256],
+        });
+        return { to: token.contractAddress as Address, value: 0n, data: approveData };
+      });
 
-        // Try maxUint256 first, fallback to exact amount if it reverts
-        const exactAmount = BigInt(tokenAmounts.get(token.contractAddress)?.swapAmount ?? maxUint256);
-        for (const approveAmount of [maxUint256, exactAmount] as bigint[]) {
-          try {
-            const approveData = encodeFunctionData({
-              abi: erc20Abi, functionName: "approve",
-              args: [route.approvalAddress as Address, approveAmount],
-            });
-            const approveTx = await client.sendUserOperation({
-              calls: [{ to: token.contractAddress as Address, value: 0n, data: approveData }],
-            });
-            await client.waitForUserOperationReceipt({ hash: approveTx });
-            console.log(`[Approve] ${token.symbol} ✓ (amount: ${approveAmount === maxUint256 ? "maxUint256" : approveAmount.toString()})`);
-            approvedTokens.add(token.contractAddress);
-            break; // success — no need to try fallback
-          } catch (e: any) {
-            if (approveAmount === maxUint256) {
-              console.warn(`[Approve] ${token.symbol} maxUint256 failed, trying exact amount...`);
-              continue; // retry with exact amount
-            }
-            console.error(`[Approve] ${token.symbol} failed completely, skipping:`, e?.message);
-          }
-        }
-      }
-
-      console.log(`[Approve] Done: ${approvedTokens.size}/${routable.length} approved`);
+      const approveTx = await client.sendUserOperation({ calls: approveCalls });
+      setSwapProgress("Waiting for approvals...");
+      await client.waitForUserOperationReceipt({ hash: approveTx });
+      console.log(`[Approve] Batch confirmed ✓ (${standardErc20.length} tokens)`);
 
       // ── FASE 3: Batch swap + fee transfer (1 UserOp, atomic) ──────────────
-      // Semua [swap → fee] dalam 1 UserOp → kalau 1 revert → SEMUA revert
-      // Hanya token yang berhasil di-approve yang masuk ke swap batch
-      const approvedRoutable = standardErc20.filter(t => approvedTokens.has(t.contractAddress));
-      setSwapProgress(`Swapping ${approvedRoutable.length} token${approvedRoutable.length > 1 ? "s" : ""}...`);
+      // Semua token standard ERC20 sudah di-approve di atas.
+      // 1 UserOp berisi semua [swap → fee_transfer] → atomic: semua sukses atau semua revert.
+      setSwapProgress(`Swapping ${standardErc20.length} token${standardErc20.length > 1 ? "s" : ""}...`);
 
       const swapCalls: any[] = [];
-      for (const token of approvedRoutable) {
+      for (const token of standardErc20) {
         const route     = routes.get(token.contractAddress)!;
         const { feeAmount } = tokenAmounts.get(token.contractAddress)!;
 
@@ -535,7 +516,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       setSwapProgress("Waiting for swap confirmation...");
       await client.waitForUserOperationReceipt({ hash: swapTx });
 
-      const swapped    = approvedRoutable.length;
+      const swapped    = standardErc20.length;
       const skipped    = noRoute.length + nonStandard.length;
       const skipDetail = [
         noRoute.length    > 0 ? `${noRoute.length} no route`       : "",
@@ -632,12 +613,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             {feeEnabled ? "5% · enables Smart Vault routing" : "Disabled · standard swap"}
           </span>
         </div>
-        <button
-          onClick={() => setFeeEnabled(f => !f)}
-          className={`relative w-10 h-5 rounded-full transition-colors ${feeEnabled ? "bg-blue-500" : "bg-zinc-300 dark:bg-zinc-600"}`}
-        >
-          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${feeEnabled ? "translate-x-5" : "translate-x-0.5"}`} />
-        </button>
+        
       </div>
 
       {/* ── Swappable tokens list ──────────────────────────────────────────── */}
