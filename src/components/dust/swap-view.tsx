@@ -34,7 +34,6 @@ interface SwapViewProps {
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
-const NATIVE_ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"; // Alamat Native Token (ETH) untuk Kyber
 const LIFI_API_URL = "https://li.quest/v1";
 const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 const FEE_RECIPIENT = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
@@ -72,9 +71,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
   const [vaultAddr, setVaultAddr] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [feeEnabled, setFeeEnabled] = useState(true);
-
-  // State untuk Toggle Token Tujuan
-  const [targetToken, setTargetToken] = useState<"ETH" | "USDC">("ETH");
 
   const loadDustTokens = async () => {
     if (!walletClient) return;
@@ -200,7 +196,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     const params = new URLSearchParams({
       chainId: "8453",
       sellToken: token.contractAddress,
-      buyToken: targetToken === "ETH" ? "ETH" : USDC_ADDRESS,
+      buyToken: WETH_ADDRESS,
       sellAmount: amount,
       feeRecipient: FEE_RECIPIENT,
       buyTokenPercentageFee: FEE_PERCENTAGE,
@@ -215,7 +211,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       fromChain:  chainIdStr,
       toChain:    chainIdStr,
       fromToken:  token.contractAddress,
-      toToken:    targetToken === "ETH" ? WETH_ADDRESS : USDC_ADDRESS,
+      toToken:    WETH_ADDRESS,
       fromAmount: amount,
       fromAddress,
       toAddress:  fromAddress,
@@ -246,10 +242,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   // KyberSwap — gratis, no signup, Base support bagus
   const getKyberQuote = async (token: TokenData, amount: string, fromAddress: string) => {
-    const targetKyber = targetToken === "ETH" ? NATIVE_ETH_ADDRESS : USDC_ADDRESS;
     // Step 1: get route
     const routeRes = await fetch(
-      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${targetKyber}&amountIn=${amount}&saveGas=false&gasInclude=false`,
+      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${amount}&saveGas=false&gasInclude=false`,
       { headers: { "Accept": "application/json", "x-client-id": "nyawit" } }
     );
     if (!routeRes.ok) throw new Error(`KyberSwap route ${routeRes.status}`);
@@ -290,8 +285,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     setIncomingToken(null);
 
     const MAX_PER_BATCH = 10; // max token per sesi
-    const buyToken0x = targetToken === "ETH" ? "ETH" : USDC_ADDRESS;
-    const buyTokenKyber = targetToken === "ETH" ? NATIVE_ETH_ADDRESS : USDC_ADDRESS;
 
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
@@ -318,7 +311,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           const params = new URLSearchParams({
             chainId:            String(chainId || "8453"),
             sellToken:          token.contractAddress,
-            buyToken:           buyToken0x,
+            buyToken:           WETH_ADDRESS,
             sellAmount:         token.rawBalance,
             taker:              vaultAddress,
             slippagePercentage: "0.15",
@@ -344,7 +337,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         // 2. KyberSwap fallback
         try {
           const rRes = await fetch(
-            `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${buyTokenKyber}&amountIn=${token.rawBalance}`,
+            `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token.contractAddress}&tokenOut=${WETH_ADDRESS}&amountIn=${token.rawBalance}`,
             { headers: { Accept: "application/json", "x-client-id": "nyawit" } }
           );
           if (!rRes.ok) return;
@@ -455,7 +448,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             const params = new URLSearchParams({
               chainId:            String(chainId || "8453"),
               sellToken:          token.contractAddress,
-              buyToken:           buyToken0x,
+              buyToken:           WETH_ADDRESS,
               sellAmount:         token.rawBalance,
               taker:              vaultAddress,
               slippagePercentage: "0.15",
@@ -561,32 +554,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
-      {/* ── TOMBOL TOGGLE ETH / USDC ── */}
-      <div className="flex bg-zinc-100 dark:bg-zinc-800/50 p-1 rounded-xl mt-4 mb-2">
-        <button
-          onClick={() => setTargetToken("ETH")}
-          className={`flex-1 py-2.5 text-sm font-bold rounded-lg flex items-center justify-center gap-2 transition-all ${
-            targetToken === "ETH"
-              ? "bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white"
-              : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
-          }`}
-        >
-          ♦ ETH
-        </button>
-        <button
-          onClick={() => setTargetToken("USDC")}
-          className={`flex-1 py-2.5 text-sm font-bold rounded-lg flex items-center justify-center gap-2 transition-all ${
-            targetToken === "USDC"
-              ? "bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-white"
-              : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
-          }`}
-        >
-          💵 USDC
-        </button>
-      </div>
-
       {/* Token list header */}
-      <div className="flex items-center justify-between px-2 mt-4">
+      <div className="flex items-center justify-between px-2">
         <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
         <div className="flex items-center gap-2">
           <button onClick={() => loadDustTokens()} className="text-xs text-zinc-500 hover:text-zinc-300">
@@ -653,7 +622,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300">${token.valueUsd.toFixed(2)}</div>
                   <div className="flex items-center gap-1 justify-end opacity-50">
                     <ArrowRight className="w-3 h-3 text-zinc-300" />
-                    <div className="text-[10px] font-bold text-zinc-400">{targetToken}</div>
+                    <div className="text-[10px] font-bold text-zinc-400">ETH</div>
                   </div>
                 </div>
               </div>
@@ -779,7 +748,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             {swapping ? (
               <><Refresh className="w-5 h-5 animate-spin" /><span className="text-sm">{swapProgress}</span></>
             ) : (
-              <><Flash className="w-5 h-5" />Sweep {Math.min(selectedTokens.size, 10)} Token{selectedTokens.size > 1 ? "s" : ""} → {targetToken}</>
+              <><Flash className="w-5 h-5" />Sweep {Math.min(selectedTokens.size, 10)} Token{selectedTokens.size > 1 ? "s" : ""} → ETH</>
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2 bg-white/80 dark:bg-black/50 backdrop-blur-md py-1 rounded-full w-fit mx-auto px-3 shadow-sm border border-zinc-200 dark:border-zinc-800">
