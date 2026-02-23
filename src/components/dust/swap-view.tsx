@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
+import { getSmartAccountClient } from "~/lib/smart-account";
+// ✅ publicClient & WETH_ABI dihapus — unwrap dipindah ke tab Panen
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
@@ -15,10 +16,8 @@ import { SimpleToast } from "~/components/ui/simple-toast";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
 
-const WETH_ABI = [
-  { name: "withdraw",  type: "function", stateMutability: "nonpayable", inputs: [{ name: "wad", type: "uint256" }], outputs: [] },
-  { name: "balanceOf", type: "function", stateMutability: "view",       inputs: [{ name: "account", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
-] as const;
+// ✅ Max 5 token per batch — sesuai limit di batch-swap.ts
+const MAX_BATCH_TOKENS = 5;
 
 interface TokenData {
   contractAddress: string;
@@ -143,15 +142,28 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const toggleToken = (addr: string) => {
     const s = new Set(selectedTokens);
-    if (s.has(addr)) s.delete(addr); else s.add(addr);
+    if (s.has(addr)) {
+      s.delete(addr);
+    } else {
+      // ✅ Tolak jika sudah 5 token terpilih
+      if (s.size >= MAX_BATCH_TOKENS) {
+        setToast({ msg: `Maksimal ${MAX_BATCH_TOKENS} token per batch.`, type: "error" });
+        return;
+      }
+      s.add(addr);
+    }
     setSelectedTokens(s);
     setSimulation(null);
     if (incomingToken) setIncomingToken(null);
   };
 
   const selectAll = () => {
-    if (selectedTokens.size === tokens.length) setSelectedTokens(new Set());
-    else setSelectedTokens(new Set(tokens.map(t => t.contractAddress)));
+    if (selectedTokens.size === tokens.length) {
+      setSelectedTokens(new Set());
+    } else {
+      // ✅ Select All max 5 token
+      setSelectedTokens(new Set(tokens.slice(0, MAX_BATCH_TOKENS).map(t => t.contractAddress)));
+    }
     setSimulation(null);
     setIncomingToken(null);
   };
@@ -176,7 +188,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── SIMULATE: pakai batch-swap.ts lib ─────────────────────────────────────
+  // ── SIMULATE ──────────────────────────────────────────────────────────────
   const handleSimulate = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSimulating(true);
@@ -185,14 +197,21 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
       const tokensToSwap = tokens
-        .filter(t => selectedTokens.has(t.contractAddress)
-          && t.contractAddress.toLowerCase() !== WETH_ADDRESS.toLowerCase())
-        .slice(0, 10)
+        .filter(t =>
+          selectedTokens.has(t.contractAddress) &&
+          t.contractAddress.toLowerCase() !== WETH_ADDRESS.toLowerCase()
+        )
+        .slice(0, MAX_BATCH_TOKENS) // ✅ Max 5
         .map(t => ({
           address: t.contractAddress as Address,
           symbol:  t.symbol,
           balance: BigInt(t.rawBalance),
         }));
+
+      if (tokensToSwap.length === 0) {
+        setToast({ msg: "Tidak ada token yang bisa di-swap (WETH dikecualikan).", type: "error" });
+        return;
+      }
 
       const result = await simulateBatchSwap({
         walletClient,
@@ -207,7 +226,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── EXECUTE: 1 UserOp berisi semua approve+swap ───────────────────────────
+  // ── EXECUTE: swap token → WETH (unwrap ke ETH di tab Panen) ──────────────
   const handleExecute = async () => {
     if (!walletClient || !simulation || simulation.processable.length === 0) return;
     setExecuting(true);
@@ -216,15 +235,16 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      setExecProgress(`Fetching fresh routes & executing ${simulation.processable.length} swaps...`);
+      setExecProgress(`Executing ${simulation.processable.length} swap${simulation.processable.length > 1 ? "s" : ""}...`);
 
-      // executeBatchSwap fetch FRESH routes saat ini — bukan dari simulation (bisa expired)
       const tokensToExecute = simulation.processable.map(c => ({
         address: c.token,
         symbol:  c.symbol,
         balance: c.balance,
       }));
 
+      // ✅ Swap selesai → WETH ada di vault
+      // Unwrap WETH → ETH dilakukan di tab Panen (fitur terpisah)
       const execResult = await executeBatchSwap({
         walletClient,
         chainId: chainId ?? 8453,
@@ -232,34 +252,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       });
       console.log("[Swap] Batch tx confirmed ✓", execResult.txHash);
 
-      // Unwrap WETH → ETH setelah semua swap selesai
-      setExecProgress("Unwrapping WETH → ETH...");
-      try {
-        const client       = await getSmartAccountClient(walletClient);
-        const vaultAddress = client.account.address;
-        const wethBal      = await publicClient.readContract({
-          address: WETH_ADDRESS as Address,
-          abi:     WETH_ABI,
-          functionName: "balanceOf",
-          args:    [vaultAddress as Address],
-        });
-        if (wethBal > 0n) {
-          setExecProgress(`Unwrapping ${formatUnits(wethBal, 18).slice(0, 8)} WETH → ETH...`);
-          const unwrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBal] });
-          const unwrapTx = await client.sendUserOperation({
-            calls: [{ to: WETH_ADDRESS as Address, value: 0n, data: unwrapData }],
-          });
-          await client.waitForUserOperationReceipt({ hash: unwrapTx });
-          console.log("[Unwrap] WETH → ETH ✓");
-        }
-      } catch (ue: any) {
-        console.warn("[Unwrap] Failed:", ue?.message);
-        // Tidak fatal — swap sudah berhasil
-      }
-
       const skippedCount = simulation.skipped.length;
       setToast({
-        msg:  `✓ ${simulation.processable.length} tokens swapped → ETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}`,
+        msg:  `✓ ${simulation.processable.length} token diswap → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Buka tab Panen untuk unwrap ke ETH.`,
         type: "success",
       });
 
@@ -307,8 +302,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
-          <p className="text-xs text-green-200 mt-1">Token → WETH → ETH (auto unwrap)</p>
-          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · 0x & KyberSwap · 1 tx</p>
+          {/* ✅ Update: token → WETH saja, unwrap di Panen */}
+          <p className="text-xs text-green-200 mt-1">Token → WETH (unwrap ke ETH di Panen)</p>
+          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · LI.FI · max {MAX_BATCH_TOKENS} token · 1 tx</p>
         </div>
         <div className="bg-black/30 p-2 rounded-lg border border-white/20 min-w-[80px]">
           <div className="text-[10px] text-white/70 uppercase font-bold text-center">Selected</div>
@@ -316,18 +312,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
-      {/* ── SIMULATION SUMMARY CARD — di atas token list ── */}
+      {/* ── SIMULATION SUMMARY CARD ── */}
       {simulation && (
         <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3 animate-in slide-in-from-top-2 duration-200">
           <div className="flex items-center justify-between">
             <div className="text-xs font-bold text-zinc-400 uppercase tracking-wide">Swap Preview</div>
-            <button
-              onClick={() => setSimulation(null)}
-              className="text-zinc-600 hover:text-zinc-400 text-xs"
-            >✕ Reset</button>
+            <button onClick={() => setSimulation(null)} className="text-zinc-600 hover:text-zinc-400 text-xs">✕ Reset</button>
           </div>
 
-          {/* Stats grid */}
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-zinc-800 rounded-xl p-3">
               <div className="text-[10px] text-zinc-500 mb-0.5">Will Process</div>
@@ -340,9 +332,10 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               </div>
             </div>
             <div className="bg-green-900/30 border border-green-700/40 rounded-xl p-3">
-              <div className="text-[10px] text-green-500 mb-0.5">Est. ETH Out</div>
+              {/* ✅ Label "Est. WETH Out" — bukan ETH */}
+              <div className="text-[10px] text-green-500 mb-0.5">Est. WETH Out</div>
               <div className="text-base font-bold text-green-300 font-mono">
-                {parseFloat(formatEther(simulation.totalNetWeth)).toFixed(6)} ETH
+                {parseFloat(formatEther(simulation.totalNetWeth)).toFixed(6)} WETH
               </div>
             </div>
             <div className="bg-zinc-800 rounded-xl p-3">
@@ -353,13 +346,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           </div>
 
-          {/* Gas estimate */}
           <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
             <span>Est. gas (executeBatch)</span>
             <span className="font-mono">{simulation.gasEstimate.callGasLimit.toLocaleString()}</span>
           </div>
 
-          {/* Per-token breakdown */}
           {simulation.processable.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-zinc-500 uppercase font-bold px-1">Breakdown</div>
@@ -369,7 +360,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   <div className="flex items-center gap-2">
                     <span className="text-zinc-500 text-[9px]">{item.route?.agg ?? "unwrap"}</span>
                     <span className="text-green-400 font-mono">
-                      {item.netWethOut > 0n ? `~${parseFloat(formatEther(item.netWethOut)).toFixed(5)} ETH` : "unwrap"}
+                      {item.netWethOut > 0n ? `~${parseFloat(formatEther(item.netWethOut)).toFixed(5)} WETH` : "unwrap"}
                     </span>
                   </div>
                 </div>
@@ -377,7 +368,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
-          {/* Skipped list */}
           {simulation.skipped.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-red-500 uppercase font-bold px-1 flex items-center gap-1">
@@ -392,7 +382,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
-          {/* Confirm button */}
           {simulation.processable.length > 0 && (
             <button
               onClick={handleExecute}
@@ -402,20 +391,32 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               {executing ? (
                 <><Refresh className="w-4 h-4 animate-spin" /><span className="text-sm">{execProgress}</span></>
               ) : (
-                <><Flash className="w-4 h-4" />Confirm & Swap {simulation.processable.length} Token{simulation.processable.length > 1 ? "s" : ""} — 1 tx</>
+                <><Flash className="w-4 h-4" />Swap {simulation.processable.length} Token → WETH · 1 tx</>
               )}
             </button>
           )}
+
+          {/* ✅ Info: unwrap di Panen */}
+          <p className="text-[10px] text-zinc-500 text-center">
+            WETH yang diterima bisa di-unwrap ke ETH di tab Panen
+          </p>
         </div>
       )}
 
       {/* Token list header */}
       <div className="flex items-center justify-between px-2">
-        <div className="text-sm font-bold text-zinc-500">Available Dust ({tokens.length})</div>
+        <div className="text-sm font-bold text-zinc-500">
+          Available Dust ({tokens.length})
+          {selectedTokens.size > 0 && (
+            <span className="ml-2 text-blue-400">{selectedTokens.size}/{MAX_BATCH_TOKENS} dipilih</span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button onClick={loadDustTokens} className="text-zinc-500 hover:text-zinc-300"><Refresh className="w-3.5 h-3.5" /></button>
           <button onClick={selectAll} className="text-xs font-medium text-blue-500 hover:text-blue-400">
-            {selectedTokens.size === tokens.length && tokens.length > 0 ? "Deselect All" : "Select All"}
+            {selectedTokens.size === Math.min(tokens.length, MAX_BATCH_TOKENS) && tokens.length > 0
+              ? "Deselect All"
+              : `Select Top ${MAX_BATCH_TOKENS}`}
           </button>
         </div>
       </div>
@@ -437,18 +438,25 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             const simItem    = simulation?.candidates.find(c => c.token.toLowerCase() === token.contractAddress.toLowerCase());
             const simSkip    = simItem?.status === "skip";
             const simOk      = simItem?.status === "ok";
+            // ✅ Disable jika sudah 5 dan token ini belum dipilih
+            const isDisabled = !isSelected && selectedTokens.size >= MAX_BATCH_TOKENS;
+
             return (
               <div
                 key={i}
-                onClick={() => toggleToken(token.contractAddress)}
-                className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
-                  isSelected
-                    ? simSkip
-                      ? "bg-red-900/10 border-red-500/30"
-                      : isIncoming
-                        ? "bg-orange-900/20 border-orange-500/50"
-                        : "bg-blue-900/20 border-blue-500/50"
-                    : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"
+                onClick={() => !isDisabled && toggleToken(token.contractAddress)}
+                className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                  isDisabled
+                    ? "opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-800"
+                    : "cursor-pointer " + (
+                        isSelected
+                          ? simSkip
+                            ? "bg-red-900/10 border-red-500/30"
+                            : isIncoming
+                              ? "bg-orange-900/20 border-orange-500/50"
+                              : "bg-blue-900/20 border-blue-500/50"
+                          : "bg-white dark:bg-zinc-900 border-zinc-100 dark:border-zinc-800 hover:border-zinc-700"
+                      )
                 }`}
               >
                 <div className="flex items-center gap-3">
@@ -463,7 +471,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   <div>
                     <div className="text-sm font-bold dark:text-white flex items-center gap-1.5">
                       {token.symbol}
-                      {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">UNWRAP</span>}
+                      {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">WETH</span>}
                       {isIncoming && <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>}
                       {simSkip && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">NO ROUTE</span>}
                     </div>
@@ -473,11 +481,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                 <div className="text-right">
                   <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300">${token.valueUsd.toFixed(2)}</div>
                   {simOk && simItem?.netWethOut && simItem.netWethOut > 0n ? (
-                    <div className="text-[10px] text-green-400 font-mono">~{parseFloat(formatEther(simItem.netWethOut)).toFixed(5)} ETH</div>
+                    <div className="text-[10px] text-green-400 font-mono">~{parseFloat(formatEther(simItem.netWethOut)).toFixed(5)} WETH</div>
                   ) : (
                     <div className="flex items-center gap-1 justify-end opacity-50">
                       <ArrowRight className="w-3 h-3 text-zinc-300" />
-                      <div className="text-[10px] font-bold text-zinc-400">ETH</div>
+                      <div className="text-[10px] font-bold text-zinc-400">WETH</div>
                     </div>
                   )}
                 </div>
@@ -555,11 +563,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             {simulating ? (
               <><Refresh className="w-5 h-5 animate-spin" /><span className="text-sm">Fetching routes...</span></>
             ) : (
-              <><Flash className="w-5 h-5 text-yellow-400" />Preview Swap ({Math.min(selectedTokens.size, 10)} tokens)</>
+              <><Flash className="w-5 h-5 text-yellow-400" />Preview Swap ({selectedTokens.size} token{selectedTokens.size > 1 ? "s" : ""})</>
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2">
-            Cek estimasi ETH & fee sebelum execute
+            Estimasi WETH & fee · max {MAX_BATCH_TOKENS} token · 1 konfirmasi
           </div>
         </div>
       )}

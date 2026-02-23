@@ -49,8 +49,8 @@ async function fetchRoute(
       buyToken:   WETH,
       sellAmount: balance.toString(),
       taker:      vault,
-      // Slippage 3% (0.03) untuk mengakomodasi volatilitas token dust
-      slippage:   "0.03", 
+      // Slippage %% (0.05) untuk mengakomodasi volatilitas token dust
+      slippage:   "0.05", 
     });
 
     const res = await fetch(`/api/quote?${params}`);
