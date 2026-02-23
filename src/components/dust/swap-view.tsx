@@ -176,7 +176,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── SIMULATE ─────────────────────────────────────────────────────────────────
+  // ── SIMULATE: pakai batch-swap.ts lib ─────────────────────────────────────
   const handleSimulate = async () => {
     if (!walletClient || selectedTokens.size === 0) return;
     setSimulating(true);
@@ -207,49 +207,47 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── EXECUTE ───────────────────────────────────────────────────────────────────
+  // ── EXECUTE: 1 UserOp berisi semua approve+swap ───────────────────────────
   const handleExecute = async () => {
-    if (!walletClient || !simulation || simulation.calls.length === 0) return;
+    if (!walletClient || !simulation || simulation.processable.length === 0) return;
     setExecuting(true);
-    setExecProgress("Sending transaction...");
+    setExecProgress("Fetching fresh routes...");
     setIncomingToken(null);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      setExecProgress(`Executing ${simulation.processable.length} swaps in 1 tx...`);
-      await executeBatchSwap({ walletClient, calls: simulation.calls });
-      console.log("[Swap] Batch UserOp confirmed ✓");
+      setExecProgress(`Fetching fresh routes & executing ${simulation.processable.length} swaps...`);
+
+      // executeBatchSwap fetch FRESH routes saat ini — bukan dari simulation (bisa expired)
+      const tokensToExecute = simulation.processable.map(c => ({
+        address: c.token,
+        symbol:  c.symbol,
+        balance: c.balance,
+      }));
+
+      const execResult = await executeBatchSwap({
+        walletClient,
+        chainId: chainId ?? 8453,
+        tokens:  tokensToExecute,
+      });
+      console.log("[Swap] Batch tx confirmed ✓", execResult.txHash);
 
       // Unwrap WETH → ETH setelah semua swap selesai
       setExecProgress("Unwrapping WETH → ETH...");
       try {
         const client       = await getSmartAccountClient(walletClient);
         const vaultAddress = client.account.address;
-
-        // ✅ FIX: Gunakan publicClient yang sudah di-import, bukan dynamic import
-        const wethBal = await publicClient.readContract({
+        const wethBal      = await publicClient.readContract({
           address: WETH_ADDRESS as Address,
-          abi: WETH_ABI,
+          abi:     WETH_ABI,
           functionName: "balanceOf",
-          args: [vaultAddress as Address],
+          args:    [vaultAddress as Address],
         });
-
         if (wethBal > 0n) {
           setExecProgress(`Unwrapping ${formatUnits(wethBal, 18).slice(0, 8)} WETH → ETH...`);
-
-          // ✅ FIX: Gunakan encodeFunctionData yang sudah di-import (bukan require("viem"))
-          const unwrapData = encodeFunctionData({
-            abi: WETH_ABI,
-            functionName: "withdraw",
-            args: [wethBal],
-          });
-
+          const unwrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBal] });
           const unwrapTx = await client.sendUserOperation({
-            calls: [{
-              to:    WETH_ADDRESS as Address,
-              value: 0n,
-              data:  unwrapData,
-            }],
+            calls: [{ to: WETH_ADDRESS as Address, value: 0n, data: unwrapData }],
           });
           await client.waitForUserOperationReceipt({ hash: unwrapTx });
           console.log("[Unwrap] WETH → ETH ✓");
@@ -318,14 +316,18 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         </div>
       </div>
 
-      {/* ── SIMULATION SUMMARY CARD ── */}
+      {/* ── SIMULATION SUMMARY CARD — di atas token list ── */}
       {simulation && (
         <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3 animate-in slide-in-from-top-2 duration-200">
           <div className="flex items-center justify-between">
             <div className="text-xs font-bold text-zinc-400 uppercase tracking-wide">Swap Preview</div>
-            <button onClick={() => setSimulation(null)} className="text-zinc-600 hover:text-zinc-400 text-xs">✕ Reset</button>
+            <button
+              onClick={() => setSimulation(null)}
+              className="text-zinc-600 hover:text-zinc-400 text-xs"
+            >✕ Reset</button>
           </div>
 
+          {/* Stats grid */}
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-zinc-800 rounded-xl p-3">
               <div className="text-[10px] text-zinc-500 mb-0.5">Will Process</div>
@@ -351,13 +353,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           </div>
 
-          {simulation.gasEstimate && (
-            <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
-              <span>Est. gas (callGasLimit)</span>
-              <span className="font-mono">{simulation.gasEstimate.callGasLimit.toLocaleString()}</span>
-            </div>
-          )}
+          {/* Gas estimate */}
+          <div className="flex items-center justify-between text-xs text-zinc-500 px-1">
+            <span>Est. gas (executeBatch)</span>
+            <span className="font-mono">{simulation.gasEstimate.callGasLimit.toLocaleString()}</span>
+          </div>
 
+          {/* Per-token breakdown */}
           {simulation.processable.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-zinc-500 uppercase font-bold px-1">Breakdown</div>
@@ -375,6 +377,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
+          {/* Skipped list */}
           {simulation.skipped.length > 0 && (
             <div className="space-y-1">
               <div className="text-[10px] text-red-500 uppercase font-bold px-1 flex items-center gap-1">
@@ -389,6 +392,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             </div>
           )}
 
+          {/* Confirm button */}
           {simulation.processable.length > 0 && (
             <button
               onClick={handleExecute}

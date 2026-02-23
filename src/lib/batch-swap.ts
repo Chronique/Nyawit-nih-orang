@@ -1,62 +1,66 @@
 // src/lib/batch-swap.ts
-// Simulate dan execute semua swap dalam 1 UserOperation
-// Struktur: [approve1, swap1, approve2, swap2, ...] → sendUserOperation 1x
+//
+// ARSITEKTUR:
+//   simulateBatchSwap → cek route tiap token (processable vs skip), TIDAK build calls
+//   executeBatchSwap  → fetch FRESH routes saat confirm, build calls, kirim 1 tx
+//
+// Kenapa dipisah:
+//   - DEX quote punya validity window pendek (~30-90 detik)
+//   - Kalau pakai calls dari simulation, kemungkinan expired saat execute
+//   - Gas estimate hanya untuk UI (static heuristic), tidak simulate onchain
+//   - estimateContractGas dengan DEX calldata = pasti revert (deadline, nonce, dll)
 
 import { encodeFunctionData, erc20Abi, maxUint256, type Address } from "viem";
 import { getSmartAccountClient } from "~/lib/smart-account";
 
-const WETH           = "0x4200000000000000000000000000000000000006" as Address;
-const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
-const FEE_PERCENT    = "0.05";
+const WETH             = "0x4200000000000000000000000000000000000006" as Address;
+const FEE_RECIPIENT    = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
+const FEE_PERCENT_STR  = "0.05";
 const PLATFORM_FEE_BPS = 500n;
 const BPS_DENOM        = 10_000n;
 
+// ── Types ─────────────────────────────────────────────────────────────────────
 export interface SwapCandidate {
-  token:    Address;
-  symbol:   string;
-  balance:  bigint;
+  token:   Address;
+  symbol:  string;
+  balance: bigint;
   route?: {
     to:              Address;
     data:            `0x${string}`;
     value:           bigint;
     approvalSpender: Address;
     agg:             string;
-    // estimasi sebelum fee
     grossWethOut:    bigint;
   };
   status:  "ok" | "skip";
   reason?: string;
-  // setelah dikurangi fee
-  netWethOut:    bigint;
-  estimatedFee:  bigint;
+  netWethOut:   bigint;
+  estimatedFee: bigint;
 }
 
 export interface SimulationResult {
-  calls: {
-    to:    Address;
-    data:  `0x${string}`;
-    value: bigint;
-  }[];
-  candidates:  SwapCandidate[];   // semua token (ok + skip)
-  processable: SwapCandidate[];   // hanya ok
-  skipped:     SwapCandidate[];   // hanya skip
-  totalNetWeth:  bigint;
-  totalFee:      bigint;
+  // ⚠️ Tidak ada "calls" di sini — fresh routes di-fetch saat execute
+  candidates:  SwapCandidate[];
+  processable: SwapCandidate[];
+  skipped:     SwapCandidate[];
+  totalNetWeth: bigint;
+  totalFee:     bigint;
+  // Static heuristic — hanya untuk UI display, BUKAN simulate onchain
   gasEstimate: {
-    callGasLimit:         bigint;  // estimasi dari estimateContractGas (atau fallback static)
-    verificationGasLimit: bigint;  // selalu 0n — EOA, bukan bundler
-    preVerificationGas:   bigint;  // selalu 0n — EOA, bukan bundler
+    callGasLimit: bigint;
   };
 }
 
-// ── Fetch route dari /api/0x/quote ──────────────────────────────────────────
+// ── Fetch 1 route ─────────────────────────────────────────────────────────────
+// vault = address yang akan execute → wajib jadi taker/sender di semua aggregator
 async function fetchRoute(
-  token: Address,
+  token:   Address,
   balance: bigint,
-  vault: Address,
+  vault:   Address,
   chainId: number
 ): Promise<SwapCandidate["route"] | null> {
-  // 1. Try 0x backend (dengan LI.FI fallback)
+
+  // 1. 0x (dengan LI.FI fallback di backend)
   try {
     const params = new URLSearchParams({
       chainId:               String(chainId),
@@ -65,7 +69,7 @@ async function fetchRoute(
       sellAmount:            balance.toString(),
       taker:                 vault,
       feeRecipient:          FEE_RECIPIENT,
-      buyTokenPercentageFee: FEE_PERCENT,
+      buyTokenPercentageFee: FEE_PERCENT_STR,
       slippagePercentage:    "0.15",
     });
     const res = await fetch(`/api/0x/quote?${params}`);
@@ -100,9 +104,9 @@ async function fetchRoute(
     const bRes = await fetch(
       "https://aggregator-api.kyberswap.com/base/api/v1/route/build",
       {
-        method: "POST",
+        method:  "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
-        body: JSON.stringify({
+        body:    JSON.stringify({
           routeSummary:      rd.data.routeSummary,
           sender:            vault,
           recipient:         vault,
@@ -130,8 +134,9 @@ async function fetchRoute(
   return null;
 }
 
-// ── SIMULATE ─────────────────────────────────────────────────────────────────
-// Fetch semua route parallel, build calls array, estimate gas via AA
+// ── SIMULATE ──────────────────────────────────────────────────────────────────
+// Hanya cek apakah route ada. Tidak build calls, tidak estimateContractGas.
+// Gas estimate = static heuristic untuk UI display saja.
 export async function simulateBatchSwap({
   walletClient,
   chainId,
@@ -141,12 +146,11 @@ export async function simulateBatchSwap({
   chainId:      number;
   tokens: { address: Address; symbol: string; balance: bigint }[];
 }): Promise<SimulationResult> {
-  const client = await getSmartAccountClient(walletClient);
-  const vault  = client.account.address;
+  const client     = await getSmartAccountClient(walletClient);
+  const vault      = client.account.address;
   const vaultLower = vault.toLowerCase();
   const zeroAddr   = "0x0000000000000000000000000000000000000000";
 
-  // Parallel route fetch
   const candidates: SwapCandidate[] = await Promise.all(
     tokens.map(async t => {
       if (t.balance === 0n) {
@@ -154,11 +158,11 @@ export async function simulateBatchSwap({
       }
 
       const route = await fetchRoute(t.address, t.balance, vault, chainId);
+
       if (!route) {
         return { token: t.address, symbol: t.symbol, balance: t.balance, status: "skip" as const, reason: "No route found", netWethOut: 0n, estimatedFee: 0n };
       }
 
-      // Guard: spender tidak boleh vault atau zero
       const spender = route.approvalSpender.toLowerCase();
       if (spender === vaultLower || spender === zeroAddr) {
         return { token: t.address, symbol: t.symbol, balance: t.balance, status: "skip" as const, reason: "Invalid spender", netWethOut: 0n, estimatedFee: 0n };
@@ -168,11 +172,11 @@ export async function simulateBatchSwap({
       const netOut = route.grossWethOut - fee;
 
       return {
-        token:  t.address,
-        symbol: t.symbol,
-        balance: t.balance,
+        token:    t.address,
+        symbol:   t.symbol,
+        balance:  t.balance,
         route,
-        status: "ok" as const,
+        status:   "ok" as const,
         netWethOut:   netOut,
         estimatedFee: fee,
       };
@@ -186,13 +190,62 @@ export async function simulateBatchSwap({
     throw new Error("No routes found for any selected token");
   }
 
+  const totalNetWeth = processable.reduce((a, c) => a + c.netWethOut,   0n);
+  const totalFee     = processable.reduce((a, c) => a + c.estimatedFee, 0n);
+
+  // Static only — ~200k per approve+swap pair + 50k overhead
+  const gasEstimate = {
+    callGasLimit: BigInt(processable.length) * 200_000n + 50_000n,
+  };
+
+  return { candidates, processable, skipped, totalNetWeth, totalFee, gasEstimate };
+}
+
+// ── EXECUTE ───────────────────────────────────────────────────────────────────
+// Fetch FRESH routes tepat saat user tekan Confirm.
+// Input: list token yang PROCESSABLE dari simulation result.
+export async function executeBatchSwap({
+  walletClient,
+  chainId,
+  tokens,
+}: {
+  walletClient: any;
+  chainId:      number;
+  tokens: { address: Address; symbol: string; balance: bigint }[];
+}) {
+  const client     = await getSmartAccountClient(walletClient);
+  const vault      = client.account.address;
+  const vaultLower = vault.toLowerCase();
+  const zeroAddr   = "0x0000000000000000000000000000000000000000";
+
+  // Fresh routes
+  const routeResults = await Promise.all(
+    tokens.map(t => fetchRoute(t.address, t.balance, vault, chainId))
+  );
+
   // Build calls: [approve1, swap1, approve2, swap2, ...]
-  const calls: SimulationResult["calls"] = [];
-  for (const c of processable) {
-    const r = c.route!;
+  const calls: { to: Address; data: `0x${string}`; value: bigint }[] = [];
+  const skippedAtExecute: string[] = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const r = routeResults[i];
+
+    if (!r) {
+      skippedAtExecute.push(t.symbol);
+      console.warn(`[BatchSwap] no fresh route at execute for ${t.symbol}`);
+      continue;
+    }
+
+    const spender = r.approvalSpender.toLowerCase();
+    if (spender === vaultLower || spender === zeroAddr) {
+      skippedAtExecute.push(t.symbol);
+      continue;
+    }
+
     // approve
     calls.push({
-      to:    c.token,
+      to:    t.address,
       value: 0n,
       data:  encodeFunctionData({
         abi:          erc20Abi,
@@ -204,42 +257,19 @@ export async function simulateBatchSwap({
     calls.push({ to: r.to, value: r.value, data: r.data });
   }
 
-  // Gas estimate via publicClient.estimateContractGas (EOA → executeBatch)
-  // Bukan eth_estimateUserOperationGas — arsitektur kita EOA, bukan bundler
-  let gasEstimate: SimulationResult["gasEstimate"];
-  try {
-    const gasUsed = await client.estimateGas({ calls });
-    gasEstimate = {
-      callGasLimit:         gasUsed,
-      verificationGasLimit: 0n,   // N/A untuk EOA
-      preVerificationGas:   0n,   // N/A untuk EOA
-    };
-  } catch (e) {
-    console.warn("[BatchSwap] estimateGas failed, using static fallback:", e);
-    // Fallback static: ~200k per pair (approve+swap) + overhead
-    gasEstimate = {
-      callGasLimit:         BigInt(processable.length) * 200_000n + 50_000n,
-      verificationGasLimit: 0n,
-      preVerificationGas:   0n,
-    };
+  if (calls.length === 0) {
+    throw new Error(
+      `All routes expired at execute time${skippedAtExecute.length ? ": " + skippedAtExecute.join(", ") : ""}`
+    );
   }
 
-  const totalNetWeth = processable.reduce((a, c) => a + c.netWethOut,   0n);
-  const totalFee     = processable.reduce((a, c) => a + c.estimatedFee, 0n);
+  if (skippedAtExecute.length > 0) {
+    console.warn("[BatchSwap] skipped at execute:", skippedAtExecute);
+  }
 
-  return { calls, candidates, processable, skipped, totalNetWeth, totalFee, gasEstimate };
-}
+  // 1 tx — semua approve+swap atomic
+  const txHash  = await client.sendUserOperation({ calls });
+  const receipt = await client.waitForUserOperationReceipt({ hash: txHash });
 
-// ── EXECUTE ───────────────────────────────────────────────────────────────────
-// 1 UserOperation = semua approve + swap sekaligus
-export async function executeBatchSwap({
-  walletClient,
-  calls,
-}: {
-  walletClient: any;
-  calls: SimulationResult["calls"];
-}) {
-  const client = await getSmartAccountClient(walletClient);
-  const uoHash = await client.sendUserOperation({ calls });
-  return await client.waitForUserOperationReceipt({ hash: uoHash });
+  return { receipt, txHash, skippedAtExecute };
 }
