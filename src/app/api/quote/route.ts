@@ -51,9 +51,8 @@ export async function GET(req: NextRequest) {
     // - openocean: sering reject non-EOA caller
     // - sushiswap: beberapa pool punya EOA-only guard
     // - dodo: smart contract caller sering revert
-    denyExchanges: "paraswap,openocean,sushiswap,dodo",
-    // Prefer DEX yang proven support smart contract caller di Base
-    preferExchanges: "uniswap,baseswap,aerodrome,curve",
+    // denyExchanges & preferExchanges dihapus — LI.FI format strict (bukan comma string)
+    // Route guard dilakukan via permit2 check di response handling
   });
 
   const headers: Record<string, string> = { "Accept": "application/json" };
@@ -76,12 +75,22 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: data?.message || "LI.FI quote failed" }, { status: 200 });
     }
 
-    // Guard: reject permit2 approval
+    // Guard 1: reject permit2 approval (vault cannot sign off-chain)
     const approvalAddr = (data?.estimate?.approvalAddress || "").toLowerCase();
     if (approvalAddr === PERMIT2_ADDR) {
-      console.warn("[LI.FI] permit2 route — skip (vault cannot sign off-chain)");
+      console.warn("[LI.FI] permit2 route — skip");
       return NextResponse.json({ error: "permit2 route not supported" }, { status: 200 });
     }
+
+    // Guard 2: reject DEX yang punya EOA-only guard (revert jika caller = contract)
+    const toolName = (data?.toolDetails?.name || data?.tool || "").toLowerCase();
+    const BLOCKED_DEXES = ["sushiswap", "dodo", "openocean"];
+    if (BLOCKED_DEXES.some(d => toolName.includes(d))) {
+      console.warn(`[LI.FI] blocked DEX: ${toolName} — not compatible with smart contract caller`);
+      return NextResponse.json({ error: `DEX ${toolName} not compatible with vault` }, { status: 200 });
+    }
+
+    console.log(`[LI.FI] selected DEX: ${toolName || "unknown"}`);
 
     // LI.FI response fields
     const buyAmount =
