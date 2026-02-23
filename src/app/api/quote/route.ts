@@ -43,11 +43,17 @@ export async function GET(req: NextRequest) {
     toToken:     buyToken,
     fromAmount:  sellAmount,
     fromAddress,
-    toAddress:   fromAddress, // output balik ke vault juga
+    toAddress:   fromAddress,  // output balik ke vault
     slippage,
     integrator:  "nyawit",
-    // Deny exchange yang butuh permit2 atau tidak kompatibel dengan smart account
-    denyExchanges: "paraswap,openocean",
+    // Deny exchanges yang TIDAK kompatibel dengan smart contract sebagai caller:
+    // - paraswap: butuh permit off-chain
+    // - openocean: sering reject non-EOA caller
+    // - sushiswap: beberapa pool punya EOA-only guard
+    // - dodo: smart contract caller sering revert
+    denyExchanges: "paraswap,openocean,sushiswap,dodo",
+    // Prefer DEX yang proven support smart contract caller di Base
+    preferExchanges: "uniswap,baseswap,aerodrome,curve",
   });
 
   const headers: Record<string, string> = { "Accept": "application/json" };
