@@ -32,6 +32,7 @@ export async function generateMetadata(): Promise<Metadata> {
     other: {
       "fc:frame": JSON.stringify(frame),
       "fc:miniapp": JSON.stringify(frame),
+      "builder": "bc_1x8rrnnv",
       'base:app_id': '6970aac385045b1333e7bae2',
   },
     }
