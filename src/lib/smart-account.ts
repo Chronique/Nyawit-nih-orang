@@ -289,5 +289,32 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
 
     deployVault: () => deployVault(walletClient),
     isDeployed: () => isVaultDeployed(vaultAddress),
+
+    // Gas estimate untuk executeBatch — pakai publicClient.estimateContractGas
+    // Bukan eth_estimateUserOperationGas (itu ERC-4337 bundler, kita EOA)
+    estimateGas: async ({ calls }: { calls: VaultCall[] }) => {
+      if (!walletClient.account) throw new Error("walletClient.account is null");
+      const sanitized = calls.map((c) => ({
+        target: c.to,
+        value:  c.value ?? 0n,
+        data:   (c.data ?? "0x") as `0x${string}`,
+      }));
+      if (sanitized.length === 1) {
+        return activePublicClient.estimateContractGas({
+          address:      vaultAddress,
+          abi:          LIGHT_ACCOUNT_ABI,
+          functionName: "execute",
+          args:         [sanitized[0].target, sanitized[0].value, sanitized[0].data],
+          account:      walletClient.account.address,
+        });
+      }
+      return activePublicClient.estimateContractGas({
+        address:      vaultAddress,
+        abi:          LIGHT_ACCOUNT_ABI,
+        functionName: "executeBatch",
+        args:         [sanitized],
+        account:      walletClient.account.address,
+      });
+    },
   };
 };

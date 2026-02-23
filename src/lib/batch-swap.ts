@@ -7,10 +7,9 @@ import { getSmartAccountClient } from "~/lib/smart-account";
 
 const WETH           = "0x4200000000000000000000000000000000000006" as Address;
 const FEE_RECIPIENT  = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
-// Fee 5% — dikirim ke 0x/LI.FI API sehingga fee sudah di-collect ON-CHAIN oleh aggregator.
-// buyAmount yang dikembalikan API sudah BERSIH (setelah fee dipotong oleh router).
-// Jadi kita TIDAK perlu mengurangi fee lagi dari grossWethOut di sini.
 const FEE_PERCENT    = "0.05";
+const PLATFORM_FEE_BPS = 500n;
+const BPS_DENOM        = 10_000n;
 
 export interface SwapCandidate {
   token:    Address;
@@ -22,14 +21,13 @@ export interface SwapCandidate {
     value:           bigint;
     approvalSpender: Address;
     agg:             string;
-    // buyAmount dari API = sudah NET (setelah fee dipotong oleh router)
+    // estimasi sebelum fee
     grossWethOut:    bigint;
   };
   status:  "ok" | "skip";
   reason?: string;
-  // netWethOut = sama dengan grossWethOut karena fee sudah di-handle oleh router
+  // setelah dikurangi fee
   netWethOut:    bigint;
-  // estimatedFee = 0 karena sudah dipotong oleh aggregator
   estimatedFee:  bigint;
 }
 
@@ -44,10 +42,10 @@ export interface SimulationResult {
   skipped:     SwapCandidate[];   // hanya skip
   totalNetWeth:  bigint;
   totalFee:      bigint;
-  gasEstimate?: {
-    callGasLimit:         bigint;
-    verificationGasLimit: bigint;
-    preVerificationGas:   bigint;
+  gasEstimate: {
+    callGasLimit:         bigint;  // estimasi dari estimateContractGas (atau fallback static)
+    verificationGasLimit: bigint;  // selalu 0n — EOA, bukan bundler
+    preVerificationGas:   bigint;  // selalu 0n — EOA, bukan bundler
   };
 }
 
@@ -68,7 +66,7 @@ async function fetchRoute(
       taker:                 vault,
       feeRecipient:          FEE_RECIPIENT,
       buyTokenPercentageFee: FEE_PERCENT,
-      slippagePercentage:    "0.015", // ✅ FIX: 1.5% slippage (bukan 15%)
+      slippagePercentage:    "0.15",
     });
     const res = await fetch(`/api/0x/quote?${params}`);
     if (res.ok) {
@@ -82,16 +80,14 @@ async function fetchRoute(
             value:           BigInt(q.transaction.value || "0"),
             approvalSpender: (q.transaction.approvalAddress || q.transaction.to) as Address,
             agg:             q._source === "lifi" ? "LI.FI" : "0x",
-            grossWethOut:    gross, // Sudah NET — fee dipotong oleh router
+            grossWethOut:    gross,
           };
         }
       }
     }
-  } catch (e) {
-    console.warn("[fetchRoute] 0x/LI.FI failed:", e);
-  }
+  } catch {}
 
-  // 2. KyberSwap fallback (tanpa fee parameter karena KyberSwap tidak support buyTokenFee)
+  // 2. KyberSwap fallback
   try {
     const rRes = await fetch(
       `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token}&tokenOut=${WETH}&amountIn=${balance.toString()}`,
@@ -110,7 +106,7 @@ async function fetchRoute(
           routeSummary:      rd.data.routeSummary,
           sender:            vault,
           recipient:         vault,
-          slippageTolerance: 150, // 1.5% in bps
+          slippageTolerance: 1500,
         }),
       }
     );
@@ -121,27 +117,21 @@ async function fetchRoute(
     const gross = BigInt(rd.data.routeSummary.amountOut || "0");
     if (gross === 0n) return null;
 
-    // KyberSwap tidak punya built-in fee param → potong manual 5% untuk fee recipient
-    // Fee akan di-transfer terpisah di luar scope ini (atau bisa di-skip untuk kesederhanaan)
-    const fee    = (gross * 500n) / 10_000n;
-    const net    = gross - fee;
-
     return {
       to:              bd.data.routerAddress as Address,
       data:            bd.data.data as `0x${string}`,
       value:           0n,
       approvalSpender: bd.data.routerAddress as Address,
       agg:             "KyberSwap",
-      grossWethOut:    net, // gunakan net karena KyberSwap tidak potong fee
+      grossWethOut:    gross,
     };
-  } catch (e) {
-    console.warn("[fetchRoute] KyberSwap fallback failed:", e);
-  }
+  } catch {}
 
   return null;
 }
 
 // ── SIMULATE ─────────────────────────────────────────────────────────────────
+// Fetch semua route parallel, build calls array, estimate gas via AA
 export async function simulateBatchSwap({
   walletClient,
   chainId,
@@ -174,16 +164,17 @@ export async function simulateBatchSwap({
         return { token: t.address, symbol: t.symbol, balance: t.balance, status: "skip" as const, reason: "Invalid spender", netWethOut: 0n, estimatedFee: 0n };
       }
 
-      // ✅ FIX: grossWethOut dari 0x/LI.FI sudah NET (fee sudah dipotong oleh router)
-      // Jangan kurangi fee lagi! netWethOut = grossWethOut
+      const fee    = (route.grossWethOut * PLATFORM_FEE_BPS) / BPS_DENOM;
+      const netOut = route.grossWethOut - fee;
+
       return {
         token:  t.address,
         symbol: t.symbol,
         balance: t.balance,
         route,
         status: "ok" as const,
-        netWethOut:   route.grossWethOut, // sudah net
-        estimatedFee: 0n,                 // fee sudah di-handle oleh aggregator
+        netWethOut:   netOut,
+        estimatedFee: fee,
       };
     })
   );
@@ -213,12 +204,25 @@ export async function simulateBatchSwap({
     calls.push({ to: r.to, value: r.value, data: r.data });
   }
 
-  // Static gas estimate — ~200k per approve+swap pair + 50k base
-  const gasEstimate: SimulationResult["gasEstimate"] = {
-    callGasLimit:         BigInt(processable.length) * 200_000n + 50_000n,
-    verificationGasLimit: 100_000n,
-    preVerificationGas:   21_000n,
-  };
+  // Gas estimate via publicClient.estimateContractGas (EOA → executeBatch)
+  // Bukan eth_estimateUserOperationGas — arsitektur kita EOA, bukan bundler
+  let gasEstimate: SimulationResult["gasEstimate"];
+  try {
+    const gasUsed = await client.estimateGas({ calls });
+    gasEstimate = {
+      callGasLimit:         gasUsed,
+      verificationGasLimit: 0n,   // N/A untuk EOA
+      preVerificationGas:   0n,   // N/A untuk EOA
+    };
+  } catch (e) {
+    console.warn("[BatchSwap] estimateGas failed, using static fallback:", e);
+    // Fallback static: ~200k per pair (approve+swap) + overhead
+    gasEstimate = {
+      callGasLimit:         BigInt(processable.length) * 200_000n + 50_000n,
+      verificationGasLimit: 0n,
+      preVerificationGas:   0n,
+    };
+  }
 
   const totalNetWeth = processable.reduce((a, c) => a + c.netWethOut,   0n);
   const totalFee     = processable.reduce((a, c) => a + c.estimatedFee, 0n);
@@ -227,6 +231,7 @@ export async function simulateBatchSwap({
 }
 
 // ── EXECUTE ───────────────────────────────────────────────────────────────────
+// 1 UserOperation = semua approve + swap sekaligus
 export async function executeBatchSwap({
   walletClient,
   calls,
