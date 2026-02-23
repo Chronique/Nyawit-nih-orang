@@ -254,7 +254,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
       const skippedCount = simulation.skipped.length;
       setToast({
-        msg:  `✓ ${simulation.processable.length} token diswap → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Buka tab Panen untuk unwrap ke ETH.`,
+        msg:  `✓ ${simulation.processable.length} SWapped → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Open Tanam tab to unwrap to ETH.`,
         type: "success",
       });
 

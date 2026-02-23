@@ -2,15 +2,11 @@
 //
 // ARSITEKTUR: Alchemy Light Account (ERC-4337) — user bayar gas dari EOA
 //
-// Flow:
-// 1. deriveVaultAddress(owner) → alamat deterministik dari factory
-// 2. deployVault(walletClient)  → EOA deploy via factory, bayar gas dari EOA
-// 3. sendBatch(walletClient, calls) → EOA call executeBatch() di vault
-//
-// Tidak ada bundler, tidak ada UserOp, tidak ada paymaster.
-// Gas selalu dari wallet owner (EOA).
-//
-// MULTI-CHAIN: ganti chain + factory address → support semua EVM
+// ⚠️ CRITICAL FIX: executeBatch ABI berbeda antara v1.1 dan v2.0
+//   v1.1: executeBatch(address[] dest, bytes[] func)              ← NO value array
+//   v2.0: executeBatch(address[] dest, uint256[] value, bytes[] func) ← WITH value array
+//   
+//   Pakai tuple[] akan generate selector SALAH → jatuh ke fallback() → REVERT
 
 import {
   createPublicClient,
@@ -19,21 +15,15 @@ import {
   type Address,
   encodeFunctionData,
 } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { base } from "viem/chains";
 
 // ── Config ────────────────────────────────────────────────────────────────────
-// Base Mainnet only — Sepolia dihapus
-export const ACTIVE_CHAIN = base; // Base Mainnet
-export const IS_TESTNET = false;
+export const ACTIVE_CHAIN = base;
+export const IS_TESTNET   = false;
 
-// Alchemy Light Account Factory — dua versi, auto-detect mana yang deployed
-const FACTORY_V1 = "0x00004EC70002a32400f8ae005A26081065620D20" as Address; // v1.1
-const FACTORY_V2 = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address; // v2.0
-
-// Legacy: dipakai untuk deployVault baru (selalu v2 untuk user baru)
-const FACTORY_ADDRESS = FACTORY_V2;
-
-const RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`;
+const FACTORY_V1      = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
+const FACTORY_V2      = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address;
+const FACTORY_ADDRESS = FACTORY_V2; // default untuk user baru
 
 // ── ABIs ──────────────────────────────────────────────────────────────────────
 const FACTORY_ABI = [
@@ -41,52 +31,66 @@ const FACTORY_ABI = [
     name: "getAddress",
     type: "function",
     stateMutability: "view",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "salt", type: "uint256" },
-    ],
+    inputs:  [{ name: "owner", type: "address" }, { name: "salt", type: "uint256" }],
     outputs: [{ name: "", type: "address" }],
   },
   {
     name: "createAccount",
     type: "function",
     stateMutability: "nonpayable",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "salt", type: "uint256" },
-    ],
+    inputs:  [{ name: "owner", type: "address" }, { name: "salt", type: "uint256" }],
     outputs: [{ name: "ret", type: "address" }],
   },
 ] as const;
 
-const LIGHT_ACCOUNT_ABI = [
-  // executeBatch: jalankan multiple calls atomic dalam 1 transaksi
+// ✅ Light Account v1.1 — executeBatch TANPA value array
+// Signature: executeBatch(address[],bytes[])
+const LIGHT_ACCOUNT_V1_ABI = [
   {
     name: "executeBatch",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
-      {
-        name: "calls",
-        type: "tuple[]",
-        components: [
-          { name: "target", type: "address" },
-          { name: "value", type: "uint256" },
-          { name: "data", type: "bytes" },
-        ],
-      },
+      { name: "dest", type: "address[]" },
+      { name: "func", type: "bytes[]"   },
     ],
     outputs: [],
   },
-  // execute: single call
   {
     name: "execute",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
-      { name: "target", type: "address" },
+      { name: "dest",  type: "address" },
       { name: "value", type: "uint256" },
-      { name: "data", type: "bytes" },
+      { name: "func",  type: "bytes"   },
+    ],
+    outputs: [],
+  },
+] as const;
+
+// ✅ Light Account v2.0 — executeBatch DENGAN value array
+// Signature: executeBatch(address[],uint256[],bytes[])
+const LIGHT_ACCOUNT_V2_ABI = [
+  {
+    name: "executeBatch",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "dest",  type: "address[]"  },
+      { name: "value", type: "uint256[]"  },
+      { name: "func",  type: "bytes[]"    },
+    ],
+    outputs: [],
+  },
+  {
+    name: "execute",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "dest",  type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "func",  type: "bytes"   },
     ],
     outputs: [],
   },
@@ -98,58 +102,35 @@ export const publicClient = createPublicClient({
   transport: http(`https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
 });
 
-const publicClientSepolia = createPublicClient({
-  chain: baseSepolia,
-  transport: http(`https://base-sepolia.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`),
-});
-
-// ── Chain helpers ─────────────────────────────────────────────────────────────
-const SUPPORTED_CHAIN_IDS: number[] = [base.id, baseSepolia.id];
-
-export const isSupportedChain = (chainId: number): boolean =>
-  SUPPORTED_CHAIN_IDS.includes(chainId);
-
-export const getChainLabel = (chainId: number): string => {
-  if (chainId === baseSepolia.id) return "Base Sepolia";
-  if (chainId === base.id) return "Base";
-  return `Chain ${chainId}`;
-};
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface VaultCall {
-  to: Address;
+  to:    Address;
   value: bigint;
-  data: `0x${string}`;
+  data:  `0x${string}`;
 }
 
-// ── 1. Derive vault address (tanpa deploy) ────────────────────────────────────
-// Deterministik: sama owner + salt = sama address, selamanya, di semua chain
+// ── 1. Derive vault address ───────────────────────────────────────────────────
 export const deriveVaultAddress = async (
   ownerAddress: Address,
   salt = 0n,
-  chainId?: number,
   factory: Address = FACTORY_ADDRESS
 ): Promise<Address> => {
-  const address = await publicClient.readContract({
-    address: factory,
-    abi: FACTORY_ABI,
+  return publicClient.readContract({
+    address:      factory,
+    abi:          FACTORY_ABI,
     functionName: "getAddress",
-    args: [ownerAddress, salt],
+    args:         [ownerAddress, salt],
   });
-  return address as Address;
 };
 
-// Auto-detect: cek v1.1 dulu (existing users), lalu v2
-// Return { address, factory, version }
+// ── 2. Auto-detect vault version ──────────────────────────────────────────────
 export const detectVaultAddress = async (
   ownerAddress: Address,
-  salt = 0n,
-  chainId?: number
+  salt = 0n
 ): Promise<{ address: Address; factory: Address; version: "v1" | "v2" }> => {
-  // Cek v1.1 dulu (lebih banyak user existing)
   const [addrV1, addrV2] = await Promise.all([
-    deriveVaultAddress(ownerAddress, salt, undefined, FACTORY_V1),
-    deriveVaultAddress(ownerAddress, salt, undefined, FACTORY_V2),
+    deriveVaultAddress(ownerAddress, salt, FACTORY_V1),
+    deriveVaultAddress(ownerAddress, salt, FACTORY_V2),
   ]);
 
   const [codeV1, codeV2] = await Promise.all([
@@ -160,7 +141,6 @@ export const detectVaultAddress = async (
   const v1Deployed = !!codeV1 && codeV1 !== "0x";
   const v2Deployed = !!codeV2 && codeV2 !== "0x";
 
-  // Prioritas: v1 dulu (existing), lalu v2, lalu default ke v2 (untuk user baru)
   if (v1Deployed) {
     console.log("[LightAccount] Using v1.1 vault:", addrV1);
     return { address: addrV1, factory: FACTORY_V1, version: "v1" };
@@ -170,151 +150,145 @@ export const detectVaultAddress = async (
     return { address: addrV2, factory: FACTORY_V2, version: "v2" };
   }
 
-  // Belum deploy → default ke v2 (user baru pakai v2)
   console.log("[LightAccount] No vault deployed yet, will use v2:", addrV2);
   return { address: addrV2, factory: FACTORY_V2, version: "v2" };
 };
 
-// ── 2. Cek apakah vault sudah di-deploy ──────────────────────────────────────
-export const isVaultDeployed = async (vaultAddress: Address, chainId?: number): Promise<boolean> => {
-  const bytecode = await publicClient.getBytecode({ address: vaultAddress });
-  return !!bytecode && bytecode !== "0x";
-};
-
-// ── 3. Deploy vault — EOA bayar gas langsung ──────────────────────────────────
-// Dipanggil sekali saja. Setelah ini vault aktif selamanya.
+// ── 3. Deploy vault ───────────────────────────────────────────────────────────
 export const deployVault = async (
   walletClient: WalletClient,
   salt = 0n
 ): Promise<`0x${string}`> => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
-
-  const txHash = await walletClient.writeContract({
-    address: FACTORY_ADDRESS,
-    abi: FACTORY_ABI,
+  return walletClient.writeContract({
+    address:      FACTORY_ADDRESS,
+    abi:          FACTORY_ABI,
     functionName: "createAccount",
-    args: [walletClient.account.address, salt],
-    chain: base,
-    account: walletClient.account,
+    args:         [walletClient.account.address, salt],
+    chain:        base,
+    account:      walletClient.account,
   });
-
-  return txHash;
 };
 
-// ── 4. Send batch — EOA call executeBatch di vault ───────────────────────────
-// Ini pengganti sendUserOperation. Sama hasilnya: atomic multi-call.
-// Gas dari EOA, tidak perlu ETH di dalam vault.
+// ── 4. sendBatch — encode sesuai versi vault ──────────────────────────────────
+// v1.1: executeBatch(address[], bytes[])           ← value TIDAK dikirim (semua 0)
+// v2.0: executeBatch(address[], uint256[], bytes[]) ← value dikirim per call
 export const sendBatch = async (
-  walletClient: WalletClient,
-  vaultAddress: Address,
-  calls: VaultCall[]
+  walletClient:  WalletClient,
+  vaultAddress:  Address,
+  calls:         VaultCall[],
+  vaultVersion:  "v1" | "v2" = "v2"
 ): Promise<`0x${string}`> => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
-  // Sanitize
-  const sanitized = calls.map((c) => ({
-    target: c.to,
-    value: c.value ?? 0n,
-    data: (c.data ?? "0x") as `0x${string}`,
-  }));
+  if (vaultVersion === "v1") {
+    // v1.1: tidak support value per-call di executeBatch
+    // Kalau ada call dengan value > 0 → harus pakai execute (single)
+    const hasValue = calls.some(c => (c.value ?? 0n) > 0n);
+    if (hasValue && calls.length === 1) {
+      console.log("[LightAccount v1] single call with value → execute()");
+      return walletClient.writeContract({
+        address:      vaultAddress,
+        abi:          LIGHT_ACCOUNT_V1_ABI,
+        functionName: "execute",
+        args:         [calls[0].to, calls[0].value ?? 0n, calls[0].data ?? "0x"],
+        chain:        base,
+        account:      walletClient.account,
+      });
+    }
+    console.log("[LightAccount v1] executeBatch, calls:", calls.length);
+    return walletClient.writeContract({
+      address:      vaultAddress,
+      abi:          LIGHT_ACCOUNT_V1_ABI,
+      functionName: "executeBatch",
+      args: [
+        calls.map(c => c.to),
+        calls.map(c => c.data ?? "0x"),
+      ],
+      chain:   base,
+      account: walletClient.account,
+    });
+  }
 
-  console.log("[LightAccount] executeBatch, calls:", sanitized.length);
-
-  const txHash = await walletClient.writeContract({
-    address: vaultAddress,
-    abi: LIGHT_ACCOUNT_ABI,
+  // v2.0: support value per-call
+  console.log("[LightAccount v2] executeBatch, calls:", calls.length);
+  return walletClient.writeContract({
+    address:      vaultAddress,
+    abi:          LIGHT_ACCOUNT_V2_ABI,
     functionName: "executeBatch",
-    args: [sanitized],
-    chain: base,
+    args: [
+      calls.map(c => c.to),
+      calls.map(c => c.value ?? 0n),
+      calls.map(c => c.data ?? "0x"),
+    ],
+    chain:   base,
     account: walletClient.account,
   });
-
-  return txHash;
 };
 
-// ── 5. Single execute (withdraw, dll) ────────────────────────────────────────
+// ── 5. sendSingle ─────────────────────────────────────────────────────────────
+// execute() sama di v1 dan v2
 export const sendSingle = async (
   walletClient: WalletClient,
   vaultAddress: Address,
-  call: VaultCall
+  call:         VaultCall,
+  vaultVersion: "v1" | "v2" = "v2"
 ): Promise<`0x${string}`> => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
-
-  const txHash = await walletClient.writeContract({
-    address: vaultAddress,
-    abi: LIGHT_ACCOUNT_ABI,
+  const abi = vaultVersion === "v1" ? LIGHT_ACCOUNT_V1_ABI : LIGHT_ACCOUNT_V2_ABI;
+  return walletClient.writeContract({
+    address:      vaultAddress,
+    abi,
     functionName: "execute",
-    args: [call.to, call.value ?? 0n, (call.data ?? "0x") as `0x${string}`],
-    chain: base,
-    account: walletClient.account,
+    args:         [call.to, call.value ?? 0n, call.data ?? "0x"],
+    chain:        base,
+    account:      walletClient.account,
   });
-
-  return txHash;
 };
 
-// ── 6. Unified client (kompatibel dengan deposit/vault/swap view) ─────────────
-// Wrapper agar deposit-view, vault-view, swap-view tidak perlu banyak diubah
+// ── 6. Helper functions ───────────────────────────────────────────────────────
+export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> => {
+  const bytecode = await publicClient.getBytecode({ address: vaultAddress });
+  return !!bytecode && bytecode !== "0x";
+};
+
+export const isSupportedChain = (chainId: number): boolean =>
+  chainId === base.id;
+
+export const getChainLabel = (chainId: number): string => {
+  if (chainId === base.id) return "Base";
+  return `Chain ${chainId}`;
+};
+
+// ── 7. Unified client ─────────────────────────────────────────────────────────
 // Interface sama dengan sebelumnya: sendUserOperation + waitForUserOperationReceipt
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
-
-  // Pilih publicClient sesuai chain wallet
-  const activePublicClient = publicClient;
-  const activeChain = base;
 
   const { address: vaultAddress, factory: vaultFactory, version: vaultVersion } =
     await detectVaultAddress(walletClient.account.address);
 
   console.log("[LightAccount] Vault address:", vaultAddress);
-  console.log("[LightAccount] Chain:", activeChain.name);
+  console.log("[LightAccount] Chain: Base");
   console.log("[LightAccount] Factory version:", vaultVersion);
 
   return {
     account: { address: vaultAddress },
 
     sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
-      // Override chain di setiap call agar sesuai chain wallet
-      const callsWithChain = calls.map((c) => ({ ...c }));
-      if (callsWithChain.length === 1) {
-        return sendSingle(walletClient, vaultAddress, callsWithChain[0]);
+      if (calls.length === 1) {
+        return sendSingle(walletClient, vaultAddress, calls[0], vaultVersion);
       }
-      return sendBatch(walletClient, vaultAddress, callsWithChain);
+      return sendBatch(walletClient, vaultAddress, calls, vaultVersion);
     },
 
     waitForUserOperationReceipt: async ({ hash }: { hash: `0x${string}` }) => {
       console.log("[LightAccount] Waiting for tx:", hash);
-      const receipt = await activePublicClient.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
       return { receipt };
     },
 
     deployVault: () => deployVault(walletClient),
-    isDeployed: () => isVaultDeployed(vaultAddress),
-
-    // Gas estimate untuk executeBatch — pakai publicClient.estimateContractGas
-    // Bukan eth_estimateUserOperationGas (itu ERC-4337 bundler, kita EOA)
-    estimateGas: async ({ calls }: { calls: VaultCall[] }) => {
-      if (!walletClient.account) throw new Error("walletClient.account is null");
-      const sanitized = calls.map((c) => ({
-        target: c.to,
-        value:  c.value ?? 0n,
-        data:   (c.data ?? "0x") as `0x${string}`,
-      }));
-      if (sanitized.length === 1) {
-        return activePublicClient.estimateContractGas({
-          address:      vaultAddress,
-          abi:          LIGHT_ACCOUNT_ABI,
-          functionName: "execute",
-          args:         [sanitized[0].target, sanitized[0].value, sanitized[0].data],
-          account:      walletClient.account.address,
-        });
-      }
-      return activePublicClient.estimateContractGas({
-        address:      vaultAddress,
-        abi:          LIGHT_ACCOUNT_ABI,
-        functionName: "executeBatch",
-        args:         [sanitized],
-        account:      walletClient.account.address,
-      });
-    },
+    isDeployed:  () => isVaultDeployed(vaultAddress),
   };
 };
