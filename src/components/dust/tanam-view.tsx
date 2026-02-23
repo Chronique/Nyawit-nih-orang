@@ -535,24 +535,24 @@ export const TanamView = () => {
 
       {/* ── WETH Wrap / Unwrap Card ── */}
       {(hasEth || hasWeth) && (
-        <div className="rounded-2xl border border-violet-700/40 bg-violet-900/20 p-4 space-y-3">
+        <div className="rounded-2xl border border-emerald-300 bg-emerald-100 p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <ArrowUpDown className="w-4 h-4 text-violet-400" />
-            <span className="text-sm font-bold text-violet-300">Wrap / Unwrap</span>
-            <span className="text-[10px] text-violet-500 ml-auto">ETH ↔ WETH · 1:1 · No slippage</span>
+            <ArrowUpDown className="w-4 h-4 text-emerald-700" />
+            <span className="text-sm font-bold text-emerald-900">Wrap / Unwrap</span>
+            <span className="text-[10px] text-emerald-700 ml-auto">ETH ↔ WETH · 1:1 · No slippage</span>
           </div>
 
           {/* Balances row */}
           <div className="grid grid-cols-2 gap-2">
-            <div className="bg-black/20 rounded-xl p-2.5">
-              <div className="text-[10px] text-zinc-500 mb-0.5">ETH in Vault</div>
-              <div className={`text-sm font-bold font-mono ${hasEth ? "text-white" : "text-zinc-600"}`}>
+            <div className="bg-white/60 rounded-xl p-2.5">
+              <div className="text-[10px] text-emerald-700 font-medium mb-0.5">ETH in Vault</div>
+              <div className={`text-sm font-bold font-mono ${hasEth ? "text-black" : "text-zinc-400"}`}>
                 {ethDisplay}
               </div>
             </div>
-            <div className="bg-black/20 rounded-xl p-2.5">
-              <div className="text-[10px] text-zinc-500 mb-0.5">WETH in Vault</div>
-              <div className={`text-sm font-bold font-mono ${hasWeth ? "text-violet-300" : "text-zinc-600"}`}>
+            <div className="bg-white/60 rounded-xl p-2.5">
+              <div className="text-[10px] text-emerald-700 font-medium mb-0.5">WETH in Vault</div>
+              <div className={`text-sm font-bold font-mono ${hasWeth ? "text-black" : "text-zinc-400"}`}>
                 {wethDisplay}
               </div>
             </div>
@@ -565,8 +565,8 @@ export const TanamView = () => {
               onClick={handleWrap}
               disabled={!hasEth || wethBusy}
               className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors
-                bg-violet-600/20 border border-violet-500/40 text-violet-300
-                hover:bg-violet-600/30 disabled:opacity-30 disabled:cursor-not-allowed"
+                bg-emerald-600 text-white hover:bg-emerald-700
+                disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {wrapping ? (
                 <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
@@ -580,8 +580,8 @@ export const TanamView = () => {
               onClick={handleUnwrap}
               disabled={!hasWeth || wethBusy}
               className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors
-                bg-zinc-700/40 border border-zinc-600/40 text-zinc-300
-                hover:bg-zinc-700/60 disabled:opacity-30 disabled:cursor-not-allowed"
+                bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-50
+                disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {unwrapping ? (
                 <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
@@ -591,7 +591,7 @@ export const TanamView = () => {
             </button>
           </div>
 
-          <p className="text-[10px] text-zinc-500 text-center">
+          <p className="text-[10px] text-emerald-700 text-center">
             After unwrapping, ETH can be withdrawn from the Vault tab
           </p>
         </div>
