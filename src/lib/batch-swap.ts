@@ -60,21 +60,24 @@ async function fetchRoute(
   chainId: number
 ): Promise<SwapCandidate["route"] | null> {
 
+  console.log(`[fetchRoute] token=${token} balance=${balance} vault=${vault}`);
+
   // 1. 0x (dengan LI.FI fallback di backend)
+  // ⚠️ Tidak pakai buyTokenPercentageFee — bisa corrupt buyAmount & trigger revert
+  // Fee 5% platform hanya untuk display di UI, tidak di-embed ke DEX calldata
   try {
     const params = new URLSearchParams({
-      chainId:               String(chainId),
-      sellToken:             token,
-      buyToken:              WETH,
-      sellAmount:            balance.toString(),
-      taker:                 vault,
-      feeRecipient:          FEE_RECIPIENT,
-      buyTokenPercentageFee: FEE_PERCENT_STR,
-      slippagePercentage:    "0.15",
+      chainId:            String(chainId),
+      sellToken:          token,
+      buyToken:           WETH,
+      sellAmount:         balance.toString(),
+      taker:              vault,
+      slippagePercentage: "0.5",  // 50% sementara untuk debug; turunkan ke 0.15 setelah ok
     });
     const res = await fetch(`/api/0x/quote?${params}`);
     if (res.ok) {
       const q = await res.json();
+      console.log(`[fetchRoute] 0x resp:`, { error: q?.error, to: q?.transaction?.to, buyAmount: q?.buyAmount, approvalAddress: q?.transaction?.approvalAddress });
       if (q?.transaction?.data && q?.transaction?.to && !q?.error) {
         const gross = BigInt(q.buyAmount || q.estimate?.toAmount || "0");
         if (gross > 0n) {
@@ -88,8 +91,13 @@ async function fetchRoute(
           };
         }
       }
+    } else {
+      const errText = await res.text().catch(() => "");
+      console.warn(`[fetchRoute] 0x HTTP ${res.status}:`, errText.slice(0, 200));
     }
-  } catch {}
+  } catch (e) {
+    console.warn(`[fetchRoute] 0x exception:`, e);
+  }
 
   // 2. KyberSwap fallback
   try {
@@ -266,6 +274,15 @@ export async function executeBatchSwap({
   if (skippedAtExecute.length > 0) {
     console.warn("[BatchSwap] skipped at execute:", skippedAtExecute);
   }
+
+  // Debug: log sebelum kirim
+  console.log("[BatchSwap] execute calls:", calls.map((c, i) => ({
+    index: i,
+    to:    c.to,
+    value: c.value.toString(),
+    dataLen: c.data.length,
+    type:  i % 2 === 0 ? "approve" : "swap",
+  })));
 
   // 1 tx — semua approve+swap atomic
   const txHash  = await client.sendUserOperation({ calls });
