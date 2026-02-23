@@ -14,8 +14,6 @@ import { encodeFunctionData, erc20Abi, maxUint256, type Address } from "viem";
 import { getSmartAccountClient } from "~/lib/smart-account";
 
 const WETH             = "0x4200000000000000000000000000000000000006" as Address;
-const FEE_RECIPIENT    = "0x4fba95e4772be6d37a0c931D00570Fe2c9675524";
-const FEE_PERCENT_STR  = "0.05";
 const PLATFORM_FEE_BPS = 500n;
 const BPS_DENOM        = 10_000n;
 
@@ -51,8 +49,9 @@ export interface SimulationResult {
   };
 }
 
-// ── Fetch 1 route ─────────────────────────────────────────────────────────────
-// vault = address yang akan execute → wajib jadi taker/sender di semua aggregator
+// ── Fetch 1 route via LI.FI ──────────────────────────────────────────────────
+// LI.FI adalah meta-aggregator: cover 0x, KyberSwap, Uniswap, dll sekaligus
+// vault = taker → LI.FI susun calldata untuk vault yang execute
 async function fetchRoute(
   token:   Address,
   balance: bigint,
@@ -60,86 +59,57 @@ async function fetchRoute(
   chainId: number
 ): Promise<SwapCandidate["route"] | null> {
 
-  console.log(`[fetchRoute] token=${token} balance=${balance} vault=${vault}`);
+  console.log(`[fetchRoute] LI.FI token=${token.slice(0,8)} balance=${balance} vault=${vault.slice(0,8)}`);
 
-  // 1. 0x (dengan LI.FI fallback di backend)
-  // ⚠️ Tidak pakai buyTokenPercentageFee — bisa corrupt buyAmount & trigger revert
-  // Fee 5% platform hanya untuk display di UI, tidak di-embed ke DEX calldata
   try {
     const params = new URLSearchParams({
-      chainId:            String(chainId),
-      sellToken:          token,
-      buyToken:           WETH,
-      sellAmount:         balance.toString(),
-      taker:              vault,
-      slippagePercentage: "0.5",  // 50% sementara untuk debug; turunkan ke 0.15 setelah ok
+      chainId:    String(chainId),
+      sellToken:  token,
+      buyToken:   WETH,
+      sellAmount: balance.toString(),
+      taker:      vault,
+      slippage:   "0.005",  // 0.5%
     });
-    const res = await fetch(`/api/0x/quote?${params}`);
-    if (res.ok) {
-      const q = await res.json();
-      console.log(`[fetchRoute] 0x resp:`, { error: q?.error, to: q?.transaction?.to, buyAmount: q?.buyAmount, approvalAddress: q?.transaction?.approvalAddress });
-      if (q?.transaction?.data && q?.transaction?.to && !q?.error) {
-        const gross = BigInt(q.buyAmount || q.estimate?.toAmount || "0");
-        if (gross > 0n) {
-          return {
-            to:              q.transaction.to as Address,
-            data:            q.transaction.data as `0x${string}`,
-            value:           BigInt(q.transaction.value || "0"),
-            approvalSpender: (q.transaction.approvalAddress || q.transaction.to) as Address,
-            agg:             q._source === "lifi" ? "LI.FI" : "0x",
-            grossWethOut:    gross,
-          };
-        }
-      }
-    } else {
-      const errText = await res.text().catch(() => "");
-      console.warn(`[fetchRoute] 0x HTTP ${res.status}:`, errText.slice(0, 200));
+
+    const res = await fetch(`/api/quote?${params}`);
+    if (!res.ok) {
+      console.warn(`[fetchRoute] API HTTP ${res.status}`);
+      return null;
     }
-  } catch (e) {
-    console.warn(`[fetchRoute] 0x exception:`, e);
-  }
 
-  // 2. KyberSwap fallback
-  try {
-    const rRes = await fetch(
-      `https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${token}&tokenOut=${WETH}&amountIn=${balance.toString()}`,
-      { headers: { Accept: "application/json", "x-client-id": "nyawit" } }
-    );
-    if (!rRes.ok) return null;
-    const rd = await rRes.json();
-    if (!rd?.data?.routeSummary) return null;
+    const q = await res.json();
 
-    const bRes = await fetch(
-      "https://aggregator-api.kyberswap.com/base/api/v1/route/build",
-      {
-        method:  "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json", "x-client-id": "nyawit" },
-        body:    JSON.stringify({
-          routeSummary:      rd.data.routeSummary,
-          sender:            vault,
-          recipient:         vault,
-          slippageTolerance: 1500,
-        }),
-      }
-    );
-    if (!bRes.ok) return null;
-    const bd = await bRes.json();
-    if (!bd?.data?.data) return null;
+    if (q?.error) {
+      console.warn(`[fetchRoute] LI.FI error: ${q.error}`);
+      return null;
+    }
 
-    const gross = BigInt(rd.data.routeSummary.amountOut || "0");
-    if (gross === 0n) return null;
+    if (!q?.transaction?.data || !q?.transaction?.to) {
+      console.warn(`[fetchRoute] LI.FI no tx data`);
+      return null;
+    }
+
+    const gross = BigInt(q.buyAmount || "0");
+    if (gross === 0n) {
+      console.warn(`[fetchRoute] LI.FI buyAmount=0`);
+      return null;
+    }
+
+    console.log(`[fetchRoute] LI.FI ok tool=${q._tool} gross=${gross} spender=${q.transaction.approvalAddress?.slice(0,10)}`);
 
     return {
-      to:              bd.data.routerAddress as Address,
-      data:            bd.data.data as `0x${string}`,
-      value:           0n,
-      approvalSpender: bd.data.routerAddress as Address,
-      agg:             "KyberSwap",
+      to:              q.transaction.to as Address,
+      data:            q.transaction.data as `0x${string}`,
+      value:           BigInt(q.transaction.value || "0"),
+      approvalSpender: (q.transaction.approvalAddress || q.transaction.to) as Address,
+      agg:             q._tool ? `LI.FI/${q._tool}` : "LI.FI",
       grossWethOut:    gross,
     };
-  } catch {}
 
-  return null;
+  } catch (e: any) {
+    console.error(`[fetchRoute] exception:`, e?.message || e);
+    return null;
+  }
 }
 
 // ── SIMULATE ──────────────────────────────────────────────────────────────────
