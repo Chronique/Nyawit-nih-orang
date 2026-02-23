@@ -51,14 +51,12 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const [vaultAddress, setVaultAddress]               = useState<string | null>(null);
   const [ethBalance, setEthBalance]                   = useState("0");
   const [usdcBalance, setUsdcBalance]                 = useState<any>(null);
-  const [tokens, setTokens]                           = useState<any[]>([]);
   const [ownerTokens, setOwnerTokens]                 = useState<MoralisToken[]>([]);
   const [isDeployed, setIsDeployed]                   = useState(false);
   const [loading, setLoading]                         = useState(false);
   const [loadingOwnerTokens, setLoadingOwnerTokens]   = useState(false);
   const [actionLoading, setActionLoading]             = useState<string | null>(null);
   const [toast, setToast]                             = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const [currentPage, setCurrentPage]                 = useState(1);
   const [currentOwnerPage, setCurrentOwnerPage]       = useState(1);
   const [showEthWithdraw, setShowEthWithdraw]         = useState(false);
   const [ethWithdrawAmount, setEthWithdrawAmount]     = useState("");
@@ -90,13 +88,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           formattedBal:    formatUnits(BigInt(t.balance), t.decimals || 18),
         }));
 
-      const usdc   = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
-      const others = formatted.filter((t: any) => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase());
-      others.sort((a: any, b: any) => parseFloat(b.formattedBal) - parseFloat(a.formattedBal));
-
+      const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       setUsdcBalance(usdc || null);
-      setTokens(others);
-      setCurrentPage(1);
     } catch (e) {
       console.error(e);
     } finally {
@@ -145,8 +138,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
-      const client  = await getSmartAccountClient(walletClient);
-      const txHash  = await client.sendUserOperation({
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
       setToast({ msg: "ETH withdrawal sent!", type: "success" });
@@ -174,8 +167,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         abi: erc20Abi, functionName: "transfer",
         args: [ownerAddress as Address, rawAmount],
       });
-      const client  = await getSmartAccountClient(walletClient);
-      const txHash  = await client.sendUserOperation({
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
       setToast({ msg: "Withdrawal processed!", type: "success" });
@@ -188,7 +181,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Single deposit — EOA sign langsung, tidak perlu Smart Account
+  // Single deposit — EOA signs directly, no Smart Account needed
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     if (!window.confirm(`Deposit ${token.symbol} to vault?`)) return;
@@ -196,14 +189,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
       await writeContractAsync({
-        address:  token.token_address as Address,
-        abi:      erc20Abi,
+        address:      token.token_address as Address,
+        abi:          erc20Abi,
         functionName: "transfer",
-        args:     [vaultAddress as Address, BigInt(token.balance)],
-        chainId:  base.id,
+        args:         [vaultAddress as Address, BigInt(token.balance)],
+        chainId:      base.id,
       });
       setToast({ msg: "Deposit sent! Updating balances...", type: "success" });
-      // Tunggu konfirmasi sebelum refresh
       await new Promise((r) => setTimeout(r, 8000));
       await Promise.all([fetchVaultData(), fetchOwnerData()]);
     } catch (e: any) {
@@ -213,8 +205,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Batch deposit — EOA harus sign satu per satu, tidak bisa atomic
-  // User akan diminta sign sebanyak jumlah token yang dipilih
+  // Batch deposit — user signs one tx per token
   const handleBatchDeposit = async () => {
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
     if (tokensToDeposit.length === 0) return;
@@ -240,7 +231,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             chainId:      base.id,
           });
 
-          // Hapus dari seleksi jika berhasil
           const newSet = new Set(selectedOwnerTokens);
           newSet.delete(token.token_address);
           setSelectedOwnerTokens(newSet);
@@ -248,17 +238,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
 
           setToast({ msg: `${token.symbol} deposited! (${successCount}/${tokensToDeposit.length})`, type: "success" });
 
-          // ✅ Perbaikan: delay 5s antar token — beri waktu tx konfirmasi
-          // tanpa ini Moralis belum update saat refresh → tampil balance salah
           if (successCount < tokensToDeposit.length) {
             await new Promise((r) => setTimeout(r, 5000));
           }
         } catch (err: any) {
           console.error(`Failed to deposit ${token.symbol}:`, err);
           setToast({ msg: `Failed to deposit ${token.symbol}`, type: "error" });
-          // Stop kalau user reject wallet popup
           if (err.code === 4001 || err.message?.includes("rejected")) break;
-          // Kalau error lain (network, gas), coba lanjut ke token berikutnya
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -290,9 +276,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  const currentTokens      = tokens.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
   const currentOwnerTokens = ownerTokens.slice((currentOwnerPage - 1) * ITEMS_PER_PAGE, currentOwnerPage * ITEMS_PER_PAGE);
-  const totalPages         = Math.ceil(tokens.length / ITEMS_PER_PAGE);
   const totalOwnerPages    = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
 
   return (
@@ -339,7 +323,10 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                   <div className="text-lg font-bold">{parseFloat(ethBalance).toFixed(5)}</div>
                 </div>
               </div>
-              <button onClick={() => setShowEthWithdraw(!showEthWithdraw)} className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-medium border border-zinc-600">
+              <button
+                onClick={() => setShowEthWithdraw(!showEthWithdraw)}
+                className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-medium border border-zinc-600"
+              >
                 {showEthWithdraw ? "Cancel" : "Withdraw"}
               </button>
             </div>
@@ -351,7 +338,11 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                     value={ethWithdrawAmount} onChange={(e) => setEthWithdrawAmount(e.target.value)}
                     className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
                   />
-                  <button onClick={handleWithdrawETH} disabled={!ethWithdrawAmount} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1">
+                  <button
+                    onClick={handleWithdrawETH}
+                    disabled={!ethWithdrawAmount}
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1"
+                  >
                     <Upload className="w-3 h-3" /> Send
                   </button>
                 </div>
@@ -376,68 +367,16 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               </div>
             </div>
             {usdcBalance && parseFloat(usdcBalance.formattedBal) > 0 && (
-              <button onClick={() => handleWithdrawToken(usdcBalance)} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold">
+              <button
+                onClick={() => handleWithdrawToken(usdcBalance)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold"
+              >
                 Withdraw
               </button>
             )}
           </div>
         </div>
       </div>
-
-      {/* VAULT TOKEN LIST */}
-      {tokens.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between px-1 mb-2">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <Flash className="w-5 h-5 text-yellow-500" /> Vault Tokens
-            </h3>
-            <button onClick={fetchVaultData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg">
-              <Refresh className="w-4 h-4 text-zinc-500" />
-            </button>
-          </div>
-          <div className="space-y-2">
-            {currentTokens.map((token, i) => (
-              <div key={i} className="flex items-center justify-between p-3 bg-white dark:bg-zinc-900 border border-zinc-100 dark:border-zinc-800 rounded-xl">
-                <div className="flex items-center gap-3 overflow-hidden">
-                  <div className="w-10 h-10 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 overflow-hidden">
-                    <TokenLogo token={token} />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-sm">{token.symbol}</div>
-                    <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {onGoToSwap && (
-                    <button
-                      onClick={() => onGoToSwap(token)}
-                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-yellow-50 text-yellow-600 hover:bg-yellow-100 dark:bg-yellow-900/20 dark:text-yellow-400 flex items-center gap-1"
-                    >
-                      <Flash className="w-3 h-3" /> Swap
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleWithdrawToken(token)}
-                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400"
-                  >
-                    WD
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          {totalPages > 1 && (
-            <div className="flex justify-center items-center gap-1 mt-3">
-              <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
-              {generatePagination(currentPage, totalPages).map((page, i) =>
-                page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> :
-                <button key={i} onClick={() => setCurrentPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
-              )}
-              <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* WALLET ASSETS */}
       <div>
@@ -455,7 +394,10 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               </button>
             )}
           </div>
-          <button onClick={fetchOwnerData} className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500">
+          <button
+            onClick={fetchOwnerData}
+            className="p-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg hover:rotate-180 transition-all duration-500"
+          >
             <Refresh className="w-4 h-4 text-zinc-500" />
           </button>
         </div>
@@ -464,7 +406,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           {loadingOwnerTokens ? (
             <div className="text-center py-6 animate-pulse text-zinc-400 text-sm">Scanning wallet...</div>
           ) : ownerTokens.length === 0 ? (
-            <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">No tokens in wallet.</div>
+            <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">
+              No tokens in wallet.
+            </div>
           ) : (
             currentOwnerTokens.map((token, i) => {
               const isSelected = selectedOwnerTokens.has(token.token_address);
@@ -479,7 +423,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                   }`}
                 >
                   <div className="flex items-center gap-3 overflow-hidden">
-                    <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${isSelected ? "bg-blue-600 border-blue-600" : "border-zinc-300"}`}>
+                    <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                      isSelected ? "bg-blue-600 border-blue-600" : "border-zinc-300"
+                    }`}>
                       {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={4} />}
                     </div>
                     <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center shrink-0 overflow-hidden">
@@ -487,7 +433,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                     </div>
                     <div>
                       <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
-                      <div className="text-xs text-zinc-500">{parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}</div>
+                      <div className="text-xs text-zinc-500">
+                        {parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}
+                      </div>
                     </div>
                   </div>
                   {vaultAddress && !isSelected && (

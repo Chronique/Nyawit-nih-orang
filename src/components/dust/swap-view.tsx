@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient } from "~/lib/smart-account";
-// ✅ publicClient & WETH_ABI dihapus — unwrap dipindah ke tab Panen
+// ✅ publicClient & WETH_ABI removed — unwrap moved to Harvest tab
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
@@ -16,7 +16,7 @@ import { SimpleToast } from "~/components/ui/simple-toast";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
 
-// ✅ Max 5 token per batch — sesuai limit di batch-swap.ts
+// ✅ Max 5 tokens per batch — matches limit in batch-swap.ts
 const MAX_BATCH_TOKENS = 5;
 
 interface TokenData {
@@ -145,9 +145,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (s.has(addr)) {
       s.delete(addr);
     } else {
-      // ✅ Tolak jika sudah 5 token terpilih
+      // ✅ Reject if 5 tokens already selected
       if (s.size >= MAX_BATCH_TOKENS) {
-        setToast({ msg: `Maksimal ${MAX_BATCH_TOKENS} token per batch.`, type: "error" });
+        setToast({ msg: `Maximum ${MAX_BATCH_TOKENS} tokens per batch.`, type: "error" });
         return;
       }
       s.add(addr);
@@ -161,7 +161,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (selectedTokens.size === tokens.length) {
       setSelectedTokens(new Set());
     } else {
-      // ✅ Select All max 5 token
+      // ✅ Select All max 5 tokens
       setSelectedTokens(new Set(tokens.slice(0, MAX_BATCH_TOKENS).map(t => t.contractAddress)));
     }
     setSimulation(null);
@@ -209,7 +209,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         }));
 
       if (tokensToSwap.length === 0) {
-        setToast({ msg: "Tidak ada token yang bisa di-swap (WETH dikecualikan).", type: "error" });
+        setToast({ msg: "No swappable tokens selected (WETH excluded).", type: "error" });
         return;
       }
 
@@ -226,7 +226,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── EXECUTE: swap token → WETH (unwrap ke ETH di tab Panen) ──────────────
+  // ── EXECUTE: swap tokens → WETH (unwrap to ETH in Harvest tab) ───────────
   const handleExecute = async () => {
     if (!walletClient || !simulation || simulation.processable.length === 0) return;
     setExecuting(true);
@@ -243,8 +243,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         balance: c.balance,
       }));
 
-      // ✅ Swap selesai → WETH ada di vault
-      // Unwrap WETH → ETH dilakukan di tab Panen (fitur terpisah)
+      // ✅ Swap complete → WETH sits in vault
+      // Unwrap WETH → ETH is handled in the Harvest tab (separate feature)
       const execResult = await executeBatchSwap({
         walletClient,
         chainId: chainId ?? 8453,
@@ -254,7 +254,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
       const skippedCount = simulation.skipped.length;
       setToast({
-        msg:  `✓ ${simulation.processable.length} SWapped → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Open Tanam tab to unwrap to ETH.`,
+        msg:  `✓ ${simulation.processable.length} token${simulation.processable.length > 1 ? "s" : ""} swapped → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Open Harvest tab to unwrap to ETH.`,
         type: "success",
       });
 
@@ -282,7 +282,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     <div className="pb-36 space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
 
-      {/* Banner incoming */}
+      {/* Incoming token banner */}
       {incomingToken && (
         <div className="flex items-center gap-3 p-3 rounded-xl bg-orange-500/10 border border-orange-500/30 animate-in slide-in-from-top-2 duration-300">
           <Flash className="w-4 h-4 text-orange-400 shrink-0" />
@@ -302,9 +302,8 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
-          {/* ✅ Update: token → WETH saja, unwrap di Panen */}
-          <p className="text-xs text-green-200 mt-1">Token → WETH (unwrap ke ETH di Panen)</p>
-          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · LI.FI · max {MAX_BATCH_TOKENS} token · 1 tx</p>
+          <p className="text-xs text-green-200 mt-1">Token → WETH (unwrap to ETH in Harvest tab)</p>
+          <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · LI.FI · max {MAX_BATCH_TOKENS} tokens · 1 tx</p>
         </div>
         <div className="bg-black/30 p-2 rounded-lg border border-white/20 min-w-[80px]">
           <div className="text-[10px] text-white/70 uppercase font-bold text-center">Selected</div>
@@ -332,7 +331,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               </div>
             </div>
             <div className="bg-green-900/30 border border-green-700/40 rounded-xl p-3">
-              {/* ✅ Label "Est. WETH Out" — bukan ETH */}
               <div className="text-[10px] text-green-500 mb-0.5">Est. WETH Out</div>
               <div className="text-base font-bold text-green-300 font-mono">
                 {parseFloat(formatEther(simulation.totalNetWeth)).toFixed(6)} WETH
@@ -391,14 +389,13 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
               {executing ? (
                 <><Refresh className="w-4 h-4 animate-spin" /><span className="text-sm">{execProgress}</span></>
               ) : (
-                <><Flash className="w-4 h-4" />Swap {simulation.processable.length} Token → WETH · 1 tx</>
+                <><Flash className="w-4 h-4" />Swap {simulation.processable.length} Token{simulation.processable.length > 1 ? "s" : ""} → WETH · 1 tx</>
               )}
             </button>
           )}
 
-          {/* ✅ Info: unwrap di Panen */}
           <p className="text-[10px] text-zinc-500 text-center">
-            WETH yang diterima bisa di-unwrap ke ETH di tab Panen
+            Received WETH can be unwrapped to ETH in the Harvest tab
           </p>
         </div>
       )}
@@ -408,7 +405,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         <div className="text-sm font-bold text-zinc-500">
           Available Dust ({tokens.length})
           {selectedTokens.size > 0 && (
-            <span className="ml-2 text-blue-400">{selectedTokens.size}/{MAX_BATCH_TOKENS} dipilih</span>
+            <span className="ml-2 text-blue-400">{selectedTokens.size}/{MAX_BATCH_TOKENS} selected</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -438,7 +435,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             const simItem    = simulation?.candidates.find(c => c.token.toLowerCase() === token.contractAddress.toLowerCase());
             const simSkip    = simItem?.status === "skip";
             const simOk      = simItem?.status === "ok";
-            // ✅ Disable jika sudah 5 dan token ini belum dipilih
+            // ✅ Disable if already 5 selected and this token is not yet selected
             const isDisabled = !isSelected && selectedTokens.size >= MAX_BATCH_TOKENS;
 
             return (
@@ -567,7 +564,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             )}
           </button>
           <div className="text-center text-[10px] text-zinc-400 mt-2">
-            Estimasi WETH & fee · max {MAX_BATCH_TOKENS} token · 1 konfirmasi
+            Estimate WETH & fee · max {MAX_BATCH_TOKENS} tokens · 1 confirmation
           </div>
         </div>
       )}

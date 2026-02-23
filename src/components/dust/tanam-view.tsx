@@ -4,26 +4,42 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { detectVaultAddress } from "~/lib/smart-account";
-import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { formatUnits, encodeFunctionData, erc20Abi, type Address, parseEther } from "viem";
 import { base } from "viem/chains";
-import { Sprout, RefreshCw, ArrowRight, TrendingUp, Wallet, Zap } from "lucide-react";
+import { Sprout, RefreshCw, ArrowRight, TrendingUp, Wallet, Zap, ArrowUpDown } from "lucide-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+const WETH_ADDRESS = "0x4200000000000000000000000000000000000006" as Address;
 const ETH_NATIVE   = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 const LIFI_API_URL = "https://li.quest/v1";
 const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 
+// ── WETH ABI ──────────────────────────────────────────────────────────────────
+const WETH_ABI = [
+  {
+    name: "deposit", type: "function", stateMutability: "payable",
+    inputs: [], outputs: [],
+  },
+  {
+    name: "withdraw", type: "function", stateMutability: "nonpayable",
+    inputs: [{ name: "wad", type: "uint256" }], outputs: [],
+  },
+  {
+    name: "balanceOf", type: "function", stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }], outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
 // ── Morpho MetaMorpho Vaults on Base ──────────────────────────────────────────
-// Verified addresses from https://app.morpho.org/base
 const MORPHO_VAULTS = [
   {
     id:           "gauntlet-usdc",
     name:         "Gauntlet USDC Core",
     asset:        "USDC",
     assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address,
-    vaultAddress: "0xc0c5689e6f4D256E861F65465b691aeEcC0dEb12" as Address, // Gauntlet USDC Core Base ✓
+    vaultAddress: "0xc0c5689e6f4D256E861F65465b691aeEcC0dEb12" as Address,
     decimals:     6,
     color:        "blue",
     description:  "USDC lending via Morpho Blue. Curated by Gauntlet.",
@@ -34,7 +50,7 @@ const MORPHO_VAULTS = [
     name:         "Gauntlet WETH Core",
     asset:        "WETH",
     assetAddress: "0x4200000000000000000000000000000000000006" as Address,
-    vaultAddress: "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844" as Address, // Gauntlet WETH Core Base ✓
+    vaultAddress: "0x6b13c060F13Af1fdB319F52315BbbF3fb1D88844" as Address,
     decimals:     18,
     color:        "indigo",
     description:  "WETH lending via Morpho Blue. Curated by Gauntlet.",
@@ -42,7 +58,6 @@ const MORPHO_VAULTS = [
   },
 ] as const;
 
-// ERC4626 ABI — deposit, redeem, balanceOf, convertToAssets
 const ERC4626_ABI = [
   {
     name: "deposit", type: "function", stateMutability: "nonpayable",
@@ -88,10 +103,6 @@ const colorMap = {
   indigo: { bg: "bg-indigo-50 dark:bg-indigo-900/20", border: "border-indigo-200 dark:border-indigo-800", text: "text-indigo-600 dark:text-indigo-300", badge: "bg-indigo-100 dark:bg-indigo-800 text-indigo-700 dark:text-indigo-200" },
 };
 
-// ── LI.FI quote helper: ETH → ERC20 ──────────────────────────────────────────
-// ETH is native so no approval needed — just send value with the swap tx.
-// Two separate UserOps are required (swap confirm → then deposit) because
-// bundler can't simulate the deposit before the swap output lands in vault.
 async function getLifiEthQuote(
   ethAmount: string,
   toToken:   string,
@@ -107,7 +118,7 @@ async function getLifiEthQuote(
     fromAddress,
     toAddress:     fromAddress,
     slippage:      "0.03",
-    denyExchanges: "paraswap", // permit2 not supported in vault
+    denyExchanges: "paraswap",
   });
   const headers: Record<string, string> = { Accept: "application/json" };
   if (LIFI_API_KEY) headers["x-lifi-api-key"] = LIFI_API_KEY;
@@ -116,11 +127,9 @@ async function getLifiEthQuote(
   if (!res.ok) throw new Error(`LI.FI ${res.status}: ${(await res.text()).slice(0, 120)}`);
   const data = await res.json();
 
-  // Reject permit2
   if ((data?.estimate?.approvalAddress || "").toLowerCase() === "0x000000000022d473030f116ddee9f6b43ac78ba3") {
     throw new Error("LI.FI: permit2 route not supported in vault");
   }
-
   return data as LifiQuote;
 }
 
@@ -134,11 +143,15 @@ export const TanamView = () => {
   const [apyData, setApyData]             = useState<VaultApy[]>([]);
   const [vaultBalances, setVaultBalances] = useState<Record<string, string>>({});
   const [ethBalance, setEthBalance]       = useState<bigint>(0n);
+  const [wethBalance, setWethBalance]     = useState<bigint>(0n);
   const [loading, setLoading]             = useState(false);
   const [depositing, setDepositing]       = useState<string | null>(null);
   const [withdrawing, setWithdrawing]     = useState<string | null>(null);
   const [swapping, setSwapping]           = useState<string | null>(null);
   const [swapProgress, setSwapProgress]   = useState("");
+  const [wrapping, setWrapping]           = useState(false);
+  const [unwrapping, setUnwrapping]       = useState(false);
+  const [wethAction, setWethAction]       = useState("");
   const [toast, setToast]                 = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   useEffect(() => {
@@ -177,7 +190,7 @@ export const TanamView = () => {
     if (!vaultAddress) return;
     setLoading(true);
     try {
-      const [posResults, tokenData, ethBal] = await Promise.all([
+      const [posResults, tokenData, ethBal, wethBal] = await Promise.all([
         Promise.all(MORPHO_VAULTS.map(async vault => {
           try {
             const shares = await publicClient.readContract({
@@ -195,10 +208,15 @@ export const TanamView = () => {
         })),
         fetchMoralisTokens(vaultAddress),
         publicClient.getBalance({ address: vaultAddress }),
+        // Read WETH balance directly from contract
+        publicClient.readContract({
+          address: WETH_ADDRESS, abi: WETH_ABI, functionName: "balanceOf", args: [vaultAddress],
+        }).catch(() => 0n),
       ]);
 
       setPositions(posResults);
       setEthBalance(ethBal);
+      setWethBalance(wethBal as bigint);
 
       const balMap: Record<string, string> = {};
       for (const vault of MORPHO_VAULTS) {
@@ -218,16 +236,89 @@ export const TanamView = () => {
     fetchApyData();
   }, [fetchPositions, fetchApyData]);
 
+  // ── Wrap ETH → WETH ───────────────────────────────────────────────────────
+  // WETH.deposit() — send ETH value, receive WETH 1:1, no slippage
+  const handleWrap = async () => {
+    if (!walletClient || !vaultAddress || ethBalance === 0n) return;
+
+    // Keep small ETH reserve for gas (0.0005 ETH = 500000000000000 wei)
+    const GAS_RESERVE = 500000000000000n;
+    const wrapAmount = ethBalance > GAS_RESERVE ? ethBalance - GAS_RESERVE : 0n;
+    if (wrapAmount === 0n) {
+      setToast({ msg: "Not enough ETH to wrap (keeping reserve for gas).", type: "error" });
+      return;
+    }
+
+    const display = parseFloat(formatUnits(wrapAmount, 18)).toFixed(6);
+    if (!window.confirm(`Wrap ${display} ETH → WETH?\n(0.0005 ETH kept as gas reserve)`)) return;
+
+    setWrapping(true);
+    setWethAction(`Wrapping ${display} ETH → WETH...`);
+    try {
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
+      const client = await getSmartAccountClient(walletClient);
+
+      // Call WETH.deposit() with ETH value
+      const wrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "deposit", args: [] });
+      const txHash = await client.sendUserOperation({
+        calls: [{ to: WETH_ADDRESS, value: wrapAmount, data: wrapData }],
+      });
+      await client.waitForUserOperationReceipt({ hash: txHash });
+
+      setToast({ msg: `✓ Wrapped ${display} ETH → WETH!`, type: "success" });
+      await new Promise(r => setTimeout(r, 2000));
+      await fetchPositions();
+    } catch (e: any) {
+      const msg = e?.shortMessage || e?.message || "Unknown";
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Wrap failed: " + msg,
+        type: "error",
+      });
+    } finally {
+      setWrapping(false);
+      setWethAction("");
+    }
+  };
+
+  // ── Unwrap WETH → ETH ─────────────────────────────────────────────────────
+  // WETH.withdraw(amount) — burn WETH, receive ETH 1:1
+  const handleUnwrap = async () => {
+    if (!walletClient || !vaultAddress || wethBalance === 0n) return;
+
+    const display = parseFloat(formatUnits(wethBalance, 18)).toFixed(6);
+    if (!window.confirm(`Unwrap ${display} WETH → ETH?\n\nETH will be in your Smart Vault (gas reserve).`)) return;
+
+    setUnwrapping(true);
+    setWethAction(`Unwrapping ${display} WETH → ETH...`);
+    try {
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
+      const client = await getSmartAccountClient(walletClient);
+
+      const unwrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBalance] });
+      const txHash = await client.sendUserOperation({
+        calls: [{ to: WETH_ADDRESS, value: 0n, data: unwrapData }],
+      });
+      await client.waitForUserOperationReceipt({ hash: txHash });
+
+      setToast({ msg: `✓ Unwrapped ${display} WETH → ETH!`, type: "success" });
+      await new Promise(r => setTimeout(r, 2000));
+      await fetchPositions();
+    } catch (e: any) {
+      const msg = e?.shortMessage || e?.message || "Unknown";
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Unwrap failed: " + msg,
+        type: "error",
+      });
+    } finally {
+      setUnwrapping(false);
+      setWethAction("");
+    }
+  };
+
   // ── Swap ETH → asset via LI.FI, then deposit ─────────────────────────────
-  // Step 1: LI.FI quote ETH → asset (no approval needed for native ETH)
-  // Step 2: Execute swap → confirm on-chain
-  // Step 3: Re-read balance to get actual received amount
-  // Step 4: Approve + deposit (separate UserOp, must come after swap confirm)
   const handleSwapAndDeposit = async (vault: typeof MORPHO_VAULTS[number]) => {
     if (!walletClient || !vaultAddress || !chainId) return;
-
-    // Owner pays gas via ERC-4337 — swap the full ETH balance
-    const swapAmount  = ethBalance;
+    const swapAmount = ethBalance;
     if (swapAmount === 0n) {
       setToast({ msg: "No ETH in vault to swap.", type: "error" });
       return;
@@ -242,12 +333,10 @@ export const TanamView = () => {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
 
-      // Step 1: Quote
       const quote = await getLifiEthQuote(swapAmount.toString(), vault.assetAddress, vaultAddress, chainId);
       const expectedOut = parseFloat(formatUnits(BigInt(quote.estimate.toAmount || "0"), vault.decimals)).toFixed(4);
       console.log(`[Tanam] ETH→${vault.asset} quote: ${ethDisplay} ETH → ~${expectedOut} ${vault.asset}`);
 
-      // Step 2: Swap
       setSwapProgress(`Swapping ETH → ${vault.asset}...`);
       const swapTx = await client.sendUserOperation({
         calls: [{
@@ -257,13 +346,11 @@ export const TanamView = () => {
         }],
       });
       await client.waitForUserOperationReceipt({ hash: swapTx });
-      console.log(`[Tanam] Swap ETH→${vault.asset} confirmed ✓`);
 
-      // Step 3: Read actual received balance
       setSwapProgress("Reading received balance...");
-      const tokenData   = await fetchMoralisTokens(vaultAddress);
-      const received    = tokenData.find(t => t.token_address.toLowerCase() === vault.assetAddress.toLowerCase());
-      const depositAmt  = BigInt(received?.balance || "0");
+      const tokenData  = await fetchMoralisTokens(vaultAddress);
+      const received   = tokenData.find(t => t.token_address.toLowerCase() === vault.assetAddress.toLowerCase());
+      const depositAmt = BigInt(received?.balance || "0");
 
       if (depositAmt === 0n) {
         setToast({ msg: `Swap done but no ${vault.asset} found — deposit manually.`, type: "error" });
@@ -273,22 +360,15 @@ export const TanamView = () => {
 
       const depositDisplay = parseFloat(formatUnits(depositAmt, vault.decimals)).toFixed(4);
 
-      // Phase 1: Approve — confirm first so bundler can simulate deposit
       setSwapProgress(`Approving ${vault.asset} for Morpho...`);
-      const approveData = encodeFunctionData({
-        abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, depositAmt],
-      });
+      const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, depositAmt] });
       const approveTx = await client.sendUserOperation({
         calls: [{ to: vault.assetAddress, value: 0n, data: approveData }],
       });
       await client.waitForUserOperationReceipt({ hash: approveTx });
-      console.log(`[Tanam] Approve ${vault.asset} for Morpho confirmed ✓`);
 
-      // Phase 2: Deposit — allowance exists on-chain now
       setSwapProgress(`Depositing ${depositDisplay} ${vault.asset}...`);
-      const depositData = encodeFunctionData({
-        abi: ERC4626_ABI, functionName: "deposit", args: [depositAmt, vaultAddress],
-      });
+      const depositData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "deposit", args: [depositAmt, vaultAddress] });
       const depositTx = await client.sendUserOperation({
         calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }],
       });
@@ -300,7 +380,7 @@ export const TanamView = () => {
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg,
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg,
         type: "error",
       });
     } finally {
@@ -327,16 +407,13 @@ export const TanamView = () => {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
 
-      // Phase 1: Approve — must confirm before deposit so bundler can simulate allowance
       const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, amount] });
       setToast({ msg: `Approving ${vault.asset}...`, type: "success" });
       const approveTx = await client.sendUserOperation({
         calls: [{ to: vault.assetAddress, value: 0n, data: approveData }],
       });
       await client.waitForUserOperationReceipt({ hash: approveTx });
-      console.log(`[Tanam] Approve ${vault.asset} confirmed ✓`);
 
-      // Phase 2: Deposit — allowance now exists on-chain, simulation succeeds
       const depositData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "deposit", args: [amount, vaultAddress] });
       setToast({ msg: `Depositing ${display} ${vault.asset}...`, type: "success" });
       const depositTx = await client.sendUserOperation({
@@ -350,7 +427,7 @@ export const TanamView = () => {
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg,
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg,
         type: "error",
       });
     } finally {
@@ -390,7 +467,7 @@ export const TanamView = () => {
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg,
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg,
         type: "error",
       });
     } finally {
@@ -402,9 +479,11 @@ export const TanamView = () => {
   const getPosition = (id: string) => positions.find(p => p.vaultId === id);
   const isBusy      = (id: string) => depositing === id || withdrawing === id || swapping === id;
 
-  // Show ETH banner if vault has more than dust ETH (> 0.0001 ETH = 100000000000000 wei)
-  const hasEth     = ethBalance > 100000000000000n;
-  const ethDisplay = parseFloat(formatUnits(ethBalance, 18)).toFixed(6);
+  const hasEth      = ethBalance > 100000000000000n; // > 0.0001 ETH
+  const hasWeth     = wethBalance > 0n;
+  const ethDisplay  = parseFloat(formatUnits(ethBalance, 18)).toFixed(6);
+  const wethDisplay = parseFloat(formatUnits(wethBalance, 18)).toFixed(6);
+  const wethBusy    = wrapping || unwrapping;
 
   return (
     <div className="pb-32 space-y-4">
@@ -434,7 +513,6 @@ export const TanamView = () => {
           </button>
         </div>
 
-        {/* Active positions summary */}
         {positions.some(p => p.assetsValue > 0n) && (
           <div className="mt-3 pt-3 border-t border-green-700/40">
             <div className="text-[10px] text-green-400 uppercase font-bold mb-1">Active Positions</div>
@@ -455,14 +533,78 @@ export const TanamView = () => {
         )}
       </div>
 
-      {/* ── ETH balance banner ── */}
+      {/* ── WETH Wrap / Unwrap Card ── */}
+      {(hasEth || hasWeth) && (
+        <div className="rounded-2xl border border-violet-700/40 bg-violet-900/20 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <ArrowUpDown className="w-4 h-4 text-violet-400" />
+            <span className="text-sm font-bold text-violet-300">Wrap / Unwrap</span>
+            <span className="text-[10px] text-violet-500 ml-auto">ETH ↔ WETH · 1:1 · No slippage</span>
+          </div>
+
+          {/* Balances row */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-black/20 rounded-xl p-2.5">
+              <div className="text-[10px] text-zinc-500 mb-0.5">ETH in Vault</div>
+              <div className={`text-sm font-bold font-mono ${hasEth ? "text-white" : "text-zinc-600"}`}>
+                {ethDisplay}
+              </div>
+            </div>
+            <div className="bg-black/20 rounded-xl p-2.5">
+              <div className="text-[10px] text-zinc-500 mb-0.5">WETH in Vault</div>
+              <div className={`text-sm font-bold font-mono ${hasWeth ? "text-violet-300" : "text-zinc-600"}`}>
+                {wethDisplay}
+              </div>
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex gap-2">
+            {/* Wrap ETH → WETH */}
+            <button
+              onClick={handleWrap}
+              disabled={!hasEth || wethBusy}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors
+                bg-violet-600/20 border border-violet-500/40 text-violet-300
+                hover:bg-violet-600/30 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {wrapping ? (
+                <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
+              ) : (
+                <>ETH → WETH</>
+              )}
+            </button>
+
+            {/* Unwrap WETH → ETH */}
+            <button
+              onClick={handleUnwrap}
+              disabled={!hasWeth || wethBusy}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors
+                bg-zinc-700/40 border border-zinc-600/40 text-zinc-300
+                hover:bg-zinc-700/60 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {unwrapping ? (
+                <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
+              ) : (
+                <>WETH → ETH</>
+              )}
+            </button>
+          </div>
+
+          <p className="text-[10px] text-zinc-500 text-center">
+            After unwrapping, ETH can be withdrawn from the Vault tab
+          </p>
+        </div>
+      )}
+
+      {/* ── ETH balance banner for LI.FI swap ── */}
       {hasEth && (
         <div className="flex items-center gap-3 p-3 rounded-xl bg-blue-500/10 border border-blue-500/30">
           <Zap className="w-4 h-4 text-blue-400 shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-xs font-bold text-blue-300">{ethDisplay} ETH in vault</div>
             <div className="text-[10px] text-blue-200/70">
-              Use "Swap & Deposit" below to convert to WETH or USDC and earn yield
+              Use "Swap &amp; Deposit" below to convert to WETH or USDC and earn yield
             </div>
           </div>
         </div>
@@ -489,7 +631,6 @@ export const TanamView = () => {
             return (
               <div key={vault.id} className={`rounded-2xl border ${colors.border} ${colors.bg} p-4 space-y-3`}>
 
-                {/* Card header */}
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-2">
@@ -511,7 +652,6 @@ export const TanamView = () => {
                   </a>
                 </div>
 
-                {/* ERC20 asset balance in vault */}
                 <div className="flex items-center justify-between text-xs bg-white/50 dark:bg-black/20 rounded-xl px-3 py-2">
                   <div className="flex items-center gap-1.5 text-zinc-500">
                     <Wallet className="w-3 h-3" />
@@ -522,7 +662,6 @@ export const TanamView = () => {
                   </span>
                 </div>
 
-                {/* Morpho position */}
                 {hasPos && (
                   <div className="flex items-center justify-between text-xs bg-green-500/10 rounded-xl px-3 py-2 border border-green-500/20">
                     <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-100">
@@ -533,10 +672,7 @@ export const TanamView = () => {
                   </div>
                 )}
 
-                {/* Action buttons */}
                 <div className="flex gap-2 flex-wrap">
-
-                  {/* Swap ETH → asset + deposit */}
                   {hasEth && (
                     <button
                       onClick={() => handleSwapAndDeposit(vault)}
@@ -553,7 +689,6 @@ export const TanamView = () => {
                     </button>
                   )}
 
-                  {/* Deposit existing asset */}
                   {hasBal && (
                     <button
                       onClick={() => handleDeposit(vault)}
@@ -570,7 +705,6 @@ export const TanamView = () => {
                     </button>
                   )}
 
-                  {/* Withdraw */}
                   {hasPos && (
                     <button
                       onClick={() => handleWithdraw(vault)}
@@ -584,10 +718,9 @@ export const TanamView = () => {
                   )}
                 </div>
 
-                {/* Empty state */}
                 {!hasBal && !hasPos && !hasEth && (
                   <p className="text-[10px] text-zinc-500 text-center">
-                    Sweep dust tokens to ETH first, then come back to deposit.
+                    Sweep dust tokens to WETH first, then come back to deposit.
                   </p>
                 )}
               </div>
@@ -602,11 +735,11 @@ export const TanamView = () => {
         <div className="space-y-1 text-xs text-zinc-500">
           <div className="flex gap-2">
             <span className="text-green-500 shrink-0">1.</span>
-            <span>Sweep dust tokens to ETH in the Sweep tab</span>
+            <span>Sweep dust tokens to WETH in the Sweep tab</span>
           </div>
           <div className="flex gap-2">
             <span className="text-green-500 shrink-0">2.</span>
-            <span>Tap "Swap ETH → WETH/USDC & Deposit" — 2 txs: swap via LI.FI, then approve + deposit</span>
+            <span>Unwrap WETH → ETH here if you want to withdraw, or deposit directly to Morpho</span>
           </div>
           <div className="flex gap-2">
             <span className="text-green-500 shrink-0">3.</span>
