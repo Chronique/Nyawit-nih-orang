@@ -15,8 +15,6 @@ import { Wallet } from 'iconoir-react';
 
 export function TopBar() {
   const frameContext = useFrameContext();
-  
-  
 
   const [isDark, setIsDark] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -34,10 +32,13 @@ export function TopBar() {
 
   const handleShare = async () => {
     const appUrl = "https://nyawit-nih-orang.vercel.app";
-    const castText = `🌴 Nyawit — Sweep your dust tokens into ETH!\n\nSwap all your small coins on Base to ETH in one click.\n\n${appUrl}`;
+    const castText = `🌴 Nyawit — Sweep your dust tokens into ETH!\n\nSwap all your small coins on Base to ETH in one click.`;
     try {
-      // Farcaster miniapp: cast langsung
-      await sdk.actions.openUrl(`https://warpcast.com/~/compose?text=${encodeURIComponent(castText)}`);
+      // Farcaster miniapp: composeCast agar embed preview muncul di cast
+      await sdk.actions.composeCast({
+        text: castText,
+        embeds: [appUrl], // URL di embeds, bukan di text
+      });
     } catch {
       // Fallback: copy to clipboard
       try {
@@ -49,8 +50,6 @@ export function TopBar() {
     }
   };
 
-  
-
   const userPfp =
     frameContext?.context && (frameContext.context as any)?.user?.pfpUrl
       ? (frameContext.context as any).user.pfpUrl
@@ -61,7 +60,6 @@ export function TopBar() {
       <SimpleToast message={toastMsg} onClose={() => setToastMsg(null)} />
 
       <div className="w-full flex items-center justify-between py-2">
-
 
         {/* --- KIRI: LOGO + ANIMASI TEKS --- */}
         <div className="flex items-center relative" id="tour-logo">
@@ -107,92 +105,91 @@ export function TopBar() {
             </button>
           </div>
 
-          {/* Connect / Profile */}
           {/* Connect / Profile / Account Modal Section */}
-<ConnectButton.Custom>
-  {({
-    account,
-    chain,
-    openAccountModal,
-    openChainModal,
-    openConnectModal,
-    mounted,
-  }) => {
-    const ready = mounted;
-    const connected = ready && account && chain;
+          <ConnectButton.Custom>
+            {({
+              account,
+              chain,
+              openAccountModal,
+              openChainModal,
+              openConnectModal,
+              mounted,
+            }) => {
+              const ready = mounted;
+              const connected = ready && account && chain;
 
-    return (
-      <div
-        {...(!ready && {
-          'aria-hidden': true,
-          style: {
-            opacity: 0,
-            pointerEvents: 'none',
-            userSelect: 'none',
-          },
-        })}
-      >
-        {(() => {
-          if (!connected) {
-            return (
-              <button
-                onClick={openConnectModal}
-                type="button"
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-full text-xs font-bold hover:bg-blue-500 shadow-md transition-all active:scale-95"
-              >
-                <Wallet className="w-3.5 h-3.5" /> Connect
-              </button>
-            );
-          }
+              return (
+                <div
+                  {...(!ready && {
+                    'aria-hidden': true,
+                    style: {
+                      opacity: 0,
+                      pointerEvents: 'none',
+                      userSelect: 'none',
+                    },
+                  })}
+                >
+                  {(() => {
+                    if (!connected) {
+                      return (
+                        <button
+                          onClick={openConnectModal}
+                          type="button"
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-full text-xs font-bold hover:bg-blue-500 shadow-md transition-all active:scale-95"
+                        >
+                          <Wallet className="w-3.5 h-3.5" /> Connect
+                        </button>
+                      );
+                    }
 
-          if (chain.unsupported) {
-            return (
-              <button 
-                onClick={openChainModal}
-                type="button"
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-full text-xs font-bold hover:bg-red-500 shadow-md transition-all active:scale-95"
-              >
-                Wrong Network
-              </button>
-            );
-          }
+                    if (chain.unsupported) {
+                      return (
+                        <button 
+                          onClick={openChainModal}
+                          type="button"
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-full text-xs font-bold hover:bg-red-500 shadow-md transition-all active:scale-95"
+                        >
+                          Wrong Network
+                        </button>
+                      );
+                    }
 
-          return (
-            <button 
-              onClick={() => {
-                // LOGIKA CERDAS: 
-                // Jika di Farcaster, buka Profile. Jika di Web, buka Account Modal (untuk Disconnect)
-                const fid = (frameContext?.context as any)?.user?.fid;
-                if (fid) {
-                  sdk.actions.viewProfile({ fid });
-                } else {
-                  openAccountModal();
-                }
-              }} 
-              type="button"
-              className="relative group transition-transform active:scale-95"
-            >
-              {userPfp ? (
-                <Image 
-                  src={userPfp} 
-                  alt="Profile" 
-                  width={36} 
-                  height={36} 
-                  className="w-9 h-9 rounded-full border-2 border-green-500 object-cover" 
-                  priority // Tambahkan priority agar tidak LCP error
-                />
-              ) : (
-                <div className="w-9 h-9 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white border-2 border-green-500 shadow-lg">
-                  <Wallet className="w-4 h-4" />
+                    return (
+                      <button 
+                        onClick={() => {
+                          // LOGIKA CERDAS: 
+                          // Jika di Farcaster, buka Profile. Jika di Web, buka Account Modal (untuk Disconnect)
+                          const fid = (frameContext?.context as any)?.user?.fid;
+                          if (fid) {
+                            sdk.actions.viewProfile({ fid });
+                          } else {
+                            openAccountModal();
+                          }
+                        }} 
+                        type="button"
+                        className="relative group transition-transform active:scale-95"
+                      >
+                        {userPfp ? (
+                          <Image 
+                            src={userPfp} 
+                            alt="Profile" 
+                            width={36} 
+                            height={36} 
+                            className="w-9 h-9 rounded-full border-2 border-green-500 object-cover" 
+                            priority
+                          />
+                        ) : (
+                          <div className="w-9 h-9 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white border-2 border-green-500 shadow-lg">
+                            <Wallet className="w-4 h-4" />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })()}
                 </div>
-              )}
-            </button>
-          );
-        })()}
-      </div>
-    );
-  }}
-</ConnectButton.Custom>
+              );
+            }}
+          </ConnectButton.Custom>
           
         </div>
       </div>
