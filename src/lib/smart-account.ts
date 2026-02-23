@@ -16,10 +16,15 @@ import {
   encodeFunctionData,
 } from "viem";
 import { base } from "viem/chains";
+import { Attribution } from "ox/erc8021";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 export const ACTIVE_CHAIN = base;
 export const IS_TESTNET   = false;
+
+const DATA_SUFFIX = Attribution.toDataSuffix({
+  codes: ["bc_1x8rrnnv"],
+});
 
 const FACTORY_V1      = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
 const FACTORY_V2      = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address;
@@ -167,6 +172,7 @@ export const deployVault = async (
     args:         [walletClient.account.address, salt],
     chain:        base,
     account:      walletClient.account,
+    dataSuffix: DATA_SUFFIX,
   });
 };
 
@@ -194,6 +200,7 @@ export const sendBatch = async (
         args:         [calls[0].to, calls[0].value ?? 0n, calls[0].data ?? "0x"],
         chain:        base,
         account:      walletClient.account,
+        dataSuffix: DATA_SUFFIX,
       });
     }
     console.log("[LightAccount v1] executeBatch, calls:", calls.length);
@@ -207,6 +214,7 @@ export const sendBatch = async (
       ],
       chain:   base,
       account: walletClient.account,
+      dataSuffix: DATA_SUFFIX,
     });
   }
 
@@ -223,6 +231,7 @@ export const sendBatch = async (
     ],
     chain:   base,
     account: walletClient.account,
+    dataSuffix: DATA_SUFFIX,
   });
 };
 
@@ -243,6 +252,7 @@ export const sendSingle = async (
     args:         [call.to, call.value ?? 0n, call.data ?? "0x"],
     chain:        base,
     account:      walletClient.account,
+    dataSuffix: DATA_SUFFIX,
   });
 };
 

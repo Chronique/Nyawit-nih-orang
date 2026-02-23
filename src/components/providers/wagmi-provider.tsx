@@ -21,7 +21,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useConnect, useAccount, useSwitchChain } from "wagmi";
 import { useEffect, useState, useRef } from "react";
 import { farcasterMiniApp } from "@farcaster/miniapp-wagmi-connector";
-import { concatHex, stringToHex } from "viem";
+import { Attribution } from "ox/erc8021";
 
 if (typeof window !== "undefined") {
   window.addEventListener("eip6963:announceProvider", (event: Event) => {
@@ -48,10 +48,9 @@ const connectors = connectorsForWallets(
   }
 );
 
-const DATA_SUFFIX = concatHex([
-  stringToHex("erc8021"),        // marker
-  stringToHex("bc_1x8rrnnv"),    // builder code kamu
-]);
+const DATA_SUFFIX = Attribution.toDataSuffix({
+  codes: ["bc_1x8rrnnv"],
+});
 
 export const wagmiConfig = createConfig({
   chains: [base, baseSepolia],
