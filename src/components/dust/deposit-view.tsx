@@ -10,25 +10,41 @@ import {
 } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, formatEther, encodeFunctionData, erc20Abi, type Address } from "viem";
-import { Rocket, Check, Copy, Refresh, WarningTriangle, Shield } from "iconoir-react";
+import { Rocket, Check, Copy, Refresh, Shield } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-// Router addresses yang pernah/mungkin di-approve oleh vault di Base
-// Vault bisa batch-revoke semua sekaligus
+// ── Known spenders on Base mainnet ────────────────────────────────────────────
+// Semua DEX/aggregator yang mungkin pernah di-approve oleh vault saat swap.
+// LI.FI bisa route ke mana saja dari list ini — lebih lengkap = makin aman.
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  { label: "0x ExchangeProxy",            address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
-  { label: "KyberSwap MetaAggregator",    address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
-  { label: "KyberSwap Router v2",         address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
-  { label: "LI.FI Diamond",              address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
-  { label: "Permit2",                     address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
-  { label: "Uniswap v3 SwapRouter",       address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
-  { label: "Uniswap UniversalRouter",     address: "0x6fF5693b99B238D47c0B9a11F4B340a18B83a4C8" },
+  // Aggregators
+  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" }, // same all chains (CREATE2) ✅
+  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" }, // same all chains ✅
+  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" }, // Base ✅
+  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" }, // Base ✅
+  { label: "Permit2",                   address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" }, // same all chains ✅
+
+  // Uniswap — Base addresses
+  { label: "Uniswap v3 SwapRouter",     address: "0x2626664c2603336E57B271c5C0b26F421741e481" }, // Base ✅
+  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" }, // Base ✅ (was wrong!)
+
+  // KyberSwap — Base addresses
+  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" }, // Base ✅
+  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" }, // Base ✅
+
+  // Aerodrome — largest DEX on Base, LI.FI routes here often
+  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" }, // Base ✅
+  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" }, // Base ✅
+
+  // Other Base DEXes LI.FI uses
+  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" }, // Base ✅
+  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" }, // Base ✅
 ];
 
-// Allowance ABI — minimal untuk baca & revoke
+// Allowance ABI
 const ALLOWANCE_ABI = [
   {
     name: "allowance",
@@ -43,11 +59,11 @@ const ALLOWANCE_ABI = [
 ] as const;
 
 interface ActiveApproval {
-  tokenAddress:  string;
-  tokenSymbol:   string;
+  tokenAddress:   string;
+  tokenSymbol:    string;
   spenderAddress: string;
-  spenderLabel:  string;
-  allowance:     bigint;
+  spenderLabel:   string;
+  allowance:      bigint;
 }
 
 const TokenLogo = ({ token }: { token: any }) => {
@@ -62,25 +78,27 @@ const TokenLogo = ({ token }: { token: any }) => {
 };
 
 export const DustDepositView = () => {
-  const { data: walletClient } = useWalletClient();
+  const { data: walletClient }             = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
-  const { switchChainAsync } = useSwitchChain();
+  const { switchChainAsync }               = useSwitchChain();
 
-  const [vaultAddress, setVaultAddress]     = useState<Address | null>(null);
-  const [vaultVersion, setVaultVersion]     = useState<"v1" | "v2" | null>(null);
-  const [isDeployed, setIsDeployed]         = useState(false);
-  const [ethBalance, setEthBalance]         = useState("0");
-  const [usdcBalance, setUsdcBalance]       = useState("0");
-  const [dustTokens, setDustTokens]         = useState<any[]>([]);
-  const [loading, setLoading]               = useState(false);
-  const [activating, setActivating]         = useState(false);
-  const [deployTxHash, setDeployTxHash]     = useState<`0x${string}` | undefined>();
-  const [toast, setToast]                   = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [vaultAddress, setVaultAddress]         = useState<Address | null>(null);
+  const [vaultVersion, setVaultVersion]         = useState<"v1" | "v2" | null>(null);
+  const [isDeployed, setIsDeployed]             = useState(false);
+  const [ethBalance, setEthBalance]             = useState("0");
+  const [usdcBalance, setUsdcBalance]           = useState("0");
+  const [dustTokens, setDustTokens]             = useState<any[]>([]);
+  // ✅ FIX 1: simpan semua token (termasuk USDC) untuk re-check approvals
+  const [allVaultTokens, setAllVaultTokens]     = useState<any[]>([]);
+  const [loading, setLoading]                   = useState(false);
+  const [activating, setActivating]             = useState(false);
+  const [deployTxHash, setDeployTxHash]         = useState<`0x${string}` | undefined>();
+  const [toast, setToast]                       = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // Revoke state
-  const [approvals, setApprovals]           = useState<ActiveApproval[]>([]);
+  const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
-  const [revoking, setRevoking]             = useState(false);
+  const [revoking, setRevoking]                 = useState(false);
 
   // Watch deploy tx
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
@@ -131,7 +149,10 @@ export const DustDepositView = () => {
       setUsdcBalance(usdc ? parseFloat(usdc.formattedBal).toFixed(2) : "0");
       setDustTokens(formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase()));
 
-      // Cek approvals setelah data vault loaded
+      // ✅ FIX 1: simpan semua token untuk dipakai saat re-check approval setelah revoke
+      setAllVaultTokens(formatted);
+
+      // Cek approvals setelah data vault loaded — pakai semua token termasuk USDC
       if (deployed) fetchApprovals(vaultAddress, formatted);
     } catch (e) {
       console.error(e);
@@ -142,8 +163,7 @@ export const DustDepositView = () => {
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
 
-  // ── Cek approvals: untuk tiap token × tiap known spender ─────────────────
-  // Vault bisa execute batch revoke — satu tx untuk semua
+  // ── Cek approvals: tiap token × tiap known spender ────────────────────────
   const fetchApprovals = async (vault: Address, tokens: any[]) => {
     if (tokens.length === 0) return;
     setLoadingApprovals(true);
@@ -171,13 +191,13 @@ export const DustDepositView = () => {
                 });
               }
             } catch {
-              // Token mungkin tidak implement allowance standar — skip
+              // Token tidak implement standard allowance — skip
             }
           })
         )
       );
 
-      console.log(`[Revoke] Found ${found.length} active approvals`);
+      console.log(`[Revoke] Found ${found.length} active approvals across ${KNOWN_SPENDERS.length} spenders`);
       setApprovals(found);
     } catch (e) {
       console.error("[Revoke] Error checking approvals:", e);
@@ -186,11 +206,13 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Revoke All: batch approve(spender, 0) via smart vault ────────────────
-  // Karena smart vault bisa executeBatch, semua revoke dalam 1 tx
+  // ── Revoke All: batch approve(spender, 0) via smart vault ─────────────────
   const handleRevokeAll = async () => {
-    if (!walletClient || approvals.length === 0) return;
-    if (!window.confirm(`Revoke ${approvals.length} token approval${approvals.length > 1 ? "s" : ""}? This uses 1 transaction from your vault.`)) return;
+    if (!walletClient || !vaultAddress || approvals.length === 0) return;
+    if (!window.confirm(
+      `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?\n` +
+      `This uses 1 transaction from your vault.`
+    )) return;
 
     setRevoking(true);
     try {
@@ -208,15 +230,16 @@ export const DustDepositView = () => {
         }),
       }));
 
-      console.log(`[Revoke] Batch ${revokeCalls.length} revokes in 1 tx`);
+      console.log(`[Revoke] Batching ${revokeCalls.length} revokes in 1 tx`);
       const txHash = await client.sendUserOperation({ calls: revokeCalls });
-      setToast({ msg: "Revoking approvals...", type: "success" });
+      setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
 
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
       setApprovals([]); // clear UI immediately
-      // Re-check setelah beberapa saat
-      setTimeout(() => vaultAddress && fetchApprovals(vaultAddress, dustTokens), 5000);
+
+      // ✅ FIX 1: re-check pakai allVaultTokens (termasuk USDC), bukan dustTokens
+      setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
@@ -257,7 +280,6 @@ export const DustDepositView = () => {
         <div className="flex items-center justify-between">
           <span className="text-xs text-zinc-500 font-medium uppercase tracking-wide">Smart Vault</span>
           <div className="flex items-center gap-2">
-            {/* Version badge — auto-detected */}
             {vaultVersion && (
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
                 vaultVersion === "v1"
@@ -267,7 +289,6 @@ export const DustDepositView = () => {
                 Light Account {vaultVersion === "v1" ? "v1.1" : "v2.0"}
               </span>
             )}
-            {/* Deploy status badge */}
             <div className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-full border ${
               isDeployed
                 ? "text-green-400 border-green-500/40 bg-green-500/10"
@@ -318,37 +339,42 @@ export const DustDepositView = () => {
         )}
       </div>
 
-      {/* ── REVOKE ALL — hanya muncul kalau ada active approval ── */}
+      {/* ── REVOKE SECTION ── */}
       {isDeployed && (approvals.length > 0 || loadingApprovals) && (
         <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-4 space-y-3">
           <div className="flex items-center gap-2">
             <Shield className="w-4 h-4 text-yellow-400 shrink-0" />
             <div>
               <p className="text-sm font-semibold text-yellow-300">
-                {loadingApprovals ? "Checking approvals..." : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
+                {loadingApprovals
+                  ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
+                  : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
               </p>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {loadingApprovals
-                  ? "Scanning token allowances..."
-                  : "DEX routers can still spend your vault tokens. Revoke to protect your funds."}
+                  ? "Checking allowances across all known DEX routers on Base..."
+                  : "DEX routers can still spend your vault tokens. Revoke to secure your funds."}
               </p>
             </div>
           </div>
 
-          {/* List approvals */}
+          {/* Grouped by token */}
           {!loadingApprovals && approvals.length > 0 && (
-            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-              {/* Group by token untuk tampilan lebih ringkas */}
+            <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
                 const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
                 const symbol = tokenApprovals[0].tokenSymbol;
                 return (
-                  <div key={tokenAddr} className="flex items-center justify-between text-xs bg-yellow-500/10 rounded-lg px-2.5 py-1.5">
-                    <span className="font-bold text-yellow-200">{symbol}</span>
-                    <span className="text-zinc-400">
-                      {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}:&nbsp;
-                      {tokenApprovals.map(a => a.spenderLabel.split(" ")[0]).join(", ")}
-                    </span>
+                  <div key={tokenAddr} className="text-xs bg-yellow-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-yellow-200">{symbol}</span>
+                      <span className="text-zinc-400 text-[10px]">
+                        {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-zinc-500 truncate">
+                      {tokenApprovals.map(a => a.spenderLabel).join(" · ")}
+                    </div>
                   </div>
                 );
               })}
@@ -369,16 +395,18 @@ export const DustDepositView = () => {
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-            Smart vault batches all revokes into 1 transaction · Free (only gas)
+            Smart vault batches all revokes into 1 transaction · {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
 
-      {/* Approved & clean state */}
-      {isDeployed && !loadingApprovals && approvals.length === 0 && dustTokens.length > 0 && (
+      {/* Clean state */}
+      {isDeployed && !loadingApprovals && approvals.length === 0 && allVaultTokens.length > 0 && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-500/5 border border-green-500/20">
           <Shield className="w-3.5 h-3.5 text-green-400 shrink-0" />
-          <p className="text-xs text-green-400">No active approvals found. Vault is clean.</p>
+          <p className="text-xs text-green-400">
+            No active approvals found across {KNOWN_SPENDERS.length} spenders. Vault is clean.
+          </p>
         </div>
       )}
 
@@ -392,11 +420,9 @@ export const DustDepositView = () => {
               Gas fee is paid from your connected wallet — no deposit required.
             </p>
           </div>
-
           <div className="text-xs text-blue-300 bg-blue-400/10 border border-blue-400/20 rounded-lg px-3 py-2">
             ℹ Gas will be charged from your wallet ({ownerAddress?.slice(0, 6)}...{ownerAddress?.slice(-4)})
           </div>
-
           <button
             onClick={handleActivate}
             disabled={activating}
@@ -422,7 +448,9 @@ export const DustDepositView = () => {
           <p className="text-sm font-semibold text-green-400 flex items-center gap-2">
             <Check className="w-4 h-4" /> Smart Wallet Active
             {vaultVersion && (
-              <span className="text-[9px] font-normal text-green-600">({vaultVersion === "v1" ? "Light Account v1.1" : "Light Account v2.0"})</span>
+              <span className="text-[9px] font-normal text-green-600">
+                ({vaultVersion === "v1" ? "Light Account v1.1" : "Light Account v2.0"})
+              </span>
             )}
           </p>
           <p className="text-xs text-zinc-400">
