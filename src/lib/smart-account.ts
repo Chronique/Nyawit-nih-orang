@@ -142,11 +142,10 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
 
   // ✅ Baca env di DALAM fungsi — bukan module level
   // Supaya process.env sudah di-inject Next.js saat fungsi dipanggil
-  const cdpUrl = process.env.NEXT_PUBLIC_CDP_PAYMASTER_URL;
-  if (!cdpUrl) throw new Error(
-    "NEXT_PUBLIC_CDP_PAYMASTER_URL is not set in .env\n" +
-    "Format: https://api.developer.coinbase.com/rpc/v1/base/YOUR_API_KEY"
-  );
+  const cdpApiKey = process.env.NEXT_PUBLIC_CDP_API_KEY;
+  if (!cdpApiKey) throw new Error("NEXT_PUBLIC_CDP_API_KEY is not set in .env");
+
+  const cdpUrl = `https://api.developer.coinbase.com/rpc/v1/base/${cdpApiKey}`;
 
   const ownerAddress = walletClient.account.address as Address;
 
