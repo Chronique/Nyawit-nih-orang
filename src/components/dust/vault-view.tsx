@@ -1,16 +1,27 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useWalletClient, useAccount, useWriteContract, useSwitchChain } from "wagmi";
+import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";
 import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
+import { fetchTokenPrices } from "~/lib/price";
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ITEMS_PER_PAGE = 10;
+
+// ── Deposit limits ────────────────────────────────────────────────────────────
+// Only show tokens worth LESS than this USD value (nyawit = dust only)
+const MAX_TOKEN_USD   = 3.0;
+// Minimum to bother showing (filter out absolute zero-value tokens)
+const MIN_TOKEN_USD   = 0.001;
+// Max ETH user can deposit from wallet to vault in one tx
+const MAX_ETH_DEPOSIT = 0.005;
+// Max USDC deposit per tx
+const MAX_USDC_DEPOSIT = 10;
 
 const generatePagination = (current: number, total: number) => {
   if (total <= 5) return Array.from({ length: total }, (_, i) => i + 1);
@@ -45,13 +56,16 @@ interface VaultViewProps {
 export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
-  const { writeContractAsync } = useWriteContract();
   const { switchChainAsync } = useSwitchChain();
 
   const [vaultAddress, setVaultAddress]               = useState<string | null>(null);
   const [ethBalance, setEthBalance]                   = useState("0");
   const [usdcBalance, setUsdcBalance]                 = useState<any>(null);
   const [ownerTokens, setOwnerTokens]                 = useState<MoralisToken[]>([]);
+  const [ownerTokenPrices, setOwnerTokenPrices]       = useState<Record<string, number>>({});
+  const [ownerEthBalance, setOwnerEthBalance]         = useState<bigint>(0n);
+  const [ethDepositAmount, setEthDepositAmount]       = useState("");
+  const [showEthDeposit, setShowEthDeposit]           = useState(false);
   const [isDeployed, setIsDeployed]                   = useState(false);
   const [loading, setLoading]                         = useState(false);
   const [loadingOwnerTokens, setLoadingOwnerTokens]   = useState(false);
@@ -101,12 +115,35 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     if (!ownerAddress) return;
     setLoadingOwnerTokens(true);
     try {
-      const data = await fetchMoralisTokens(ownerAddress);
+      const [data, ethBal] = await Promise.all([
+        fetchMoralisTokens(ownerAddress),
+        publicClient.getBalance({ address: ownerAddress as Address }),
+      ]);
+      setOwnerEthBalance(ethBal);
+
       const activeTokens = data.filter((t) => BigInt(t.balance) > 0n);
-      activeTokens.sort(
-        (a, b) => parseFloat(formatUnits(BigInt(b.balance), b.decimals)) - parseFloat(formatUnits(BigInt(a.balance), a.decimals))
-      );
-      setOwnerTokens(activeTokens);
+      if (activeTokens.length === 0) { setOwnerTokens([]); return; }
+
+      // Fetch prices to filter out dust tokens below MIN_DEPOSIT_USD
+      const prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
+      setOwnerTokenPrices(prices);
+
+      const withValue = activeTokens.filter(t => {
+        const bal   = parseFloat(formatUnits(BigInt(t.balance), t.decimals || 18));
+        const price = prices[t.token_address.toLowerCase()] || 0;
+        const usd   = bal * price;
+        // nyawit = dust only: show tokens between MIN and MAX_TOKEN_USD
+        return usd >= MIN_TOKEN_USD && usd < MAX_TOKEN_USD;
+      });
+
+      // Sort by USD value descending
+      withValue.sort((a, b) => {
+        const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] || 0);
+        const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] || 0);
+        return valB - valA;
+      });
+
+      setOwnerTokens(withValue);
       setCurrentOwnerPage(1);
     } catch (e) {
       console.error("Failed to fetch wallet tokens:", e);
@@ -154,6 +191,40 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // Deposit ETH from wallet → vault (max MAX_ETH_DEPOSIT per tx)
+  const handleDepositETH = async () => {
+    if (!walletClient || !ownerAddress || !vaultAddress) return;
+    const amount = parseFloat(ethDepositAmount);
+    if (isNaN(amount) || amount <= 0) {
+      setToast({ msg: "Invalid ETH amount.", type: "error" });
+      return;
+    }
+    if (amount > MAX_ETH_DEPOSIT) {
+      setToast({ msg: `Max ${MAX_ETH_DEPOSIT} ETH per deposit.`, type: "error" });
+      return;
+    }
+    if (!window.confirm(`Deposit ${amount} ETH to vault?\n\nThis will be used as gas reserve.`)) return;
+    try {
+      await ensureNetwork();
+      setActionLoading(`Depositing ${amount} ETH to vault...`);
+      const txHash = await walletClient.sendTransaction({
+        to:      vaultAddress as Address,
+        value:   parseEther(ethDepositAmount),
+        chain:   base,
+        account: walletClient.account!,
+      });
+      setToast({ msg: "ETH deposit sent!", type: "success" });
+      setEthDepositAmount("");
+      setShowEthDeposit(false);
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await fetchVaultData();
+    } catch (e: any) {
+      setToast({ msg: "ETH deposit failed: " + (e.shortMessage || e.message), type: "error" });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
@@ -181,22 +252,34 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Single deposit — EOA signs directly, no Smart Account needed
+  // Single deposit — use walletClient.writeContract (works for both EOA and smart wallet connectors)
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
+
+    // Cap USDC deposits at MAX_USDC_DEPOSIT
+    const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
+    if (isUsdc) {
+      const usdcAmount = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
+      if (usdcAmount > MAX_USDC_DEPOSIT) {
+        setToast({ msg: `Max deposit is ${MAX_USDC_DEPOSIT} USDC. Split into smaller amounts.`, type: "error" });
+        return;
+      }
+    }
+
     if (!window.confirm(`Deposit ${token.symbol} to vault?`)) return;
     try {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
-      await writeContractAsync({
+      const txHash = await walletClient.writeContract({
         address:      token.token_address as Address,
         abi:          erc20Abi,
         functionName: "transfer",
         args:         [vaultAddress as Address, BigInt(token.balance)],
-        chainId:      base.id,
+        chain:        base,
+        account:      walletClient.account!,
       });
       setToast({ msg: "Deposit sent! Updating balances...", type: "success" });
-      await new Promise((r) => setTimeout(r, 8000));
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
       await Promise.all([fetchVaultData(), fetchOwnerData()]);
     } catch (e: any) {
       setToast({ msg: "Deposit failed: " + (e.shortMessage || e.message), type: "error" });
@@ -205,7 +288,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Batch deposit — user signs one tx per token
+  // Batch deposit — walletClient.writeContract per token (works for both EOA and smart wallets)
   const handleBatchDeposit = async () => {
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
     if (tokensToDeposit.length === 0) return;
@@ -223,13 +306,25 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         try {
           setActionLoading(`[${successCount + 1}/${tokensToDeposit.length}] Depositing ${token.symbol}...`);
 
-          await writeContractAsync({
+          // Cap USDC at MAX_USDC_DEPOSIT
+          const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
+          if (isUsdc) {
+            const usdcAmt = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
+            if (usdcAmt > MAX_USDC_DEPOSIT) {
+              setToast({ msg: `Skipped USDC — exceeds max ${MAX_USDC_DEPOSIT} USDC.`, type: "error" });
+              continue;
+            }
+          }
+
+          const txHash = await walletClient!.writeContract({
             address:      token.token_address as Address,
             abi:          erc20Abi,
             functionName: "transfer",
             args:         [vaultAddress as Address, BigInt(token.balance)],
-            chainId:      base.id,
+            chain:        base,
+            account:      walletClient!.account!,
           });
+          await publicClient.waitForTransactionReceipt({ hash: txHash });
 
           const newSet = new Set(selectedOwnerTokens);
           newSet.delete(token.token_address);
@@ -237,10 +332,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           successCount++;
 
           setToast({ msg: `${token.symbol} deposited! (${successCount}/${tokensToDeposit.length})`, type: "success" });
-
-          if (successCount < tokensToDeposit.length) {
-            await new Promise((r) => setTimeout(r, 5000));
-          }
         } catch (err: any) {
           console.error(`Failed to deposit ${token.symbol}:`, err);
           setToast({ msg: `Failed to deposit ${token.symbol}`, type: "error" });
@@ -250,8 +341,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       }
 
       if (successCount > 0) {
-        setToast({ msg: `Done! ${successCount} token${successCount > 1 ? "s" : ""} deposited. Refreshing...`, type: "success" });
-        await new Promise((r) => setTimeout(r, 5000));
+        setToast({ msg: `Done! ${successCount} token${successCount > 1 ? "s" : ""} deposited.`, type: "success" });
         await Promise.all([fetchVaultData(), fetchOwnerData()]);
       }
     } catch (e: any) {
@@ -323,13 +413,47 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                   <div className="text-lg font-bold">{parseFloat(ethBalance).toFixed(5)}</div>
                 </div>
               </div>
-              <button
-                onClick={() => setShowEthWithdraw(!showEthWithdraw)}
-                className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-medium border border-zinc-600"
-              >
-                {showEthWithdraw ? "Cancel" : "Withdraw"}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowEthWithdraw(!showEthWithdraw)}
+                  className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-medium border border-zinc-600"
+                >
+                  {showEthWithdraw ? "Cancel" : "Withdraw"}
+                </button>
+                <button
+                  onClick={() => setShowEthDeposit(!showEthDeposit)}
+                  className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 rounded-lg text-xs font-medium border border-blue-600 text-blue-100"
+                >
+                  {showEthDeposit ? "Cancel" : "Deposit"}
+                </button>
+              </div>
             </div>
+            {showEthDeposit && (
+              <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
+                <div className="flex gap-2">
+                  <input
+                    type="number" placeholder={`Amount (max ${MAX_ETH_DEPOSIT} ETH)`}
+                    value={ethDepositAmount} onChange={(e) => setEthDepositAmount(e.target.value)}
+                    max={MAX_ETH_DEPOSIT}                    className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
+                  />
+                  <button
+                    onClick={handleDepositETH}
+                    disabled={!ethDepositAmount}
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1"
+                  >
+                    <Upload className="w-3 h-3" /> Send
+                  </button>
+                </div>
+                <div className="text-[10px] text-zinc-500 mt-1 ml-1">
+                  From: {ownerAddress?.slice(0, 6)}...{ownerAddress?.slice(-4)} · Max {MAX_ETH_DEPOSIT} ETH
+                  {ownerEthBalance > 0n && (
+                    <span className="ml-1 text-zinc-400">
+                      (wallet: {parseFloat(formatUnits(ownerEthBalance, 18)).toFixed(4)} ETH)
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
             {showEthWithdraw && (
               <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
                 <div className="flex gap-2">
@@ -385,6 +509,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             <h3 className="font-semibold text-lg flex items-center gap-2">
               <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
             </h3>
+            <p className="text-[10px] text-zinc-500 mt-0.5">
+              Dust tokens only · value &lt; $3
+            </p>
             {ownerTokens.length > 0 && (
               <button
                 onClick={selectAllOwnerTokens}
@@ -435,6 +562,11 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                       <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
                       <div className="text-xs text-zinc-500">
                         {parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}
+                        {ownerTokenPrices[token.token_address.toLowerCase()] && (
+                          <span className="ml-1 text-zinc-400">
+                            · ${(parseFloat(formatUnits(BigInt(token.balance), token.decimals)) * ownerTokenPrices[token.token_address.toLowerCase()]).toFixed(2)}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

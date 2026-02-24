@@ -437,6 +437,11 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             const simOk      = simItem?.status === "ok";
             // ✅ Disable if already 5 selected and this token is not yet selected
             const isDisabled = !isSelected && selectedTokens.size >= MAX_BATCH_TOKENS;
+            // Token classification tags
+            const isDust     = token.valueUsd > 0 && token.valueUsd < 0.10;
+            const noPrice    = token.priceUsd === 0 && parseFloat(token.formattedBal) < 1_000_000;
+            // Spam heuristic: zero price + suspiciously huge airdropped balance (>1M units)
+            const isSpam     = token.priceUsd === 0 && parseFloat(token.formattedBal) >= 1_000_000;
 
             return (
               <div
@@ -466,11 +471,14 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
                   </div>
                   <TokenLogo token={token} />
                   <div>
-                    <div className="text-sm font-bold dark:text-white flex items-center gap-1.5">
+                    <div className="text-sm font-bold dark:text-white flex items-center gap-1.5 flex-wrap">
                       {token.symbol}
                       {isWeth && <span className="text-[9px] bg-blue-900/30 text-blue-400 px-1 rounded">WETH</span>}
                       {isIncoming && <span className="text-[9px] bg-orange-900/30 text-orange-400 px-1 rounded">FROM VAULT</span>}
                       {simSkip && <span className="text-[9px] bg-red-900/30 text-red-400 px-1 rounded">NO ROUTE</span>}
+                      {isDust && !isWeth && <span className="text-[9px] bg-yellow-900/30 text-yellow-500 px-1 rounded">DUST</span>}
+                      {noPrice && !isWeth && <span className="text-[9px] bg-zinc-700 text-zinc-400 px-1 rounded">NO PRICE</span>}
+                      {isSpam && <span className="text-[9px] bg-red-950 text-red-400 px-1 rounded border border-red-800/50">SPAM</span>}
                     </div>
                     <div className="text-xs text-zinc-500">{parseFloat(token.formattedBal).toFixed(4)}</div>
                   </div>
