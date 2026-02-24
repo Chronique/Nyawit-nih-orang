@@ -2,18 +2,8 @@
 //
 // ARSITEKTUR: EIP-4337 UserOperations via permissionless.js + CDP Paymaster
 //
-// Flow baru:
-//   EOA (sign saja, tidak butuh ETH)
-//     → UserOperation
-//       → CDP Bundler + Paymaster (bayar gas dari saldo CDP)
-//         → EntryPoint
-//           → Light Account (execute calls)
-//
-// Kompatibel dengan:
-//   - Light Account v1.1 (EntryPoint v0.6)  ← user yang sudah deploy v1
-//   - Light Account v2.0 (EntryPoint v0.7)  ← user baru / default
-//
-// Interface TIDAK berubah — semua view komponen tetap jalan tanpa edit.
+// ✅ paymasterClient dibuat LAZY di dalam getSmartAccountClient()
+//    bukan di module level — supaya env variable sudah tersedia
 
 import {
   createPublicClient,
@@ -35,11 +25,7 @@ import { toLightSmartAccount } from "permissionless/accounts";
 export const ACTIVE_CHAIN = base;
 export const IS_TESTNET   = false;
 
-// CDP Paymaster URL dari .env
-// Format: https://api.developer.coinbase.com/rpc/v1/base/YOUR_API_KEY
-const CDP_URL = process.env.NEXT_PUBLIC_CDP_PAYMASTER_URL!;
-
-// ── Factory addresses (Alchemy Light Account) ─────────────────────────────────
+// ── Factory addresses ─────────────────────────────────────────────────────────
 const FACTORY_V1 = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
 const FACTORY_V2 = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address;
 
@@ -61,18 +47,12 @@ const FACTORY_ABI = [
   },
 ] as const;
 
-// ── Public client (Alchemy RPC untuk read) ─────────────────────────────────────
+// ── Public client ─────────────────────────────────────────────────────────────
 export const publicClient = createPublicClient({
   chain: base,
   transport: http(
     `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`
   ),
-});
-
-// ── CDP Paymaster client ───────────────────────────────────────────────────────
-// CDP URL double fungsi: bundler + paymaster dalam 1 endpoint
-const paymasterClient = createPaymasterClient({
-  transport: http(CDP_URL),
 });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -127,9 +107,7 @@ export const detectVaultAddress = async (
   return { address: addrV2, factory: FACTORY_V2, version: "v2" };
 };
 
-// ── 3. Deploy vault ───────────────────────────────────────────────────────────
-// Deploy tetap pakai regular tx dari EOA (hanya dilakukan 1x)
-// Setelah deploy, semua operasi selanjutnya via userOperation (gasless)
+// ── 3. Deploy vault (regular tx, 1x only) ────────────────────────────────────
 export const deployVault = async (
   walletClient: WalletClient,
   salt = 0n
@@ -145,45 +123,43 @@ export const deployVault = async (
   });
 };
 
-// ── 4. Helper functions ───────────────────────────────────────────────────────
+// ── 4. Helpers ────────────────────────────────────────────────────────────────
 export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> => {
   const bytecode = await publicClient.getBytecode({ address: vaultAddress });
   return !!bytecode && bytecode !== "0x";
 };
 
-export const isSupportedChain = (chainId: number): boolean =>
-  chainId === base.id;
+export const isSupportedChain = (chainId: number): boolean => chainId === base.id;
 
 export const getChainLabel = (chainId: number): string => {
   if (chainId === base.id) return "Base";
   return `Chain ${chainId}`;
 };
 
-// ── 5. Unified client (EIP-4337 via CDP Paymaster) ───────────────────────────
-//
-// Interface SAMA dengan versi sebelumnya:
-//   client.account.address         → vault address
-//   client.sendUserOperation({ calls }) → kirim via bundler, gas dibayar CDP
-//   client.waitForUserOperationReceipt({ hash }) → tunggu konfirmasi
-//
+// ── 5. Smart Account Client (EIP-4337 + CDP Paymaster) ───────────────────────
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
+  // ✅ Baca env di DALAM fungsi — bukan module level
+  // Supaya process.env sudah di-inject Next.js saat fungsi dipanggil
+  const cdpUrl = process.env.NEXT_PUBLIC_CDP_PAYMASTER_URL;
+  if (!cdpUrl) throw new Error(
+    "NEXT_PUBLIC_CDP_PAYMASTER_URL is not set in .env\n" +
+    "Format: https://api.developer.coinbase.com/rpc/v1/base/YOUR_API_KEY"
+  );
+
   const ownerAddress = walletClient.account.address as Address;
 
-  // Detect vault version untuk pilih EntryPoint yang benar
+  // Detect versi vault → pilih EntryPoint yang benar
   const { address: vaultAddress, version: vaultVersion } =
     await detectVaultAddress(ownerAddress);
 
-  // Wrap walletClient jadi LocalAccount-compatible
-  // JsonRpcAccount (MetaMask dll) tidak punya signTransaction, perlu di-wrap
+  // Wrap JsonRpcAccount (MetaMask/wagmi) → LocalAccount
+  // toLightSmartAccount butuh tipe yang punya signTransaction
   const owner = toAccount({
     address: ownerAddress,
     async signMessage({ message }) {
-      return walletClient.signMessage({
-        account: walletClient.account!,
-        message,
-      });
+      return walletClient.signMessage({ account: walletClient.account!, message });
     },
     async signTransaction(transaction) {
       return walletClient.signTransaction({
@@ -200,8 +176,7 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     },
   });
 
-  // Build Light Account sesuai versi
-  // v1.1 → EntryPoint 0.6 | v2.0 → EntryPoint 0.7
+  // Build Light Account sesuai versi yang ter-deploy
   const lightAccount = await toLightSmartAccount({
     client:         publicClient,
     owner,
@@ -214,43 +189,43 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   });
 
   console.log("[EIP-4337] Vault:", vaultAddress);
-  console.log("[EIP-4337] Entry point version:", vaultVersion === "v1" ? "0.6" : "0.7");
-  console.log("[EIP-4337] Paymaster: CDP");
+  console.log("[EIP-4337] EntryPoint:", vaultVersion === "v1" ? "v0.6" : "v0.7");
+  console.log("[EIP-4337] Paymaster: CDP (gasless)");
 
-  // Buat Smart Account Client dengan CDP sebagai bundler + paymaster
+  // ✅ Buat paymaster + bundler client di sini (lazy)
+  const paymasterClient = createPaymasterClient({
+    transport: http(cdpUrl),
+  });
+
   const bundlerClient = createSmartAccountClient({
     account:          lightAccount,
     chain:            base,
-    bundlerTransport: http(CDP_URL),   // CDP sebagai bundler
-    paymaster:        paymasterClient, // CDP sebagai paymaster (sponsor gas)
+    bundlerTransport: http(cdpUrl),    // CDP = bundler
+    paymaster:        paymasterClient, // CDP = paymaster (sponsor gas)
     userOperation: {
-      estimateFeesPerGas: async () => {
-        // Biarkan bundler estimate fee
-        return { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
-      },
+      estimateFeesPerGas: async () => ({
+        maxFeePerGas:         0n,
+        maxPriorityFeePerGas: 0n,
+      }),
     },
   });
 
   return {
-    // ✅ Kompatibel dengan kode lama
     account: { address: vaultAddress },
 
-    // ✅ sendUserOperation — sekarang beneran EIP-4337, gas dibayar CDP
     sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
       console.log(`[EIP-4337] Sending ${calls.length} call(s) via CDP Paymaster`);
       const hash = await bundlerClient.sendUserOperation({ calls });
-      console.log("[EIP-4337] UserOperation hash:", hash);
+      console.log("[EIP-4337] UserOp hash:", hash);
       return hash;
     },
 
-    // ✅ waitForUserOperationReceipt — tunggu userOp masuk chain
     waitForUserOperationReceipt: async ({ hash }: { hash: `0x${string}` }) => {
-      console.log("[EIP-4337] Waiting for userOp receipt:", hash);
+      console.log("[EIP-4337] Waiting for receipt:", hash);
       const receipt = await bundlerClient.waitForUserOperationReceipt({ hash });
       return { receipt };
     },
 
-    // ✅ Helper functions tetap ada
     deployVault: () => deployVault(walletClient),
     isDeployed:  () => isVaultDeployed(vaultAddress),
   };
