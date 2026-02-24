@@ -1,9 +1,9 @@
 // src/lib/smart-account.ts
 //
-// ARSITEKTUR: EIP-4337 UserOperations via permissionless.js + CDP Paymaster
+// ARCHITECTURE: EIP-4337 UserOperations via permissionless.js + CDP Paymaster
 //
-// ✅ paymasterClient dibuat LAZY di dalam getSmartAccountClient()
-//    bukan di module level — supaya env variable sudah tersedia
+// ✅ paymasterClient is created LAZILY inside getSmartAccountClient()
+//    not at module level — so env variables are available when the function is called
 
 import {
   createPublicClient,
@@ -95,19 +95,19 @@ export const detectVaultAddress = async (
   const v2Deployed = !!codeV2 && codeV2 !== "0x";
 
   if (v1Deployed) {
-    console.log("[LightAccount] Using v1.1 vault:", addrV1);
+    console.log("[LightAccount] Detected v1.1 vault:", addrV1);
     return { address: addrV1, factory: FACTORY_V1, version: "v1" };
   }
   if (v2Deployed) {
-    console.log("[LightAccount] Using v2.0 vault:", addrV2);
+    console.log("[LightAccount] Detected v2.0 vault:", addrV2);
     return { address: addrV2, factory: FACTORY_V2, version: "v2" };
   }
 
-  console.log("[LightAccount] No vault deployed yet, will use v2:", addrV2);
+  console.log("[LightAccount] No vault deployed yet, defaulting to v2:", addrV2);
   return { address: addrV2, factory: FACTORY_V2, version: "v2" };
 };
 
-// ── 3. Deploy vault (regular tx, 1x only) ────────────────────────────────────
+// ── 3. Deploy vault (one-time regular tx) ────────────────────────────────────
 export const deployVault = async (
   walletClient: WalletClient,
   salt = 0n
@@ -140,21 +140,35 @@ export const getChainLabel = (chainId: number): string => {
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
-  // ✅ Baca env di DALAM fungsi — bukan module level
-  // Supaya process.env sudah di-inject Next.js saat fungsi dipanggil
+  // Read env INSIDE the function — not at module level
+  // so that Next.js has already injected process.env when this is called
   const cdpApiKey = process.env.NEXT_PUBLIC_CDP_API_KEY;
-  if (!cdpApiKey) throw new Error("NEXT_PUBLIC_CDP_API_KEY is not set in .env");
+  if (!cdpApiKey) throw new Error(
+    "NEXT_PUBLIC_CDP_API_KEY is not set in .env\n" +
+    "Expected value: your Coinbase Developer Platform API key (not the full URL)"
+  );
 
+  // Construct the full CDP URL from the API key
   const cdpUrl = `https://api.developer.coinbase.com/rpc/v1/base/${cdpApiKey}`;
 
   const ownerAddress = walletClient.account.address as Address;
 
-  // Detect versi vault → pilih EntryPoint yang benar
+  // Detect deployed vault version → select the correct EntryPoint
   const { address: vaultAddress, version: vaultVersion } =
     await detectVaultAddress(ownerAddress);
 
+  // ✅ Guard: CDP Paymaster only supports EntryPoint v0.7 (vault v2)
+  // Vault v1 uses EntryPoint v0.6 which CDP does not support → 404
+  if (vaultVersion === "v1") {
+    throw new Error(
+      "CDP Paymaster only supports EntryPoint v0.7 (vault v2).\n" +
+      "Your wallet has a v1 vault deployed which uses EntryPoint v0.6.\n" +
+      "Gasless transactions via CDP are not available for v1 vaults."
+    );
+  }
+
   // Wrap JsonRpcAccount (MetaMask/wagmi) → LocalAccount
-  // toLightSmartAccount butuh tipe yang punya signTransaction
+  // toLightSmartAccount requires an account type with signTransaction
   const owner = toAccount({
     address: ownerAddress,
     async signMessage({ message }) {
@@ -175,38 +189,33 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     },
   });
 
-  // Build Light Account sesuai versi yang ter-deploy
+  // Build LightAccount — always v2 at this point (v1 is blocked above)
   const lightAccount = await toLightSmartAccount({
     client:         publicClient,
     owner,
-    version:        vaultVersion === "v1" ? "1.1.0" : "2.0.0",
-    factoryAddress: vaultVersion === "v1" ? FACTORY_V1 : FACTORY_V2,
+    version:        "2.0.0",
+    factoryAddress: FACTORY_V2,
     entryPoint: {
-      address: vaultVersion === "v1" ? entryPoint06Address : entryPoint07Address,
-      version: vaultVersion === "v1" ? "0.6" : "0.7",
+      address: entryPoint07Address,
+      version: "0.7",
     },
   });
 
   console.log("[EIP-4337] Vault:", vaultAddress);
-  console.log("[EIP-4337] EntryPoint:", vaultVersion === "v1" ? "v0.6" : "v0.7");
+  console.log("[EIP-4337] EntryPoint: v0.7");
   console.log("[EIP-4337] Paymaster: CDP (gasless)");
 
-  // ✅ Buat paymaster + bundler client di sini (lazy)
+  // Create paymaster + bundler client lazily here
   const paymasterClient = createPaymasterClient({
     transport: http(cdpUrl),
   });
 
+  // ✅ No estimateFeesPerGas override — let CDP estimate gas fees automatically
   const bundlerClient = createSmartAccountClient({
     account:          lightAccount,
     chain:            base,
-    bundlerTransport: http(cdpUrl),    // CDP = bundler
-    paymaster:        paymasterClient, // CDP = paymaster (sponsor gas)
-    userOperation: {
-      estimateFeesPerGas: async () => ({
-        maxFeePerGas:         0n,
-        maxPriorityFeePerGas: 0n,
-      }),
-    },
+    bundlerTransport: http(cdpUrl),
+    paymaster:        paymasterClient,
   });
 
   return {
