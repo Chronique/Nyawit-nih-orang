@@ -12,39 +12,27 @@ import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, formatEther, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { Rocket, Check, Copy, Refresh, Shield } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
+import { useAppDialog } from "~/components/ui/app-dialog";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-// ── Known spenders on Base mainnet ────────────────────────────────────────────
-// Semua DEX/aggregator yang mungkin pernah di-approve oleh vault saat swap.
-// LI.FI bisa route ke mana saja dari list ini — lebih lengkap = makin aman.
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  // Aggregators
-  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" }, // same all chains (CREATE2) ✅
-  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" }, // same all chains ✅
-  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" }, // Base ✅
-  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" }, // Base ✅
-  { label: "Permit2",                   address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" }, // same all chains ✅
-
-  // Uniswap — Base addresses
-  { label: "Uniswap v3 SwapRouter",     address: "0x2626664c2603336E57B271c5C0b26F421741e481" }, // Base ✅
-  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" }, // Base ✅ (was wrong!)
-
-  // KyberSwap — Base addresses
-  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" }, // Base ✅
-  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" }, // Base ✅
-
-  // Aerodrome — largest DEX on Base, LI.FI routes here often
-  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" }, // Base ✅
-  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" }, // Base ✅
-
-  // Other Base DEXes LI.FI uses
-  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" }, // Base ✅
-  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" }, // Base ✅
+  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
+  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
+  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
+  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" },
+  { label: "Permit2",                   address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
+  { label: "Uniswap v3 SwapRouter",     address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
+  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
+  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
+  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
+  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
+  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
 
-// Allowance ABI
 const ALLOWANCE_ABI = [
   {
     name: "allowance",
@@ -81,6 +69,7 @@ export const DustDepositView = () => {
   const { data: walletClient }             = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
   const { switchChainAsync }               = useSwitchChain();
+  const { confirm }                        = useAppDialog();
 
   const [vaultAddress, setVaultAddress]         = useState<Address | null>(null);
   const [vaultVersion, setVaultVersion]         = useState<"v1" | "v2" | null>(null);
@@ -88,19 +77,16 @@ export const DustDepositView = () => {
   const [ethBalance, setEthBalance]             = useState("0");
   const [usdcBalance, setUsdcBalance]           = useState("0");
   const [dustTokens, setDustTokens]             = useState<any[]>([]);
-  // ✅ FIX 1: simpan semua token (termasuk USDC) untuk re-check approvals
   const [allVaultTokens, setAllVaultTokens]     = useState<any[]>([]);
   const [loading, setLoading]                   = useState(false);
   const [activating, setActivating]             = useState(false);
   const [deployTxHash, setDeployTxHash]         = useState<`0x${string}` | undefined>();
   const [toast, setToast]                       = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
-  // Revoke state
   const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [revoking, setRevoking]                 = useState(false);
 
-  // Watch deploy tx
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
   useEffect(() => {
     if (deployConfirmed) {
@@ -111,17 +97,14 @@ export const DustDepositView = () => {
     }
   }, [deployConfirmed]);
 
-  // Auto-detect vault version (v1 atau v2)
   useEffect(() => {
     if (!ownerAddress) return;
     detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
-      console.log("[DepositView] Vault:", address, "version:", version);
       setVaultAddress(address);
       setVaultVersion(version);
     });
   }, [ownerAddress]);
 
-  // ── Fetch vault data ───────────────────────────────────────────────────────
   const fetchVaultData = useCallback(async () => {
     if (!vaultAddress) return;
     setLoading(true);
@@ -148,11 +131,8 @@ export const DustDepositView = () => {
       const usdc = formatted.find(t => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       setUsdcBalance(usdc ? parseFloat(usdc.formattedBal).toFixed(2) : "0");
       setDustTokens(formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase()));
-
-      // ✅ FIX 1: simpan semua token untuk dipakai saat re-check approval setelah revoke
       setAllVaultTokens(formatted);
 
-      // Cek approvals setelah data vault loaded — pakai semua token termasuk USDC
       if (deployed) fetchApprovals(vaultAddress, formatted);
     } catch (e) {
       console.error(e);
@@ -163,14 +143,11 @@ export const DustDepositView = () => {
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
 
-  // ── Cek approvals: tiap token × tiap known spender ────────────────────────
   const fetchApprovals = async (vault: Address, tokens: any[]) => {
     if (tokens.length === 0) return;
     setLoadingApprovals(true);
     try {
       const found: ActiveApproval[] = [];
-
-      // Parallel check semua kombinasi token × spender
       await Promise.all(
         tokens.flatMap(token =>
           KNOWN_SPENDERS.map(async spender => {
@@ -190,14 +167,10 @@ export const DustDepositView = () => {
                   allowance,
                 });
               }
-            } catch {
-              // Token tidak implement standard allowance — skip
-            }
+            } catch { /* skip */ }
           })
         )
       );
-
-      console.log(`[Revoke] Found ${found.length} active approvals across ${KNOWN_SPENDERS.length} spenders`);
       setApprovals(found);
     } catch (e) {
       console.error("[Revoke] Error checking approvals:", e);
@@ -206,20 +179,25 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Revoke All: batch approve(spender, 0) via smart vault ─────────────────
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
-    if (!window.confirm(
-      `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?\n` +
-      `This uses 1 transaction from your vault.`
-    )) return;
+
+    // ✅ Custom dialog — gantikan window.confirm
+    const ok = await confirm(
+      `This uses 1 transaction from your vault.`,
+      {
+        title: `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
+        variant: "warning",
+        confirmText: "Revoke",
+      }
+    );
+    if (!ok) return;
 
     setRevoking(true);
     try {
       if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
       const client = await getSmartAccountClient(walletClient);
 
-      // Build revoke calls: approve(spender, 0) untuk tiap approval
       const revokeCalls = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
         value: 0n,
@@ -230,15 +208,12 @@ export const DustDepositView = () => {
         }),
       }));
 
-      console.log(`[Revoke] Batching ${revokeCalls.length} revokes in 1 tx`);
       const txHash = await client.sendUserOperation({ calls: revokeCalls });
       setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
 
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
-      setApprovals([]); // clear UI immediately
-
-      // ✅ FIX 1: re-check pakai allVaultTokens (termasuk USDC), bukan dustTokens
+      setApprovals([]);
       setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
@@ -251,7 +226,6 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Activate vault ─────────────────────────────────────────────────────────
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
@@ -339,7 +313,7 @@ export const DustDepositView = () => {
         )}
       </div>
 
-      {/* ── REVOKE SECTION ── */}
+      {/* REVOKE SECTION */}
       {isDeployed && (approvals.length > 0 || loadingApprovals) && (
         <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-4 space-y-3">
           <div className="flex items-center gap-2">
@@ -358,7 +332,6 @@ export const DustDepositView = () => {
             </div>
           </div>
 
-          {/* Grouped by token */}
           {!loadingApprovals && approvals.length > 0 && (
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
@@ -400,7 +373,6 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* Clean state */}
       {isDeployed && !loadingApprovals && approvals.length === 0 && allVaultTokens.length > 0 && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-500/5 border border-green-500/20">
           <Shield className="w-3.5 h-3.5 text-green-400 shrink-0" />
@@ -410,7 +382,6 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* ACTIVATION SECTION */}
       {!isDeployed && (
         <div className="rounded-2xl border border-orange-500/30 bg-orange-500/5 p-4 space-y-3">
           <div className="space-y-1">
@@ -442,7 +413,6 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* ACTIVE STATE */}
       {isDeployed && (
         <div className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4 space-y-2">
           <p className="text-sm font-semibold text-green-400 flex items-center gap-2">

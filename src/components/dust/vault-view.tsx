@@ -9,18 +9,13 @@ import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArr
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
+import { useAppDialog } from "~/components/ui/app-dialog";
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ITEMS_PER_PAGE = 10;
-
-// ── Deposit limits ────────────────────────────────────────────────────────────
-// Only show tokens worth LESS than this USD value (nyawit = dust only)
 const MAX_TOKEN_USD   = 3.0;
-// Minimum to bother showing (filter out absolute zero-value tokens)
 const MIN_TOKEN_USD   = 0.001;
-// Max ETH user can deposit from wallet to vault in one tx
 const MAX_ETH_DEPOSIT = 0.005;
-// Max USDC deposit per tx
 const MAX_USDC_DEPOSIT = 10;
 
 const generatePagination = (current: number, total: number) => {
@@ -57,6 +52,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const { data: walletClient } = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
+  const { confirm, prompt } = useAppDialog();
 
   const [vaultAddress, setVaultAddress]               = useState<string | null>(null);
   const [ethBalance, setEthBalance]                   = useState("0");
@@ -124,7 +120,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       const activeTokens = data.filter((t) => BigInt(t.balance) > 0n);
       if (activeTokens.length === 0) { setOwnerTokens([]); return; }
 
-      // Fetch prices to filter out dust tokens below MIN_DEPOSIT_USD
       const prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
       setOwnerTokenPrices(prices);
 
@@ -132,11 +127,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         const bal   = parseFloat(formatUnits(BigInt(t.balance), t.decimals || 18));
         const price = prices[t.token_address.toLowerCase()] || 0;
         const usd   = bal * price;
-        // nyawit = dust only: show tokens between MIN and MAX_TOKEN_USD
         return usd >= MIN_TOKEN_USD && usd < MAX_TOKEN_USD;
       });
 
-      // Sort by USD value descending
       withValue.sort((a, b) => {
         const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] || 0);
         const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] || 0);
@@ -191,7 +184,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Deposit ETH from wallet → vault (max MAX_ETH_DEPOSIT per tx)
   const handleDepositETH = async () => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     const amount = parseFloat(ethDepositAmount);
@@ -203,7 +195,14 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       setToast({ msg: `Max ${MAX_ETH_DEPOSIT} ETH per deposit.`, type: "error" });
       return;
     }
-    if (!window.confirm(`Deposit ${amount} ETH to vault?\n\nThis will be used as gas reserve.`)) return;
+
+    // ✅ Custom dialog
+    const ok = await confirm(`Deposit ${amount} ETH to vault?\n\nThis will be used as gas reserve.`, {
+      title: "Deposit ETH",
+      confirmText: "Deposit",
+    });
+    if (!ok) return;
+
     try {
       await ensureNetwork();
       setActionLoading(`Depositing ${amount} ETH to vault...`);
@@ -227,9 +226,22 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
 
   const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
-    const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
+
+    // ✅ Custom prompt
+    const amount = await prompt(
+      `Enter amount to withdraw:`,
+      token.formattedBal,
+      { title: `Withdraw ${token.symbol}`, placeholder: "e.g. 1.5", confirmText: "Withdraw" }
+    );
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
-    if (!window.confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`)) return;
+
+    // ✅ Custom confirm
+    const ok = await confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`, {
+      title: "Confirm Withdrawal",
+      confirmText: "Withdraw",
+    });
+    if (!ok) return;
+
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${token.symbol}...`);
@@ -252,11 +264,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Single deposit — use walletClient.writeContract (works for both EOA and smart wallet connectors)
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
 
-    // Cap USDC deposits at MAX_USDC_DEPOSIT
     const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
     if (isUsdc) {
       const usdcAmount = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
@@ -266,7 +276,13 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       }
     }
 
-    if (!window.confirm(`Deposit ${token.symbol} to vault?`)) return;
+    // ✅ Custom confirm
+    const ok = await confirm(`Deposit ${token.symbol} to vault?`, {
+      title: "Confirm Deposit",
+      confirmText: "Deposit",
+    });
+    if (!ok) return;
+
     try {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
@@ -288,15 +304,22 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  // Batch deposit — walletClient.writeContract per token (works for both EOA and smart wallets)
   const handleBatchDeposit = async () => {
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
     if (tokensToDeposit.length === 0) return;
 
-    if (!window.confirm(
-      `Deposit ${tokensToDeposit.length} token${tokensToDeposit.length > 1 ? "s" : ""} to vault?\n` +
-      (tokensToDeposit.length > 1 ? `⚠️ You will sign ${tokensToDeposit.length} transactions one by one.` : "")
-    )) return;
+    // ✅ Custom confirm — gantikan window.confirm dengan warning soal multi-tx
+    const ok = await confirm(
+      tokensToDeposit.length > 1
+        ? `You will sign ${tokensToDeposit.length} transactions one by one.`
+        : `Deposit ${tokensToDeposit[0].symbol} to vault?`,
+      {
+        title: `Deposit ${tokensToDeposit.length} token${tokensToDeposit.length > 1 ? "s" : ""} to vault?`,
+        confirmText: "Deposit",
+        variant: tokensToDeposit.length > 1 ? "warning" : "default",
+      }
+    );
+    if (!ok) return;
 
     try {
       await ensureNetwork();
@@ -306,7 +329,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         try {
           setActionLoading(`[${successCount + 1}/${tokensToDeposit.length}] Depositing ${token.symbol}...`);
 
-          // Cap USDC at MAX_USDC_DEPOSIT
           const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
           if (isUsdc) {
             const usdcAmt = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
@@ -434,7 +456,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                   <input
                     type="number" placeholder={`Amount (max ${MAX_ETH_DEPOSIT} ETH)`}
                     value={ethDepositAmount} onChange={(e) => setEthDepositAmount(e.target.value)}
-                    max={MAX_ETH_DEPOSIT}                    className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
+                    max={MAX_ETH_DEPOSIT}
+                    className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
                   />
                   <button
                     onClick={handleDepositETH}
@@ -584,7 +607,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           )}
         </div>
 
-        {/* Batch deposit button */}
         {selectedOwnerTokens.size >= 1 && (
           <div className="mt-4 animate-in fade-in slide-in-from-bottom-2">
             <button

@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
 import { getSmartAccountClient } from "~/lib/smart-account";
-// ✅ publicClient & WETH_ABI removed — unwrap moved to Harvest tab
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
@@ -11,12 +10,11 @@ import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther } 
 import { base } from "viem/chains";
 import { Refresh, Flash, Check, ArrowRight, WarningTriangle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
+import { useAppDialog } from "~/components/ui/app-dialog";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
-
-// ✅ Max 5 tokens per batch — matches limit in batch-swap.ts
 const MAX_BATCH_TOKENS = 5;
 
 interface TokenData {
@@ -51,9 +49,11 @@ const TokenLogo = ({ token }: { token: any }) => {
 };
 
 export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) => {
+  // ✅ ALL hooks must be at top level inside component
   const { data: walletClient } = useWalletClient();
   const { chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
+  const { confirm, prompt } = useAppDialog(); // ✅ called inside component body
 
   const [tokens, setTokens]                 = useState<TokenData[]>([]);
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
@@ -145,7 +145,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (s.has(addr)) {
       s.delete(addr);
     } else {
-      // ✅ Reject if 5 tokens already selected
       if (s.size >= MAX_BATCH_TOKENS) {
         setToast({ msg: `Maximum ${MAX_BATCH_TOKENS} tokens per batch.`, type: "error" });
         return;
@@ -161,7 +160,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (selectedTokens.size === tokens.length) {
       setSelectedTokens(new Set());
     } else {
-      // ✅ Select All max 5 tokens
       setSelectedTokens(new Set(tokens.slice(0, MAX_BATCH_TOKENS).map(t => t.contractAddress)));
     }
     setSimulation(null);
@@ -170,9 +168,22 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
   const handleWithdrawToken = async (token: TokenData) => {
     if (!walletClient) return;
-    const amount = prompt(`Withdraw ${token.symbol}? Enter amount:`, token.formattedBal);
+
+    // ✅ Custom prompt — gantikan window.prompt
+    const amount = await prompt(
+      `Enter amount to withdraw:`,
+      token.formattedBal,
+      { title: `Withdraw ${token.symbol}`, placeholder: "e.g. 1.5", confirmText: "Withdraw" }
+    );
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
-    if (!window.confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`)) return;
+
+    // ✅ Custom confirm — gantikan window.confirm
+    const ok = await confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`, {
+      title: "Confirm Withdrawal",
+      confirmText: "Withdraw",
+    });
+    if (!ok) return;
+
     try {
       const client    = await getSmartAccountClient(walletClient);
       const ownerAddr = walletClient.account?.address as Address;
@@ -201,7 +212,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           selectedTokens.has(t.contractAddress) &&
           t.contractAddress.toLowerCase() !== WETH_ADDRESS.toLowerCase()
         )
-        .slice(0, MAX_BATCH_TOKENS) // ✅ Max 5
+        .slice(0, MAX_BATCH_TOKENS)
         .map(t => ({
           address: t.contractAddress as Address,
           symbol:  t.symbol,
@@ -226,7 +237,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     }
   };
 
-  // ── EXECUTE: swap tokens → WETH (unwrap to ETH in Harvest tab) ───────────
+  // ── EXECUTE ───────────────────────────────────────────────────────────────
   const handleExecute = async () => {
     if (!walletClient || !simulation || simulation.processable.length === 0) return;
     setExecuting(true);
@@ -243,8 +254,6 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
         balance: c.balance,
       }));
 
-      // ✅ Swap complete → WETH sits in vault
-      // Unwrap WETH → ETH is handled in the Harvest tab (separate feature)
       const execResult = await executeBatchSwap({
         walletClient,
         chainId: chainId ?? 8453,
@@ -435,12 +444,9 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
             const simItem    = simulation?.candidates.find(c => c.token.toLowerCase() === token.contractAddress.toLowerCase());
             const simSkip    = simItem?.status === "skip";
             const simOk      = simItem?.status === "ok";
-            // ✅ Disable if already 5 selected and this token is not yet selected
             const isDisabled = !isSelected && selectedTokens.size >= MAX_BATCH_TOKENS;
-            // Token classification tags
             const isDust     = token.valueUsd > 0 && token.valueUsd < 0.10;
             const noPrice    = token.priceUsd === 0 && parseFloat(token.formattedBal) < 1_000_000;
-            // Spam heuristic: zero price + suspiciously huge airdropped balance (>1M units)
             const isSpam     = token.priceUsd === 0 && parseFloat(token.formattedBal) >= 1_000_000;
 
             return (
