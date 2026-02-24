@@ -263,7 +263,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
 
       const skippedCount = simulation.skipped.length;
       setToast({
-        msg:  `✓ ${simulation.processable.length} token${simulation.processable.length > 1 ? "s" : ""} swapped → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Open Harvest tab to unwrap to ETH.`,
+        msg:  `✓ ${simulation.processable.length} token${simulation.processable.length > 1 ? "s" : ""} swapped → WETH${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}. Open TANAM tab to unwrap to ETH.`,
         type: "success",
       });
 
@@ -311,7 +311,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Flash className="w-4 h-4 text-yellow-400" /> Aggregator Mode
           </h3>
-          <p className="text-xs text-green-200 mt-1">Token → WETH (unwrap to ETH in Harvest tab)</p>
+          <p className="text-xs text-green-200 mt-1">Token → WETH (unwrap to ETH in TANAM tab)</p>
           <p className="text-[10px] text-green-400 mt-0.5">5% platform fee · LI.FI · max {MAX_BATCH_TOKENS} tokens · 1 tx</p>
         </div>
         <div className="bg-black/30 p-2 rounded-lg border border-white/20 min-w-[80px]">
@@ -404,7 +404,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
           )}
 
           <p className="text-[10px] text-zinc-500 text-center">
-            Received WETH can be unwrapped to ETH in the Harvest tab
+            Received WETH can be unwrapped to ETH in the TANAM tab
           </p>
         </div>
       )}
