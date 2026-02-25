@@ -103,7 +103,7 @@ export const DustDepositView = () => {
       });
       setToast({ msg: "Sending GM...", type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
-      setToast({ msg: "GM sent! 🌅 (Gasless)", type: "success" });
+      setToast({ msg: "GM sent!", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
       setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM failed: " + msg, type: "error" });
@@ -222,7 +222,7 @@ export const DustDepositView = () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} akan direvoke.\nBeberapa token mungkin tidak support revoke — akan di-skip.`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked. \nSome tokens may not support revocation — they will be skipped..`,
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
