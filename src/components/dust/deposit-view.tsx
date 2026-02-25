@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
+  getDirectVaultClient,
   detectVaultAddress,
   deployVault,
   publicClient,
@@ -249,7 +250,7 @@ export const DustDepositView = () => {
     setRevoking(true);
     try {
       if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getDirectVaultClient(walletClient);
 
       const revokeCalls = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
