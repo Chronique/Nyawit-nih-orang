@@ -209,14 +209,20 @@ export const DustDepositView = () => {
   };
 
   // ── Revoke ────────────────────────────────────────────────────────────────
-  // Strategy:
-  //   1. Coba sponsored (CDP) dulu — CDP mungkin izinkan approve(0) karena security op
-  //   2. Fallback ke selfPay jika CDP reject — vault harus punya ETH
+  //
+  // Kenapa tidak batch:
+  //   Beberapa token (Towns, dll) revert saat approve(spender, 0).
+  //   Satu revert membatalkan seluruh batch.
+  //
+  // Solusi: kirim tiap approval sebagai UserOp terpisah.
+  //   Token yang revert → skip + laporkan.
+  //   Token lain tetap direvoke.
+  //
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} akan direvoke dalam 1 transaksi.`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} akan direvoke.\nBeberapa token mungkin tidak support revoke — akan di-skip.`,
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
@@ -226,48 +232,87 @@ export const DustDepositView = () => {
     if (!ok) return;
 
     setRevoking(true);
+
+    // Dapatkan client sekali (sponsored dulu, fallback self-pay)
+    let client: Awaited<ReturnType<typeof getSmartAccountClient>>;
+    try {
+      client = await getSmartAccountClient(walletClient);
+    } catch {
+      client = await getSelfPayingSmartAccountClient(walletClient);
+    }
+
+    let successCount = 0;
+    const failedTokens: string[] = [];
+
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      const revokeCalls = approvals.map(approval => ({
-        to:    approval.tokenAddress as Address,
-        value: 0n,
-        data:  encodeFunctionData({
-          abi:          erc20Abi,
-          functionName: "approve",
-          args:         [approval.spenderAddress as Address, 0n],
-        }),
-      }));
+      for (const approval of approvals) {
+        setToast({
+          msg:  `Revoking ${approval.tokenSymbol} (${successCount + failedTokens.length + 1}/${approvals.length})...`,
+          type: "success",
+        });
 
-      let txHash: string;
+        try {
+          // Coba approve(spender, 0) dulu
+          let txHash: string;
+          try {
+            txHash = await client.sendUserOperation({
+              calls: [{
+                to:    approval.tokenAddress as Address,
+                value: 0n,
+                data:  encodeFunctionData({
+                  abi: erc20Abi, functionName: "approve",
+                  args: [approval.spenderAddress as Address, 0n],
+                }),
+              }],
+            });
+          } catch {
+            // Fallback: approve(spender, 1) untuk token yang revert di approve(0)
+            console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
+            txHash = await client.sendUserOperation({
+              calls: [{
+                to:    approval.tokenAddress as Address,
+                value: 0n,
+                data:  encodeFunctionData({
+                  abi: erc20Abi, functionName: "approve",
+                  args: [approval.spenderAddress as Address, 1n],
+                }),
+              }],
+            });
+          }
 
-      // 1. Coba sponsored dulu
-      try {
-        console.log("[Revoke] Trying sponsored (CDP)...");
-        const sponsoredClient = await getSmartAccountClient(walletClient);
-        txHash = await sponsoredClient.sendUserOperation({ calls: revokeCalls });
-        console.log("[Revoke] Sponsored OK ✓");
-        setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}... (gasless)`, type: "success" });
-        await sponsoredClient.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
-      } catch (sponsorErr: any) {
-        // 2. Fallback ke self-pay jika paymaster reject
-        console.warn("[Revoke] Sponsored failed, trying self-pay:", sponsorErr?.message);
-
-        // Cek ETH vault sebelum self-pay
-        const vaultEth = await publicClient.getBalance({ address: vaultAddress });
-        if (vaultEth < 1_000_000_000_000n) { // < 0.000001 ETH
-          throw new Error("Vault needs ETH to pay gas for revoke. Deposit a small amount of ETH to the vault first.");
+          await client.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
+          successCount++;
+          console.log(`[Revoke] ✓ ${approval.tokenSymbol} revoked`);
+        } catch (tokenErr: any) {
+          console.error(`[Revoke] ✗ ${approval.tokenSymbol} failed:`, tokenErr?.message);
+          failedTokens.push(approval.tokenSymbol);
         }
-
-        const selfPayClient = await getSelfPayingSmartAccountClient(walletClient);
-        txHash = await selfPayClient.sendUserOperation({ calls: revokeCalls });
-        setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}... (vault pays gas)`, type: "success" });
-        await selfPayClient.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
       }
 
-      setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
-      setApprovals([]);
-      setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
+      // Hapus approvals yang berhasil direvoke
+      const failedAddresses = new Set(
+        approvals
+          .filter(a => failedTokens.includes(a.tokenSymbol))
+          .map(a => a.tokenAddress)
+      );
+      setApprovals(prev => prev.filter(a => failedAddresses.has(a.tokenAddress)));
+
+      if (successCount > 0 && failedTokens.length === 0) {
+        setToast({ msg: `✓ All ${successCount} approval${successCount > 1 ? "s" : ""} revoked!`, type: "success" });
+      } else if (successCount > 0) {
+        setToast({
+          msg:  `✓ ${successCount} revoked · ${failedTokens.length} skipped (${failedTokens.join(", ")} — token restriction)`,
+          type: "success",
+        });
+      } else {
+        setToast({ msg: `All tokens have revoke restriction. Cannot set allowance to 0.`, type: "error" });
+      }
+
+      if (successCount > 0) {
+        setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
+      }
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
@@ -374,7 +419,7 @@ export const DustDepositView = () => {
           <div className="flex items-center gap-2">
             <Shield className="w-4 h-4 text-red-400 shrink-0" />
             <div>
-              <p className="text-sm font-semibold text-red-300">
+              <p className="text-sm font-semibold text-white">
                 {loadingApprovals
                   ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
                   : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
@@ -395,8 +440,8 @@ export const DustDepositView = () => {
                 return (
                   <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-red-200">{symbol}</span>
-                      <span className="text-zinc-400 text-[10px]">
+                      <span className="font-bold text-white">{symbol}</span>
+                      <span className="text-zinc-300 text-[10px]">
                         {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
                       </span>
                     </div>
@@ -498,7 +543,7 @@ export const DustDepositView = () => {
           {sendingGM ? (
             <><Refresh className="w-6 h-6 animate-spin" /> Sending GM...</>
           ) : (
-            <>🌅 GM</>
+            <> GM</>
           )}
         </button>
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
