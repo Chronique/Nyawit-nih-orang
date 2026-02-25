@@ -419,7 +419,7 @@ export const DustDepositView = () => {
           <div className="flex items-center gap-2">
             <Shield className="w-4 h-4 text-red-400 shrink-0" />
             <div>
-              <p className="text-sm font-semibold text-white">
+              <p className="text-sm font-semibold text-black">
                 {loadingApprovals
                   ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
                   : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
@@ -440,7 +440,7 @@ export const DustDepositView = () => {
                 return (
                   <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-white">{symbol}</span>
+                      <span className="font-bold text-black">{symbol}</span>
                       <span className="text-zinc-300 text-[10px]">
                         {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
                       </span>
