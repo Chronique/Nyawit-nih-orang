@@ -5,17 +5,16 @@
 // DUA MODE CLIENT:
 // ┌─────────────────────────────┬──────────────────────────────────────────────┐
 // │ getSmartAccountClient()     │ SPONSORED (gas gratis via CDP Paymaster)     │
-// │                             │ → wrap ETH→WETH / unwrap WETH→ETH           │
+// │                             │ → wrap/unwrap ETH ↔ WETH                    │
 // │                             │ → deposit/withdraw Morpho                    │
-// │                             │ → withdrawal vault→EOA                       │
+// │                             │ → withdrawal vault → EOA                     │
 // │                             │ → revoke approvals                           │
 // ├─────────────────────────────┼──────────────────────────────────────────────┤
 // │ getDirectVaultClient()      │ TIDAK SPONSORED (EOA bayar gas)              │
 // │                             │ → swap dust tokens (approve random ERC20)    │
-// │                             │   CDP tidak bisa whitelist token sembarang   │
 // ├─────────────────────────────┼──────────────────────────────────────────────┤
 // │ deployVault()               │ TIDAK SPONSORED — satu kali, EOA bayar       │
-// │ walletClient.writeContract  │ → deposit EOA→vault                          │
+// │ walletClient.writeContract  │ → deposit EOA → vault                        │
 // └─────────────────────────────┴──────────────────────────────────────────────┘
 
 import {
@@ -28,6 +27,7 @@ import { base } from "viem/chains";
 import {
   entryPoint07Address,
   createPaymasterClient,
+  createBundlerClient,
 } from "viem/account-abstraction";
 import { toLightSmartAccount } from "permissionless/accounts";
 import { createSmartAccountClient } from "permissionless";
@@ -42,7 +42,7 @@ const DATA_SUFFIX = Attribution.toDataSuffix({ codes: ["bc_1x8rrnnv"] });
 export const FACTORY_V1 = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
 export const FACTORY_V2 = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address;
 
-// ── ABIs — semua deklarasi di atas, tidak ada duplikat ───────────────────────
+// ── ABIs ──────────────────────────────────────────────────────────────────────
 const FACTORY_ABI = [
   {
     name: "getAddress",
@@ -61,7 +61,6 @@ const FACTORY_ABI = [
 ] as const;
 
 // Light Account v2.0 — executeBatch WITH value[] (EP v0.7)
-// Deklarasi SEKALI di sini, dipakai oleh buildDirectClient di bawah
 const LIGHT_ACCOUNT_V2_ABI = [
   {
     name: "executeBatch",
@@ -179,7 +178,21 @@ export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> =
   return !!bytecode && bytecode !== "0x";
 };
 
-// ── 5. buildDirectClient — shared builder (tidak ada duplikat ABI) ────────────
+// ── 5. getLightAccount — shared helper ───────────────────────────────────────
+async function getLightAccount(walletClient: WalletClient) {
+  return toLightSmartAccount({
+    client:         publicClient,
+    owner:          walletClient as any,
+    version:        "2.0.0",
+    factoryAddress: FACTORY_V2,
+    entryPoint: {
+      address: entryPoint07Address,
+      version: "0.7",
+    },
+  });
+}
+
+// ── 6. buildDirectClient — direct vault call, EOA bayar gas ──────────────────
 function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
   return {
     account:    { address: vaultAddress },
@@ -192,7 +205,7 @@ function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
       if (calls.length === 1) {
         return walletClient.writeContract({
           address:      vaultAddress,
-          abi:          LIGHT_ACCOUNT_V2_ABI, // reuse dari atas
+          abi:          LIGHT_ACCOUNT_V2_ABI,
           functionName: "execute",
           args:         [calls[0].to, calls[0].value ?? 0n, calls[0].data ?? "0x"],
           chain:        base,
@@ -202,7 +215,7 @@ function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
       }
       return walletClient.writeContract({
         address:      vaultAddress,
-        abi:          LIGHT_ACCOUNT_V2_ABI, // reuse dari atas
+        abi:          LIGHT_ACCOUNT_V2_ABI,
         functionName: "executeBatch",
         args: [
           calls.map((c) => c.to),
@@ -225,21 +238,12 @@ function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
   };
 }
 
-// ── 6. getLightAccount — shared helper ────────────────────────────────────────
-async function getLightAccount(walletClient: WalletClient) {
-  return toLightSmartAccount({
-    client:         publicClient,
-    owner:          walletClient as any,
-    version:        "2.0.0",
-    factoryAddress: FACTORY_V2,
-    entryPoint: {
-      address: entryPoint07Address,
-      version: "0.7",
-    },
-  });
-}
-
-// ── 7. getSmartAccountClient — SPONSORED ─────────────────────────────────────
+// ── 7. getSmartAccountClient — SPONSORED via CDP Paymaster ───────────────────
+//
+// ⚠ PENTING: Jangan set estimateFeesPerGas custom saat pakai paymaster.
+//   CDP bundler yang handle gas estimation — kalau di-override akan conflict
+//   dan throw "Missing or invalid parameters".
+//
 export const getSmartAccountClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
 
@@ -253,20 +257,13 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
       transport: http(cdpUrl),
     });
 
+    // ⚠ Tidak ada userOperation.estimateFeesPerGas di sini
+    // CDP bundler otomatis set gas yang benar untuk EP v0.7 + paymaster
     const sponsoredClient = createSmartAccountClient({
       account:          lightAccount,
       chain:            base,
       bundlerTransport: http(cdpUrl),
       paymaster:        paymasterClient,
-      userOperation: {
-        estimateFeesPerGas: async () => {
-          const fees = await publicClient.estimateFeesPerGas();
-          return {
-            maxFeePerGas:         fees.maxFeePerGas         ?? 2_000_000n,
-            maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? 1_000_000n,
-          };
-        },
-      },
     });
 
     return {
@@ -296,13 +293,13 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   }
 
   // Fallback ke direct jika CDP key tidak ada
+  console.warn("[CDP] Fallback ke direct (no paymaster key)");
   return buildDirectClient(walletClient, lightAccount.address);
 };
 
-// ── 8. getDirectVaultClient — TIDAK SPONSORED (untuk swap) ───────────────────
+// ── 8. getDirectVaultClient — TIDAK SPONSORED (untuk swap dust tokens) ───────
 export const getDirectVaultClient = async (walletClient: WalletClient) => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
-
   const lightAccount = await getLightAccount(walletClient);
   console.log("[Direct Vault] Swap client:", lightAccount.address);
   return buildDirectClient(walletClient, lightAccount.address);
