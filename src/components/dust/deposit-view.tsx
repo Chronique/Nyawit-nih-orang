@@ -33,6 +33,15 @@ const KNOWN_SPENDERS: { label: string; address: Address }[] = [
   { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
 
+
+// Gm Contract 
+const GM_CONTRACT_ADDRESS = "0xce0274F873cDbC261ee684cAb428C4233bc20dC2";
+const GM_ABI = [
+  { name: "sayGM", type: "function", stateMutability: "nonpayable", inputs: [] }
+] as const;
+
+
+
 const ALLOWANCE_ABI = [
   {
     name: "allowance",
@@ -86,6 +95,50 @@ export const DustDepositView = () => {
   const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [revoking, setRevoking]                 = useState(false);
+  const [sendingGM, setSendingGM] = useState(false);
+
+  const handleSayGM = async () => {
+  if (!walletClient || !isDeployed) {
+    setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
+    return;
+  }
+
+  setSendingGM(true);
+  try {
+    if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
+    
+    const client = await getSmartAccountClient(walletClient);
+
+    // Kirim User Operation (Gas dibayar Paymaster)
+    const txHash = await client.sendUserOperation({
+      calls: [
+        {
+          to: GM_CONTRACT_ADDRESS,
+          value: 0n,
+          data: encodeFunctionData({
+            abi: GM_ABI,
+            functionName: "sayGM",
+          }),
+        },
+      ],
+    });
+
+    setToast({ msg: "Sending GM to the world... ☀️", type: "success" });
+    await client.waitForUserOperationReceipt({ hash: txHash });
+    setToast({ msg: "GM! Transaction successful (Gasless) 🎉", type: "success" });
+    
+    // Refresh data jika perlu
+    fetchVaultData();
+  } catch (e: any) {
+    const msg = e?.shortMessage || e?.message || "Unknown error";
+    setToast({
+      msg: msg.includes("rejected") ? "Cancelled." : "GM Failed: " + msg,
+      type: "error",
+    });
+  } finally {
+    setSendingGM(false);
+  }
+};
 
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
   useEffect(() => {
@@ -429,6 +482,25 @@ export const DustDepositView = () => {
           </p>
         </div>
       )}
+      {/* GM SECTION (GASLESS) */}
+<div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
+  <button
+    onClick={handleSayGM}
+    disabled={sendingGM || !isDeployed}
+    className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
+      bg-gradient-to-r from-yellow-400 to-orange-500 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-orange-500/20
+      disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed"
+  >
+    {sendingGM ? (
+      <><Refresh className="w-6 h-6 animate-spin" /> SPREADING SUNSHINE...</>
+    ) : (
+      <>GM </>
+    )}
+  </button>
+  <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
+    Interaction with {GM_CONTRACT_ADDRESS.slice(0,6)}... sponsored by Paymaster
+  </p>
+</div>
     </div>
   );
 };

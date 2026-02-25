@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
+import { getSmartAccountClient, getDirectVaultClient, publicClient } from "~/lib/smart-account";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";
 import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
@@ -13,9 +13,7 @@ import { useAppDialog } from "~/components/ui/app-dialog";
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ITEMS_PER_PAGE = 10;
-const MAX_TOKEN_USD   = 3.0;
-const MIN_TOKEN_USD   = 0.001;
-const MAX_ETH_DEPOSIT = 0.005;
+const MAX_ETH_DEPOSIT  = 0.005;
 const MAX_USDC_DEPOSIT = 10;
 
 const generatePagination = (current: number, total: number) => {
@@ -117,26 +115,31 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       ]);
       setOwnerEthBalance(ethBal);
 
+      // ── Tampilkan SEMUA token dengan balance > 0 ──────────────────────────
       const activeTokens = data.filter((t) => BigInt(t.balance) > 0n);
       if (activeTokens.length === 0) { setOwnerTokens([]); return; }
 
-      const prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
-      setOwnerTokenPrices(prices);
+      // Fetch harga — best effort, tidak mempengaruhi apakah token ditampilkan
+      let prices: Record<string, number> = {};
+      try {
+        prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
+        setOwnerTokenPrices(prices);
+      } catch {
+        // price fetch gagal → tetap tampil token tanpa harga
+        setOwnerTokenPrices({});
+      }
 
-      const withValue = activeTokens.filter(t => {
-        const bal   = parseFloat(formatUnits(BigInt(t.balance), t.decimals || 18));
-        const price = prices[t.token_address.toLowerCase()] || 0;
-        const usd   = bal * price;
-        return usd >= MIN_TOKEN_USD && usd < MAX_TOKEN_USD;
-      });
+      // Sort: token dengan harga diketahui dulu (usd desc), lalu yang tidak ada harga
+      const withPrice    = activeTokens.filter(t => (prices[t.token_address.toLowerCase()] ?? 0) > 0);
+      const withoutPrice = activeTokens.filter(t => !(prices[t.token_address.toLowerCase()] ?? 0));
 
-      withValue.sort((a, b) => {
-        const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] || 0);
-        const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] || 0);
+      withPrice.sort((a, b) => {
+        const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] ?? 0);
+        const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] ?? 0);
         return valB - valA;
       });
 
-      setOwnerTokens(withValue);
+      setOwnerTokens([...withPrice, ...withoutPrice]);
       setCurrentOwnerPage(1);
     } catch (e) {
       console.error("Failed to fetch wallet tokens:", e);
@@ -159,6 +162,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Withdraw ETH — pakai getDirectVaultClient ─────────────────────────────
+  // CDP Paymaster tidak bisa sponsor native ETH transfer (tidak ada kontrak
+  // untuk di-whitelist). Gas ~$0.0001 di Base, EOA bayar langsung.
   const handleWithdrawETH = async () => {
     if (!walletClient || !ownerAddress || !vaultAddress || !ethWithdrawAmount) return;
     if (isNaN(Number(ethWithdrawAmount)) || Number(ethWithdrawAmount) <= 0) {
@@ -168,7 +174,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
-      const client = await getSmartAccountClient(walletClient);
+
+      // Direct client — EOA bayar gas, bukan paymaster
+      const client = await getDirectVaultClient(walletClient);
       const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
@@ -196,7 +204,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       return;
     }
 
-    // ✅ Custom dialog
     const ok = await confirm(`Deposit ${amount} ETH to vault?\n\nThis will be used as gas reserve.`, {
       title: "Deposit ETH",
       confirmText: "Deposit",
@@ -224,10 +231,12 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Withdraw ERC20 — pakai getDirectVaultClient ───────────────────────────
+  // CDP allowlist hanya USDC + WETH. Token lain reject → direct saja.
+  // Untuk USDC pun kita direct supaya konsisten dan tidak perlu cek per token.
   const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
 
-    // ✅ Custom prompt
     const amount = await prompt(
       `Enter amount to withdraw:`,
       token.formattedBal,
@@ -235,7 +244,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     );
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
 
-    // ✅ Custom confirm
     const ok = await confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`, {
       title: "Confirm Withdrawal",
       confirmText: "Withdraw",
@@ -250,7 +258,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         abi: erc20Abi, functionName: "transfer",
         args: [ownerAddress as Address, rawAmount],
       });
-      const client = await getSmartAccountClient(walletClient);
+
+      // Direct client — EOA bayar gas
+      const client = await getDirectVaultClient(walletClient);
       const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
@@ -276,7 +286,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       }
     }
 
-    // ✅ Custom confirm
     const ok = await confirm(`Deposit ${token.symbol} to vault?`, {
       title: "Confirm Deposit",
       confirmText: "Deposit",
@@ -308,7 +317,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
     if (tokensToDeposit.length === 0) return;
 
-    // ✅ Custom confirm — gantikan window.confirm dengan warning soal multi-tx
     const ok = await confirm(
       tokensToDeposit.length > 1
         ? `You will sign ${tokensToDeposit.length} transactions one by one.`
@@ -533,7 +541,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
             </h3>
             <p className="text-[10px] text-zinc-500 mt-0.5">
-              Dust tokens only · value &lt; $3
+              All tokens · priced tokens sorted first
             </p>
             {ownerTokens.length > 0 && (
               <button
@@ -562,6 +570,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           ) : (
             currentOwnerTokens.map((token, i) => {
               const isSelected = selectedOwnerTokens.has(token.token_address);
+              const usdVal = ownerTokenPrices[token.token_address.toLowerCase()]
+                ? parseFloat(formatUnits(BigInt(token.balance), token.decimals)) * ownerTokenPrices[token.token_address.toLowerCase()]
+                : null;
               return (
                 <div
                   key={i}
@@ -585,10 +596,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                       <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
                       <div className="text-xs text-zinc-500">
                         {parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}
-                        {ownerTokenPrices[token.token_address.toLowerCase()] && (
-                          <span className="ml-1 text-zinc-400">
-                            · ${(parseFloat(formatUnits(BigInt(token.balance), token.decimals)) * ownerTokenPrices[token.token_address.toLowerCase()]).toFixed(2)}
-                          </span>
+                        {usdVal !== null && (
+                          <span className="ml-1 text-zinc-400">· ${usdVal.toFixed(2)}</span>
                         )}
                       </div>
                     </div>

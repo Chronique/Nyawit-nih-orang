@@ -144,14 +144,14 @@ export const detectVaultAddress = async (
   const v2Deployed = !!codeV2 && codeV2 !== "0x";
 
   if (v2Deployed) {
-    console.log("[LightAccount] v2.0 vault aktif:", addrV2);
+    console.log("[LightAccount] v2.0 active vault:", addrV2);
     return { address: addrV2, factory: FACTORY_V2, version: "v2" };
   }
   if (v1Deployed) {
-    console.warn("[LightAccount] v1.1 vault ditemukan, paymaster tidak support v1.");
+    console.warn("[LightAccount] v1.1 vault Not found, paymaster not supported. v1.");
     return { address: addrV1, factory: FACTORY_V1, version: "v1" };
   }
-  console.log("[LightAccount] Belum ada vault, siap deploy v2:", addrV2);
+  console.log("[LightAccount] No vault yet, ready to deploy v2:", addrV2);
   return { address: addrV2, factory: FACTORY_V2, version: "v2" };
 };
 
@@ -200,7 +200,7 @@ function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
 
     sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
       if (!walletClient.account) throw new Error("walletClient.account is null");
-      console.log(`[Direct Vault] ${calls.length} call(s) — EOA bayar gas`);
+      console.log(`[Direct Vault] ${calls.length} call(s) — EOA Pay gas, no paymaster`);
 
       if (calls.length === 1) {
         return walletClient.writeContract({
@@ -271,7 +271,7 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
       _sponsored: true,
 
       sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
-        console.log(`[CDP] ${calls.length} call(s) — SPONSORED 🎉`);
+        console.log(`[CDP] ${calls.length} call(s) — SPONSORED via CDP Paymaster`);
         return sponsoredClient.sendUserOperation({
           calls: calls.map((c) => ({
             to:    c.to,

@@ -180,7 +180,7 @@ export async function executeBatchSwap({
     calls.push({ to: r.to, value: r.value, data: r.data });
   }
 
-  if (calls.length === 0) throw new Error("No fresh routes. Coba lagi.");
+  if (calls.length === 0) throw new Error("No fresh routes. try again.");
 
   const txHash  = await client.sendUserOperation({ calls });
   const receipt = await client.waitForUserOperationReceipt({ hash: txHash });
