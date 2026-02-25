@@ -159,7 +159,7 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
   const cdpUrl = process.env.NEXT_PUBLIC_CDP_PAYMASTER_URL;
   if (!cdpUrl) throw new Error(
     "NEXT_PUBLIC_CDP_PAYMASTER_URL is not set in .env\n" +
-    "Format: https://api.developer.coinbase.com/rpc/v1/base/YOUR_API_KEY"
+    "Format: https://api.developer.coinbase.com/rpc/v1/base/${key}"
   );
 
   const ownerAddress = walletClient.account.address as Address;
