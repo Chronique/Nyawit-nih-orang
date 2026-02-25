@@ -1,49 +1,49 @@
 // src/lib/moralis-data.ts
 // ── Drop-in replacement: Moralis → Alchemy SDK ────────────────────────────────
-// Interface MoralisToken dipertahankan persis sama supaya semua komponen
-// (swap-view, vault-view, deposit-view, tanam-view) tidak perlu diubah sama sekali.
 
 import { alchemy } from "~/lib/alchemy";
 import { TokenBalanceType } from "alchemy-sdk";
 
 export interface MoralisToken {
   token_address: string;
-  balance:       string;   // raw integer string (bukan hex)
+  balance:       string;
   symbol:        string;
   decimals:      number;
   logo:          string | null;
   name:          string;
 }
 
-/**
- * Fetch semua ERC-20 token balance untuk satu address menggunakan Alchemy.
- * Return type identik dengan versi Moralis — komponen tidak perlu diubah.
- *
- * Alchemy `getTokenBalances` → parallel `getTokenMetadata` per token.
- * Free tier: 300M compute units/bulan (sangat cukup untuk mini-app).
- */
 export async function fetchMoralisTokens(address: string): Promise<MoralisToken[]> {
   try {
-    // Step 1: ambil semua token balance (1 call)
+    // Step 1: ambil semua token balance dengan pagination
     const allBalances: any[] = [];
     let pageKey: string | undefined = undefined;
 
     do {
       const res: any = await alchemy.core.getTokenBalances(address, {
-        type: TokenBalanceType.ERC20, // ← explicit ERC20 only
+        type: TokenBalanceType.ERC20,
         ...(pageKey ? { pageKey } : {}),
       });
       allBalances.push(...res.tokenBalances);
-      pageKey = res.pageKey; // undefined = sudah habis
+      pageKey = res.pageKey;
     } while (pageKey);
 
-    const nonZero = allBalances.filter(
+    // ── DEDUPLICATE by contractAddress (case-insensitive) ──────────────────
+    // Alchemy kadang return token yang sama 2x dari page berbeda
+    const seenAddresses = new Set<string>();
+    const uniqueBalances = allBalances.filter(t => {
+      const addr = t.contractAddress?.toLowerCase();
+      if (!addr || seenAddresses.has(addr)) return false;
+      seenAddresses.add(addr);
+      return true;
+    });
+
+    const nonZero = uniqueBalances.filter(
       t => t.tokenBalance && BigInt(t.tokenBalance) !== 0n
     );
     if (nonZero.length === 0) return [];
 
-    // Step 2: ambil metadata secara parallel
-    // Alchemy free tier bisa handle ~50 parallel calls dengan aman
+    // Step 2: ambil metadata secara parallel, chunked
     const CHUNK_SIZE = 25;
     const results: MoralisToken[] = [];
 

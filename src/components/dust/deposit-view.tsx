@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
+  getDirectVaultClient,
   detectVaultAddress,
   deployVault,
   publicClient,
@@ -53,85 +54,12 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
-// ── LightAccount ABIs untuk direct call (EOA → vault.execute/executeBatch) ──
-// v1.x: execute(address dest, uint256 value, bytes func)
-//        executeBatch(address[] dest, uint256[] value, bytes[] func)
-const LIGHT_ACCOUNT_V1_ABI = [
-  {
-    name: "execute",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest",  type: "address" },
-      { name: "value", type: "uint256" },
-      { name: "func",  type: "bytes"   },
-    ],
-    outputs: [],
-  },
-  {
-    name: "executeBatch",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest",  type: "address[]" },
-      { name: "value", type: "uint256[]" },
-      { name: "func",  type: "bytes[]"   },
-    ],
-    outputs: [],
-  },
-] as const;
-
-// v2.x: execute(Call call) where Call = { address target; uint256 value; bytes data }
-//        executeBatch(Call[] calls)
-const LIGHT_ACCOUNT_V2_ABI = [
-  {
-    name: "execute",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "call",
-        type: "tuple",
-        components: [
-          { name: "target", type: "address" },
-          { name: "value",  type: "uint256" },
-          { name: "data",   type: "bytes"   },
-        ],
-      },
-    ],
-    outputs: [],
-  },
-  {
-    name: "executeBatch",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "calls",
-        type: "tuple[]",
-        components: [
-          { name: "target", type: "address" },
-          { name: "value",  type: "uint256" },
-          { name: "data",   type: "bytes"   },
-        ],
-      },
-    ],
-    outputs: [],
-  },
-] as const;
-
 interface ActiveApproval {
   tokenAddress:   string;
   tokenSymbol:    string;
   spenderAddress: string;
   spenderLabel:   string;
   allowance:      bigint;
-}
-
-interface RevokeCall {
-  to:   Address;
-  value: bigint;
-  data:  `0x${string}`;
 }
 
 export const DustDepositView = () => {
@@ -282,9 +210,15 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Revoke: EOA → vault.execute/executeBatch langsung (bukan UserOp) ──────
-  // Bypass CDP paymaster & bundler sepenuhnya.
-  // EOA adalah owner vault, bisa panggil execute() langsung sebagai msg.sender.
+  // ── Revoke: pakai getDirectVaultClient (ABI sama persis dengan swap yang berfungsi) ──
+  //
+  // ✅ FIX: Ganti walletClient.writeContract + tuple ABI custom
+  //        → getDirectVaultClient yang pakai flat ABI (address,uint256,bytes)
+  //        yang IDENTIK dengan yang dipakai batch swap — terbukti berfungsi.
+  //
+  // Root cause #1002: deposit-view sebelumnya pakai tuple ABI
+  // execute((address,uint256,bytes)) yang selector-nya BEDA dengan
+  // execute(address,uint256,bytes) di kontrak yang actual.
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
@@ -302,8 +236,12 @@ export const DustDepositView = () => {
     try {
       if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
 
-      // Build approve(spender, 0) calldata untuk tiap approval
-      const revokeCalls: RevokeCall[] = approvals.map(approval => ({
+      // Gunakan getDirectVaultClient — pakai ABI yang sama dengan batch swap
+      // yang sudah terbukti berfungsi (flat ABI, bukan tuple)
+      const client = await getDirectVaultClient(walletClient);
+
+      // Build approve(spender, 0) untuk tiap approval
+      const calls = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
         value: 0n,
         data:  encodeFunctionData({
@@ -313,58 +251,10 @@ export const DustDepositView = () => {
         }),
       }));
 
-      let txHash: `0x${string}`;
-
-      if (vaultVersion === "v1") {
-        // ── LightAccount v1 ──────────────────────────────────────────────
-        if (revokeCalls.length === 1) {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V1_ABI,
-            functionName: "execute",
-            args:         [revokeCalls[0].to, revokeCalls[0].value, revokeCalls[0].data],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        } else {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V1_ABI,
-            functionName: "executeBatch",
-            args:         [
-              revokeCalls.map(c => c.to),
-              revokeCalls.map(c => c.value),
-              revokeCalls.map(c => c.data),
-            ],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        }
-      } else {
-        // ── LightAccount v2 (default) ────────────────────────────────────
-        if (revokeCalls.length === 1) {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V2_ABI,
-            functionName: "execute",
-            args:         [{ target: revokeCalls[0].to, value: revokeCalls[0].value, data: revokeCalls[0].data }],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        } else {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V2_ABI,
-            functionName: "executeBatch",
-            args:         [revokeCalls.map(c => ({ target: c.to, value: c.value, data: c.data }))],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        }
-      }
+      const txHash = await client.sendUserOperation({ calls });
 
       setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await client.waitForUserOperationReceipt({ hash: txHash });
 
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
       setApprovals([]);
