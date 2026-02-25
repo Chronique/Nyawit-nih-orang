@@ -11,6 +11,7 @@ import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { useAppDialog } from "~/components/ui/app-dialog";
 
+
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ITEMS_PER_PAGE = 10;
 const MAX_ETH_DEPOSIT  = 0.005;
@@ -74,7 +75,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getDirectVaultClient(walletClient);
       const addr   = client.account.address;
       const bal    = await publicClient.getBalance({ address: addr });
       const code   = await publicClient.getBytecode({ address: addr });
