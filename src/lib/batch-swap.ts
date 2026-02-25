@@ -1,6 +1,12 @@
 // src/lib/batch-swap.ts
+//
+// ⚠ Swap pakai getDirectVaultClient (TIDAK sponsored) karena CDP Paymaster
+// tidak bisa whitelist semua token ERC20 sembarang (approve ke random token = reject).
+//
+// Operasi lain (wrap/unwrap, morpho) tetap pakai getSmartAccountClient (sponsored).
+
 import { encodeFunctionData, erc20Abi, type Address } from "viem";
-import { getSmartAccountClient } from "~/lib/smart-account";
+import { getDirectVaultClient } from "~/lib/smart-account";
 
 const WETH             = "0x4200000000000000000000000000000000000006" as Address;
 const PLATFORM_FEE_BPS = 500n;
@@ -35,7 +41,7 @@ export interface SimulationResult {
   };
 }
 
-// ── FETCH ROUTE ──
+// ── Fetch quote dari aggregator ───────────────────────────────────────────────
 async function fetchRoute(
   token:   Address,
   balance: bigint,
@@ -49,8 +55,7 @@ async function fetchRoute(
       buyToken:   WETH,
       sellAmount: balance.toString(),
       taker:      vault,
-      // Slippage %% (0.05) untuk mengakomodasi volatilitas token dust
-      slippage:   "0.05", 
+      slippage:   "0.05",
     });
 
     const res = await fetch(`/api/quote?${params}`);
@@ -63,7 +68,6 @@ async function fetchRoute(
       to:              q.transaction.to as Address,
       data:            q.transaction.data as `0x${string}`,
       value:           BigInt(q.transaction.value || "0"),
-      // Pastikan spender valid (bukan Permit2)
       approvalSpender: (q.transaction.approvalAddress || q.transaction.to) as Address,
       agg:             q._tool || "LI.FI",
       grossWethOut:    BigInt(q.buyAmount || "0"),
@@ -74,7 +78,7 @@ async function fetchRoute(
   }
 }
 
-// ── SIMULATE ──
+// ── SIMULATE ──────────────────────────────────────────────────────────────────
 export async function simulateBatchSwap({
   walletClient,
   chainId,
@@ -84,55 +88,56 @@ export async function simulateBatchSwap({
   chainId:      number;
   tokens: { address: Address; symbol: string; balance: bigint }[];
 }): Promise<SimulationResult> {
-  const client = await getSmartAccountClient(walletClient);
+  // Pakai direct client hanya untuk dapat vault address — tidak send tx
+  const client = await getDirectVaultClient(walletClient);
   const vault  = client.account.address;
 
-  // Batasi maksimal 5 token untuk simulasi agar akurat dengan eksekusi
   const limitedTokens = tokens.slice(0, 5);
 
   const candidates: SwapCandidate[] = await Promise.all(
     limitedTokens.map(async t => {
       if (t.balance === 0n) {
-        return { token: t.address, symbol: t.symbol, balance: t.balance, status: "skip" as const, reason: "Zero balance", netWethOut: 0n, estimatedFee: 0n };
+        return {
+          token: t.address, symbol: t.symbol, balance: t.balance,
+          status: "skip" as const, reason: "Zero balance",
+          netWethOut: 0n, estimatedFee: 0n,
+        };
       }
 
       const route = await fetchRoute(t.address, t.balance, vault, chainId);
       if (!route) {
-        return { token: t.address, symbol: t.symbol, balance: t.balance, status: "skip" as const, reason: "No route/Permit2", netWethOut: 0n, estimatedFee: 0n };
+        return {
+          token: t.address, symbol: t.symbol, balance: t.balance,
+          status: "skip" as const, reason: "No route",
+          netWethOut: 0n, estimatedFee: 0n,
+        };
       }
 
       const fee    = (route.grossWethOut * PLATFORM_FEE_BPS) / BPS_DENOM;
       const netOut = route.grossWethOut - fee;
 
       return {
-        token:    t.address,
-        symbol:   t.symbol,
-        balance:  t.balance,
-        route,
-        status:   "ok" as const,
-        netWethOut:   netOut,
-        estimatedFee: fee,
+        token:    t.address, symbol: t.symbol, balance: t.balance,
+        route, status: "ok" as const,
+        netWethOut: netOut, estimatedFee: fee,
       };
     })
   );
 
   const processable = candidates.filter(c => c.status === "ok");
   const skipped     = candidates.filter(c => c.status === "skip");
-
   const totalNetWeth = processable.reduce((a, c) => a + c.netWethOut,   0n);
   const totalFee     = processable.reduce((a, c) => a + c.estimatedFee, 0n);
 
-  return { 
-    candidates, 
-    processable, 
-    skipped, 
-    totalNetWeth, 
-    totalFee, 
-    gasEstimate: { callGasLimit: BigInt(processable.length) * 250_000n + 100_000n } 
+  return {
+    candidates, processable, skipped, totalNetWeth, totalFee,
+    gasEstimate: { callGasLimit: BigInt(processable.length) * 250_000n + 100_000n },
   };
 }
 
-// ── EXECUTE ──
+// ── EXECUTE ───────────────────────────────────────────────────────────────────
+// Pakai getDirectVaultClient — EOA bayar gas
+// (CDP Paymaster reject approve() ke token ERC20 sembarang)
 export async function executeBatchSwap({
   walletClient,
   chainId,
@@ -142,10 +147,9 @@ export async function executeBatchSwap({
   chainId:      number;
   tokens: { address: Address; symbol: string; balance: bigint }[];
 }) {
-  const client = await getSmartAccountClient(walletClient);
+  const client = await getDirectVaultClient(walletClient);
   const vault  = client.account.address;
 
-  // Proteksi keras: Hanya proses maksimal 5 token
   const batchToProcess = tokens.slice(0, 5);
 
   const routeResults = await Promise.all(
@@ -157,10 +161,9 @@ export async function executeBatchSwap({
   for (let i = 0; i < batchToProcess.length; i++) {
     const t = batchToProcess[i]!;
     const r = routeResults[i];
-
     if (!r) continue;
 
-    // 1. APPROVE (Gunakan balance spesifik agar tidak boros gas)
+    // 1. Approve token ke router
     calls.push({
       to:    t.address,
       value: 0n,
@@ -171,17 +174,12 @@ export async function executeBatchSwap({
       }),
     });
 
-    // 2. SWAP (Menggunakan calldata segar dari LI.FI)
-    calls.push({ 
-      to: r.to, 
-      value: r.value, 
-      data: r.data 
-    });
+    // 2. Swap via aggregator
+    calls.push({ to: r.to, value: r.value, data: r.data });
   }
 
-  if (calls.length === 0) throw new Error("No fresh routes available. Please try again.");
+  if (calls.length === 0) throw new Error("No fresh routes. Coba lagi.");
 
-  // Mengirim User Operation (1 konfirmasi di wallet untuk semua swap)
   const txHash  = await client.sendUserOperation({ calls });
   const receipt = await client.waitForUserOperationReceipt({ hash: txHash });
 

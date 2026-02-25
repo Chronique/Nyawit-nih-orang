@@ -2,17 +2,21 @@
 //
 // ✅ CDP PAYMASTER — EntryPoint v0.7 (Light Account v2.0)
 //
-// SPONSORED (gas-free untuk user):
-//   swap, deposit morpho, withdraw morpho, wrap ETH→WETH,
-//   unwrap WETH→ETH, withdrawal vault→EOA, revoke approvals
-//
-// NOT SPONSORED (user bayar gas sendiri):
-//   deploy vault, deposit EOA→vault (walletClient.sendTransaction / writeContract)
-//
-// ⚠ Syarat owner:
-//   EOA (MetaMask, Rabby, Farcaster custody wallet) → ✅ ECDSA langsung jalan
-//   Coinbase Smart Wallet (Base App native)          → ❌ EIP-1271 tidak support
-//   Solusi: di Base App, pilih injected/EOA wallet bukan Smart Wallet
+// DUA MODE CLIENT:
+// ┌─────────────────────────────┬──────────────────────────────────────────────┐
+// │ getSmartAccountClient()     │ SPONSORED (gas gratis via CDP Paymaster)     │
+// │                             │ → wrap ETH→WETH / unwrap WETH→ETH           │
+// │                             │ → deposit/withdraw Morpho                    │
+// │                             │ → withdrawal vault→EOA                       │
+// │                             │ → revoke approvals                           │
+// ├─────────────────────────────┼──────────────────────────────────────────────┤
+// │ getDirectVaultClient()      │ TIDAK SPONSORED (EOA bayar gas)              │
+// │                             │ → swap dust tokens (approve random ERC20)    │
+// │                             │   CDP tidak bisa whitelist token sembarang   │
+// ├─────────────────────────────┼──────────────────────────────────────────────┤
+// │ deployVault()               │ TIDAK SPONSORED — satu kali, EOA bayar       │
+// │ walletClient.writeContract  │ → deposit EOA→vault                          │
+// └─────────────────────────────┴──────────────────────────────────────────────┘
 
 import {
   createPublicClient,
@@ -29,18 +33,16 @@ import { toLightSmartAccount } from "permissionless/accounts";
 import { createSmartAccountClient } from "permissionless";
 import { Attribution } from "ox/erc8021";
 
-// ── Constants ──────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 export const ACTIVE_CHAIN = base;
 export const IS_TESTNET   = false;
 
 const DATA_SUFFIX = Attribution.toDataSuffix({ codes: ["bc_1x8rrnnv"] });
 
-// Factory Light Account v1.1 (EntryPoint v0.6) — vault lama, tanpa paymaster
 export const FACTORY_V1 = "0x00004EC70002a32400f8ae005A26081065620D20" as Address;
-// Factory Light Account v2.0 (EntryPoint v0.7) — vault baru, support CDP paymaster
 export const FACTORY_V2 = "0x0000000000400CdFef5E2714E63d8040b700BC24" as Address;
 
-// ── ABIs ──────────────────────────────────────────────────────────────────────
+// ── ABIs — semua deklarasi di atas, tidak ada duplikat ───────────────────────
 const FACTORY_ABI = [
   {
     name: "getAddress",
@@ -59,6 +61,7 @@ const FACTORY_ABI = [
 ] as const;
 
 // Light Account v2.0 — executeBatch WITH value[] (EP v0.7)
+// Deklarasi SEKALI di sini, dipakai oleh buildDirectClient di bawah
 const LIGHT_ACCOUNT_V2_ABI = [
   {
     name: "executeBatch",
@@ -99,11 +102,11 @@ export interface VaultCall {
   data:  `0x${string}`;
 }
 
-// ── CDP URL ───────────────────────────────────────────────────────────────────
+// ── CDP URL helper ────────────────────────────────────────────────────────────
 const getCdpUrl = (): string | null => {
   const key = process.env.NEXT_PUBLIC_CDP_API_KEY;
   if (!key) {
-    console.warn("[CDP] NEXT_PUBLIC_CDP_API_KEY belum di-set — transaksi TIDAK di-sponsor");
+    console.warn("[CDP] NEXT_PUBLIC_CDP_API_KEY belum di-set");
     return null;
   }
   return `https://api.developer.coinbase.com/rpc/v1/base/${key}`;
@@ -123,8 +126,7 @@ export const deriveVaultAddress = async (
   });
 };
 
-// ── 2. Deteksi vault version yang sudah ter-deploy ────────────────────────────
-// Dipakai komponen UI untuk display badge v1/v2 dan warning migrasi
+// ── 2. Deteksi vault version ──────────────────────────────────────────────────
 export const detectVaultAddress = async (
   ownerAddress: Address,
   salt = 0n
@@ -142,34 +144,24 @@ export const detectVaultAddress = async (
   const v1Deployed = !!codeV1 && codeV1 !== "0x";
   const v2Deployed = !!codeV2 && codeV2 !== "0x";
 
-  // v2 diprioritaskan — support CDP paymaster (EP v0.7)
   if (v2Deployed) {
     console.log("[LightAccount] v2.0 vault aktif:", addrV2);
     return { address: addrV2, factory: FACTORY_V2, version: "v2" };
   }
-
-  // v1 ada tapi v2 belum — tampilkan warning di UI, operasi tetap pakai v2 address
   if (v1Deployed) {
-    console.warn(
-      "[LightAccount] v1.1 vault ditemukan. Paymaster tidak support v1.",
-      "getSmartAccountClient akan pakai v2 address — deploy v2 dulu untuk gasless."
-    );
-    // Return v1 address agar UI bisa tampilkan aset lama + banner migrasi
+    console.warn("[LightAccount] v1.1 vault ditemukan, paymaster tidak support v1.");
     return { address: addrV1, factory: FACTORY_V1, version: "v1" };
   }
-
-  // Belum ada vault — address v2 yang akan di-deploy
   console.log("[LightAccount] Belum ada vault, siap deploy v2:", addrV2);
   return { address: addrV2, factory: FACTORY_V2, version: "v2" };
 };
 
-// ── 3. Deploy vault v2 (EOA bayar gas — satu kali saja) ─────────────────────
+// ── 3. Deploy vault v2 (EOA bayar gas — satu kali) ───────────────────────────
 export const deployVault = async (
   walletClient: WalletClient,
   salt = 0n
 ): Promise<`0x${string}`> => {
   if (!walletClient.account) throw new Error("walletClient.account is null");
-  // Deploy selalu v2 untuk paymaster support
   return walletClient.writeContract({
     address:      FACTORY_V2,
     abi:          FACTORY_ABI,
@@ -187,95 +179,20 @@ export const isVaultDeployed = async (vaultAddress: Address): Promise<boolean> =
   return !!bytecode && bytecode !== "0x";
 };
 
-// ── 5. getSmartAccountClient — mesin utama paymaster ─────────────────────────
-//
-// Semua operasi melalui fungsi ini GRATIS untuk user (gas dibayar CDP).
-// Hanya deploy vault & deposit EOA→vault yang pakai walletClient langsung.
-//
-export const getSmartAccountClient = async (walletClient: WalletClient) => {
-  if (!walletClient.account) throw new Error("walletClient.account is null");
-
-  const cdpUrl = getCdpUrl();
-
-  // ── Light Account v2.0 (EntryPoint v0.7) ──────────────────────────────────
-  // Selalu pakai v2 untuk CDP paymaster support.
-  // Jika user masih di v1, mereka perlu deploy v2 dulu (tombol "Activate" di UI).
-  const lightAccount = await toLightSmartAccount({
-    client:         publicClient,
-    owner:          walletClient as any, // EOA WalletClient sebagai ECDSA signer
-    version:        "2.0.0",
-    factoryAddress: FACTORY_V2,
-    entryPoint: {
-      address: entryPoint07Address, // 0x0000000071727De22E5E9d8BAf0edAc6f37da032
-      version: "0.7",
-    },
-  });
-
-  console.log("[CDP Paymaster] Smart Account (v2):", lightAccount.address);
-
-  // ── DENGAN CDP Paymaster (gas gratis) ─────────────────────────────────────
-  if (cdpUrl) {
-    const paymasterClient = createPaymasterClient({
-      transport: http(cdpUrl),
-    });
-
-    const smartAccountClient = createSmartAccountClient({
-      account:          lightAccount,
-      chain:            base,
-      bundlerTransport: http(cdpUrl),
-      paymaster:        paymasterClient,
-      userOperation: {
-        estimateFeesPerGas: async () => {
-          // Ambil gas price dari network, bukan hardcode 0 (EP v0.7 strict)
-          const fees = await publicClient.estimateFeesPerGas();
-          return {
-            maxFeePerGas:         fees.maxFeePerGas         ?? 2_000_000n,
-            maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? 1_000_000n,
-          };
-        },
-      },
-    });
-
-    return {
-      account: { address: lightAccount.address },
-
-      // Kirim UserOperation (sponsored — gas gratis) ─────────────────────────
-      sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
-        console.log(`[CDP Paymaster] ${calls.length} call(s) — SPONSORED 🎉`);
-        return smartAccountClient.sendUserOperation({
-          calls: calls.map((c) => ({
-            to:    c.to,
-            value: c.value ?? 0n,
-            data:  c.data  ?? "0x",
-          })),
-        });
-      },
-
-      // Tunggu UserOp masuk ke blockchain ────────────────────────────────────
-      waitForUserOperationReceipt: async ({ hash }: { hash: `0x${string}` }) => {
-        console.log("[CDP Paymaster] Waiting for UserOp:", hash);
-        const receipt = await smartAccountClient.waitForUserOperationReceipt({ hash });
-        return { receipt };
-      },
-
-      deployVault: () => deployVault(walletClient),
-      isDeployed:  () => isVaultDeployed(lightAccount.address),
-    };
-  }
-
-  // ── TANPA CDP Paymaster (fallback — hanya untuk dev local tanpa key) ──────
-  // User bayar gas sendiri via direct vault contract call
-  console.warn("[CDP Paymaster] Fallback mode — user bayar gas (no paymaster)");
-
+// ── 5. buildDirectClient — shared builder (tidak ada duplikat ABI) ────────────
+function buildDirectClient(walletClient: WalletClient, vaultAddress: Address) {
   return {
-    account: { address: lightAccount.address },
+    account:    { address: vaultAddress },
+    _sponsored: false,
 
     sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
       if (!walletClient.account) throw new Error("walletClient.account is null");
+      console.log(`[Direct Vault] ${calls.length} call(s) — EOA bayar gas`);
+
       if (calls.length === 1) {
         return walletClient.writeContract({
-          address:      lightAccount.address,
-          abi:          LIGHT_ACCOUNT_V2_ABI,
+          address:      vaultAddress,
+          abi:          LIGHT_ACCOUNT_V2_ABI, // reuse dari atas
           functionName: "execute",
           args:         [calls[0].to, calls[0].value ?? 0n, calls[0].data ?? "0x"],
           chain:        base,
@@ -284,8 +201,8 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
         });
       }
       return walletClient.writeContract({
-        address:      lightAccount.address,
-        abi:          LIGHT_ACCOUNT_V2_ABI,
+        address:      vaultAddress,
+        abi:          LIGHT_ACCOUNT_V2_ABI, // reuse dari atas
         functionName: "executeBatch",
         args: [
           calls.map((c) => c.to),
@@ -304,8 +221,91 @@ export const getSmartAccountClient = async (walletClient: WalletClient) => {
     },
 
     deployVault: () => deployVault(walletClient),
-    isDeployed:  () => isVaultDeployed(lightAccount.address),
+    isDeployed:  () => isVaultDeployed(vaultAddress),
   };
+}
+
+// ── 6. getLightAccount — shared helper ────────────────────────────────────────
+async function getLightAccount(walletClient: WalletClient) {
+  return toLightSmartAccount({
+    client:         publicClient,
+    owner:          walletClient as any,
+    version:        "2.0.0",
+    factoryAddress: FACTORY_V2,
+    entryPoint: {
+      address: entryPoint07Address,
+      version: "0.7",
+    },
+  });
+}
+
+// ── 7. getSmartAccountClient — SPONSORED ─────────────────────────────────────
+export const getSmartAccountClient = async (walletClient: WalletClient) => {
+  if (!walletClient.account) throw new Error("walletClient.account is null");
+
+  const cdpUrl      = getCdpUrl();
+  const lightAccount = await getLightAccount(walletClient);
+
+  console.log("[CDP] Smart Account v2:", lightAccount.address);
+
+  if (cdpUrl) {
+    const paymasterClient = createPaymasterClient({
+      transport: http(cdpUrl),
+    });
+
+    const sponsoredClient = createSmartAccountClient({
+      account:          lightAccount,
+      chain:            base,
+      bundlerTransport: http(cdpUrl),
+      paymaster:        paymasterClient,
+      userOperation: {
+        estimateFeesPerGas: async () => {
+          const fees = await publicClient.estimateFeesPerGas();
+          return {
+            maxFeePerGas:         fees.maxFeePerGas         ?? 2_000_000n,
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? 1_000_000n,
+          };
+        },
+      },
+    });
+
+    return {
+      account:    { address: lightAccount.address },
+      _sponsored: true,
+
+      sendUserOperation: async ({ calls }: { calls: VaultCall[] }) => {
+        console.log(`[CDP] ${calls.length} call(s) — SPONSORED 🎉`);
+        return sponsoredClient.sendUserOperation({
+          calls: calls.map((c) => ({
+            to:    c.to,
+            value: c.value ?? 0n,
+            data:  c.data  ?? "0x",
+          })),
+        });
+      },
+
+      waitForUserOperationReceipt: async ({ hash }: { hash: `0x${string}` }) => {
+        console.log("[CDP] Waiting for UserOp:", hash);
+        const receipt = await sponsoredClient.waitForUserOperationReceipt({ hash });
+        return { receipt };
+      },
+
+      deployVault: () => deployVault(walletClient),
+      isDeployed:  () => isVaultDeployed(lightAccount.address),
+    };
+  }
+
+  // Fallback ke direct jika CDP key tidak ada
+  return buildDirectClient(walletClient, lightAccount.address);
+};
+
+// ── 8. getDirectVaultClient — TIDAK SPONSORED (untuk swap) ───────────────────
+export const getDirectVaultClient = async (walletClient: WalletClient) => {
+  if (!walletClient.account) throw new Error("walletClient.account is null");
+
+  const lightAccount = await getLightAccount(walletClient);
+  console.log("[Direct Vault] Swap client:", lightAccount.address);
+  return buildDirectClient(walletClient, lightAccount.address);
 };
 
 // ── Helper exports ────────────────────────────────────────────────────────────
