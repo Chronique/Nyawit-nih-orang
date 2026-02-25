@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
-  getDirectVaultClient,
+  getSelfPayingSmartAccountClient,
   detectVaultAddress,
   deployVault,
   publicClient,
@@ -208,14 +208,15 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Revoke: pakai getDirectVaultClient (sama seperti swap) ──────────────
-  // sendUserOperation({ calls }) otomatis handle single/batch via executeBatch.
-  // EOA bayar gas — CDP tidak bisa sponsor approve() ke random token.
+  // ── Revoke ────────────────────────────────────────────────────────────────
+  // Strategy:
+  //   1. Coba sponsored (CDP) dulu — CDP mungkin izinkan approve(0) karena security op
+  //   2. Fallback ke selfPay jika CDP reject — vault harus punya ETH
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked in 1 transaction.\nGas paid from your wallet (~$0.001 on Base).`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} akan direvoke dalam 1 transaksi.`,
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
@@ -228,7 +229,6 @@ export const DustDepositView = () => {
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      // Build approve(spender, 0) calls — persis seperti swap builds approve calls
       const revokeCalls = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
         value: 0n,
@@ -239,12 +239,32 @@ export const DustDepositView = () => {
         }),
       }));
 
-      // getDirectVaultClient handles single/batch sama seperti executeBatchSwap
-      const client = await getDirectVaultClient(walletClient);
-      const txHash = await client.sendUserOperation({ calls: revokeCalls });
+      let txHash: string;
 
-      setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
+      // 1. Coba sponsored dulu
+      try {
+        console.log("[Revoke] Trying sponsored (CDP)...");
+        const sponsoredClient = await getSmartAccountClient(walletClient);
+        txHash = await sponsoredClient.sendUserOperation({ calls: revokeCalls });
+        console.log("[Revoke] Sponsored OK ✓");
+        setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}... (gasless)`, type: "success" });
+        await sponsoredClient.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
+      } catch (sponsorErr: any) {
+        // 2. Fallback ke self-pay jika paymaster reject
+        console.warn("[Revoke] Sponsored failed, trying self-pay:", sponsorErr?.message);
+
+        // Cek ETH vault sebelum self-pay
+        const vaultEth = await publicClient.getBalance({ address: vaultAddress });
+        if (vaultEth < 1_000_000_000_000n) { // < 0.000001 ETH
+          throw new Error("Vault needs ETH to pay gas for revoke. Deposit a small amount of ETH to the vault first.");
+        }
+
+        const selfPayClient = await getSelfPayingSmartAccountClient(walletClient);
+        txHash = await selfPayClient.sendUserOperation({ calls: revokeCalls });
+        setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}... (vault pays gas)`, type: "success" });
+        await selfPayClient.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
+      }
+
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
       setApprovals([]);
       setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
@@ -350,11 +370,11 @@ export const DustDepositView = () => {
 
       {/* REVOKE SECTION */}
       {isDeployed && (approvals.length > 0 || loadingApprovals) && (
-        <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-4 space-y-3">
+        <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <Shield className="w-4 h-4 text-yellow-400 shrink-0" />
+            <Shield className="w-4 h-4 text-red-400 shrink-0" />
             <div>
-              <p className="text-sm font-semibold text-yellow-300">
+              <p className="text-sm font-semibold text-red-300">
                 {loadingApprovals
                   ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
                   : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
@@ -373,9 +393,9 @@ export const DustDepositView = () => {
                 const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
                 const symbol = tokenApprovals[0]!.tokenSymbol;
                 return (
-                  <div key={tokenAddr} className="text-xs bg-yellow-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
+                  <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-yellow-200">{symbol}</span>
+                      <span className="font-bold text-red-200">{symbol}</span>
                       <span className="text-zinc-400 text-[10px]">
                         {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
                       </span>
@@ -393,7 +413,7 @@ export const DustDepositView = () => {
             onClick={handleRevokeAll}
             disabled={revoking || loadingApprovals || approvals.length === 0}
             className="w-full py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors
-              bg-yellow-500 hover:bg-yellow-400 text-black
+              bg-red-600 hover:bg-red-500 text-white
               disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
           >
             {revoking ? (
@@ -403,7 +423,7 @@ export const DustDepositView = () => {
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-            Direct vault tx  {KNOWN_SPENDERS.length} spenders scanned
+          Gasless via paymaster · fallback vault ETH · {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
