@@ -123,7 +123,7 @@ export const DustDepositView = () => {
       ],
     });
 
-    setToast({ msg: "Sending GM to the world... ☀️", type: "success" });
+    setToast({ msg: "Sending GM ", type: "success" });
     await client.waitForUserOperationReceipt({ hash: txHash });
     setToast({ msg: "GM! Transaction successful (Gasless) 🎉", type: "success" });
     
@@ -488,17 +488,20 @@ export const DustDepositView = () => {
     onClick={handleSayGM}
     disabled={sendingGM || !isDeployed}
     className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
-      bg-gradient-to-r from-yellow-400 to-orange-500 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-orange-500/20
+      bg-gradient-to-r from-blue-400 to-cyan-500 hover:from-blue-500 hover:to-cyan-600 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-blue-500/30
       disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed"
   >
     {sendingGM ? (
-      <><Refresh className="w-6 h-6 animate-spin" /> SPREADING SUNSHINE...</>
+      <>
+        <Refresh className="w-6 h-6 animate-spin" /> 
+        GM everyday...
+      </>
     ) : (
-      <>GM </>
+      <>GM</>
     )}
   </button>
   <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
-    Interaction with {GM_CONTRACT_ADDRESS.slice(0,6)}... sponsored by Paymaster
+    Interaction with {GM_CONTRACT_ADDRESS.slice(0, 6)}... sponsored by Paymaster
   </p>
 </div>
     </div>
