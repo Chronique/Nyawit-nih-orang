@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
+  getDirectVaultClient,
   detectVaultAddress,
   deployVault,
   publicClient,
@@ -52,83 +53,12 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LightAccount ABIs untuk direct call (EOA owner → vault.execute)
-//
-// PENTING: v1 dan v2 KEDUANYA pakai flat params untuk execute():
-//   execute(address dest, uint256 value, bytes func)
-//
-// Bedanya HANYA executeBatch:
-//   v1: executeBatch(address[] dest, bytes[] func)           ← tanpa value[]
-//   v2: executeBatch(address[] dest, uint256[] value, bytes[] func)  ← ada value[]
-//
-// ❌ JANGAN pakai tuple format untuk v2 — menyebabkan
-//    "Unknown Signature Type" + execution reverted #1002.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// LightAccount v1.x
-const LIGHT_ACCOUNT_V1_ABI = [
-  {
-    name: "execute",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest",  type: "address" },
-      { name: "value", type: "uint256" },
-      { name: "func",  type: "bytes"   },
-    ],
-    outputs: [],
-  },
-  {
-    name: "executeBatch",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest", type: "address[]" },
-      { name: "func", type: "bytes[]"   }, // v1: no value[]
-    ],
-    outputs: [],
-  },
-] as const;
-
-// LightAccount v2.x — execute() SAMA dengan v1 (flat), executeBatch tambah value[]
-const LIGHT_ACCOUNT_V2_ABI = [
-  {
-    name: "execute",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest",  type: "address" }, // flat, bukan tuple
-      { name: "value", type: "uint256" },
-      { name: "func",  type: "bytes"   },
-    ],
-    outputs: [],
-  },
-  {
-    name: "executeBatch",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "dest",  type: "address[]" },
-      { name: "value", type: "uint256[]" }, // v2: ada value[]
-      { name: "func",  type: "bytes[]"   },
-    ],
-    outputs: [],
-  },
-] as const;
-
 interface ActiveApproval {
   tokenAddress:   string;
   tokenSymbol:    string;
   spenderAddress: string;
   spenderLabel:   string;
   allowance:      bigint;
-}
-
-interface RevokeCall {
-  to:    Address;
-  value: bigint;
-  data:  `0x${string}`;
 }
 
 export const DustDepositView = () => {
@@ -173,7 +103,7 @@ export const DustDepositView = () => {
       });
       setToast({ msg: "Sending GM...", type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
-      setToast({ msg: "GM sent! ", type: "success" });
+      setToast({ msg: "GM sent! 🌅 (Gasless)", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
       setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM failed: " + msg, type: "error" });
@@ -278,14 +208,14 @@ export const DustDepositView = () => {
     }
   };
 
-  // ── Revoke: EOA → vault.execute() langsung ────────────────────────────────
-  // EOA adalah owner vault → bisa panggil execute() sebagai msg.sender.
-  // Tidak lewat bundler/paymaster. Gas bayar EOA (~$0.001 di Base).
+  // ── Revoke: pakai getDirectVaultClient (sama seperti swap) ──────────────
+  // sendUserOperation({ calls }) otomatis handle single/batch via executeBatch.
+  // EOA bayar gas — CDP tidak bisa sponsor approve() ke random token.
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `Gas paid from your wallet (~$0.001 on Base).`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked in 1 transaction.\nGas paid from your wallet (~$0.001 on Base).`,
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
@@ -298,7 +228,8 @@ export const DustDepositView = () => {
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      const revokeCalls: RevokeCall[] = approvals.map(approval => ({
+      // Build approve(spender, 0) calls — persis seperti swap builds approve calls
+      const revokeCalls = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
         value: 0n,
         data:  encodeFunctionData({
@@ -308,61 +239,12 @@ export const DustDepositView = () => {
         }),
       }));
 
-      let txHash: `0x${string}`;
-
-      if (vaultVersion === "v1") {
-        // ── v1: executeBatch tanpa value[] ──────────────────────────────
-        if (revokeCalls.length === 1) {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V1_ABI,
-            functionName: "execute",
-            args:         [revokeCalls[0]!.to, revokeCalls[0]!.value, revokeCalls[0]!.data],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        } else {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V1_ABI,
-            functionName: "executeBatch",
-            args:         [
-              revokeCalls.map(c => c.to),
-              revokeCalls.map(c => c.data), // v1: no value[]
-            ],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        }
-      } else {
-        // ── v2: execute() flat (address, uint256, bytes) — BUKAN tuple ──
-        if (revokeCalls.length === 1) {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V2_ABI,
-            functionName: "execute",
-            args:         [revokeCalls[0]!.to, revokeCalls[0]!.value, revokeCalls[0]!.data],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        } else {
-          txHash = await walletClient.writeContract({
-            address:      vaultAddress,
-            abi:          LIGHT_ACCOUNT_V2_ABI,
-            functionName: "executeBatch",
-            args:         [
-              revokeCalls.map(c => c.to),
-              revokeCalls.map(c => c.value), // v2: ada value[]
-              revokeCalls.map(c => c.data),
-            ],
-            chain:        base,
-            account:      walletClient.account!,
-          });
-        }
-      }
+      // getDirectVaultClient handles single/batch sama seperti executeBatchSwap
+      const client = await getDirectVaultClient(walletClient);
+      const txHash = await client.sendUserOperation({ calls: revokeCalls });
 
       setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await client.waitForUserOperationReceipt({ hash: txHash });
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
       setApprovals([]);
       setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
@@ -521,7 +403,7 @@ export const DustDepositView = () => {
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-            Direct vault tx · gas dari EOA wallet · {KNOWN_SPENDERS.length} spenders scanned
+            Direct vault tx  {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
@@ -596,7 +478,7 @@ export const DustDepositView = () => {
           {sendingGM ? (
             <><Refresh className="w-6 h-6 animate-spin" /> Sending GM...</>
           ) : (
-            <>GM</>
+            <>🌅 GM</>
           )}
         </button>
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
