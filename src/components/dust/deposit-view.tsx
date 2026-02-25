@@ -4,13 +4,13 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
-  getDirectVaultClient,
   detectVaultAddress,
   deployVault,
   publicClient,
 } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, formatEther, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { base } from "viem/chains";
 import { Rocket, Check, Copy, Refresh, Shield } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { useAppDialog } from "~/components/ui/app-dialog";
@@ -19,29 +19,26 @@ import { useAppDialog } from "~/components/ui/app-dialog";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
-  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
-  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
-  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" },
-  { label: "Permit2",                   address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
-  { label: "Uniswap v3 SwapRouter",     address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
-  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
-  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
-  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
-  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
-  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
-  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
-  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
+  { label: "LI.FI Diamond",           address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
+  { label: "0x ExchangeProxy",         address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
+  { label: "Odos Router v2",           address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
+  { label: "Paraswap Augustus v6",     address: "0x6A000F20005980200259B80c5102003040001068" },
+  { label: "Permit2",                  address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
+  { label: "Uniswap v3 SwapRouter",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+  { label: "Uniswap UniversalRouter",  address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "KyberSwap MetaAggregator", address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
+  { label: "KyberSwap Router v2",      address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
+  { label: "Aerodrome Router",         address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
+  { label: "Aerodrome Slipstream",     address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
+  { label: "BaseSwap Router",          address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
+  { label: "SwapBased Router",         address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
 
-
-// Gm Contract 
+// GM Contract
 const GM_CONTRACT_ADDRESS = "0xce0274F873cDbC261ee684cAb428C4233bc20dC2";
 const GM_ABI = [
   { name: "sayGM", type: "function", stateMutability: "nonpayable", inputs: [] }
 ] as const;
-
-
 
 const ALLOWANCE_ABI = [
   {
@@ -56,6 +53,73 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
+// ── LightAccount ABIs untuk direct call (EOA → vault.execute/executeBatch) ──
+// v1.x: execute(address dest, uint256 value, bytes func)
+//        executeBatch(address[] dest, uint256[] value, bytes[] func)
+const LIGHT_ACCOUNT_V1_ABI = [
+  {
+    name: "execute",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "dest",  type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "func",  type: "bytes"   },
+    ],
+    outputs: [],
+  },
+  {
+    name: "executeBatch",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "dest",  type: "address[]" },
+      { name: "value", type: "uint256[]" },
+      { name: "func",  type: "bytes[]"   },
+    ],
+    outputs: [],
+  },
+] as const;
+
+// v2.x: execute(Call call) where Call = { address target; uint256 value; bytes data }
+//        executeBatch(Call[] calls)
+const LIGHT_ACCOUNT_V2_ABI = [
+  {
+    name: "execute",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "call",
+        type: "tuple",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value",  type: "uint256" },
+          { name: "data",   type: "bytes"   },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+  {
+    name: "executeBatch",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "calls",
+        type: "tuple[]",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value",  type: "uint256" },
+          { name: "data",   type: "bytes"   },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+] as const;
+
 interface ActiveApproval {
   tokenAddress:   string;
   tokenSymbol:    string;
@@ -64,16 +128,11 @@ interface ActiveApproval {
   allowance:      bigint;
 }
 
-const TokenLogo = ({ token }: { token: any }) => {
-  const [src, setSrc] = useState<string | null>(token.logo || null);
-  return (
-    <img
-      src={src || `https://tokens.1inch.io/${token.contractAddress}.png`}
-      className="w-8 h-8 rounded-full object-cover"
-      onError={() => setSrc(null)}
-    />
-  );
-};
+interface RevokeCall {
+  to:   Address;
+  value: bigint;
+  data:  `0x${string}`;
+}
 
 export const DustDepositView = () => {
   const { data: walletClient }             = useWalletClient();
@@ -96,51 +155,38 @@ export const DustDepositView = () => {
   const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [revoking, setRevoking]                 = useState(false);
-  const [sendingGM, setSendingGM] = useState(false);
+  const [sendingGM, setSendingGM]               = useState(false);
 
+  // ── GM (sponsored) ────────────────────────────────────────────────────────
   const handleSayGM = async () => {
-  if (!walletClient || !isDeployed) {
-    setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
-    return;
-  }
-
-  setSendingGM(true);
-  try {
-    if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
-    
-    const client = await getSmartAccountClient(walletClient);
-
-    // Kirim User Operation (Gas dibayar Paymaster)
-    const txHash = await client.sendUserOperation({
-      calls: [
-        {
-          to: GM_CONTRACT_ADDRESS,
+    if (!walletClient || !isDeployed) {
+      setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
+      return;
+    }
+    setSendingGM(true);
+    try {
+      if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
+        calls: [{
+          to:    GM_CONTRACT_ADDRESS as Address,
           value: 0n,
-          data: encodeFunctionData({
-            abi: GM_ABI,
-            functionName: "sayGM",
-          }),
-        },
-      ],
-    });
+          data:  encodeFunctionData({ abi: GM_ABI, functionName: "sayGM" }),
+        }],
+      });
+      setToast({ msg: "Sending GM...", type: "success" });
+      await client.waitForUserOperationReceipt({ hash: txHash });
+      setToast({ msg: "GM! Transaction successful (Gasless) 🎉", type: "success" });
+      fetchVaultData();
+    } catch (e: any) {
+      const msg = e?.shortMessage || e?.message || "Unknown error";
+      setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM Failed: " + msg, type: "error" });
+    } finally {
+      setSendingGM(false);
+    }
+  };
 
-    setToast({ msg: "Sending GM ", type: "success" });
-    await client.waitForUserOperationReceipt({ hash: txHash });
-    setToast({ msg: "GM! Transaction successful (Gasless) 🎉", type: "success" });
-    
-    // Refresh data jika perlu
-    fetchVaultData();
-  } catch (e: any) {
-    const msg = e?.shortMessage || e?.message || "Unknown error";
-    setToast({
-      msg: msg.includes("rejected") ? "Cancelled." : "GM Failed: " + msg,
-      type: "error",
-    });
-  } finally {
-    setSendingGM(false);
-  }
-};
-
+  // ── Deploy listener ───────────────────────────────────────────────────────
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
   useEffect(() => {
     if (deployConfirmed) {
@@ -151,6 +197,7 @@ export const DustDepositView = () => {
     }
   }, [deployConfirmed]);
 
+  // ── Detect vault address ──────────────────────────────────────────────────
   useEffect(() => {
     if (!ownerAddress) return;
     detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
@@ -159,6 +206,7 @@ export const DustDepositView = () => {
     });
   }, [ownerAddress]);
 
+  // ── Fetch vault data ──────────────────────────────────────────────────────
   const fetchVaultData = useCallback(async () => {
     if (!vaultAddress) return;
     setLoading(true);
@@ -197,6 +245,7 @@ export const DustDepositView = () => {
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
 
+  // ── Fetch approvals ───────────────────────────────────────────────────────
   const fetchApprovals = async (vault: Address, tokens: any[]) => {
     if (tokens.length === 0) return;
     setLoadingApprovals(true);
@@ -233,15 +282,17 @@ export const DustDepositView = () => {
     }
   };
 
+  // ── Revoke: EOA → vault.execute/executeBatch langsung (bukan UserOp) ──────
+  // Bypass CDP paymaster & bundler sepenuhnya.
+  // EOA adalah owner vault, bisa panggil execute() langsung sebagai msg.sender.
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
-    // ✅ Custom dialog — gantikan window.confirm
     const ok = await confirm(
-      `This uses 1 transaction from your vault.`,
+      `Gas akan dibayar dari wallet kamu (tidak disponsori).`,
       {
-        title: `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
-        variant: "warning",
+        title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
+        variant:     "warning",
         confirmText: "Revoke",
       }
     );
@@ -250,9 +301,9 @@ export const DustDepositView = () => {
     setRevoking(true);
     try {
       if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
-      const client = await getDirectVaultClient(walletClient);
 
-      const revokeCalls = approvals.map(approval => ({
+      // Build approve(spender, 0) calldata untuk tiap approval
+      const revokeCalls: RevokeCall[] = approvals.map(approval => ({
         to:    approval.tokenAddress as Address,
         value: 0n,
         data:  encodeFunctionData({
@@ -262,9 +313,58 @@ export const DustDepositView = () => {
         }),
       }));
 
-      const txHash = await client.sendUserOperation({ calls: revokeCalls });
+      let txHash: `0x${string}`;
+
+      if (vaultVersion === "v1") {
+        // ── LightAccount v1 ──────────────────────────────────────────────
+        if (revokeCalls.length === 1) {
+          txHash = await walletClient.writeContract({
+            address:      vaultAddress,
+            abi:          LIGHT_ACCOUNT_V1_ABI,
+            functionName: "execute",
+            args:         [revokeCalls[0].to, revokeCalls[0].value, revokeCalls[0].data],
+            chain:        base,
+            account:      walletClient.account!,
+          });
+        } else {
+          txHash = await walletClient.writeContract({
+            address:      vaultAddress,
+            abi:          LIGHT_ACCOUNT_V1_ABI,
+            functionName: "executeBatch",
+            args:         [
+              revokeCalls.map(c => c.to),
+              revokeCalls.map(c => c.value),
+              revokeCalls.map(c => c.data),
+            ],
+            chain:        base,
+            account:      walletClient.account!,
+          });
+        }
+      } else {
+        // ── LightAccount v2 (default) ────────────────────────────────────
+        if (revokeCalls.length === 1) {
+          txHash = await walletClient.writeContract({
+            address:      vaultAddress,
+            abi:          LIGHT_ACCOUNT_V2_ABI,
+            functionName: "execute",
+            args:         [{ target: revokeCalls[0].to, value: revokeCalls[0].value, data: revokeCalls[0].data }],
+            chain:        base,
+            account:      walletClient.account!,
+          });
+        } else {
+          txHash = await walletClient.writeContract({
+            address:      vaultAddress,
+            abi:          LIGHT_ACCOUNT_V2_ABI,
+            functionName: "executeBatch",
+            args:         [revokeCalls.map(c => ({ target: c.to, value: c.value, data: c.data }))],
+            chain:        base,
+            account:      walletClient.account!,
+          });
+        }
+      }
+
       setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
 
       setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
       setApprovals([]);
@@ -280,6 +380,7 @@ export const DustDepositView = () => {
     }
   };
 
+  // ── Activate vault ────────────────────────────────────────────────────────
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
@@ -299,6 +400,7 @@ export const DustDepositView = () => {
     }
   };
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
@@ -422,7 +524,7 @@ export const DustDepositView = () => {
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-            Smart vault batches all revokes into 1 transaction · {KNOWN_SPENDERS.length} spenders scanned
+            Direct vault tx · gas dari EOA wallet · {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
@@ -483,28 +585,26 @@ export const DustDepositView = () => {
           </p>
         </div>
       )}
-      {/* GM SECTION (GASLESS) */}
-<div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
-  <button
-    onClick={handleSayGM}
-    disabled={sendingGM || !isDeployed}
-    className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
-      bg-gradient-to-r from-blue-400 to-cyan-500 hover:from-blue-500 hover:to-cyan-600 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-blue-500/30
-      disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed"
-  >
-    {sendingGM ? (
-      <>
-        <Refresh className="w-6 h-6 animate-spin" /> 
-        GM everyday...
-      </>
-    ) : (
-      <>GM</>
-    )}
-  </button>
-  <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
-    Interaction with {GM_CONTRACT_ADDRESS.slice(0, 6)}... sponsored by Paymaster
-  </p>
-</div>
+
+      {/* GM SECTION (GASLESS via Paymaster) */}
+      <div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
+        <button
+          onClick={handleSayGM}
+          disabled={sendingGM || !isDeployed}
+          className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
+            bg-gradient-to-r from-blue-400 to-cyan-500 hover:from-blue-500 hover:to-cyan-600 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-blue-500/30
+            disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {sendingGM ? (
+            <><Refresh className="w-6 h-6 animate-spin" /> GM everyday...</>
+          ) : (
+            <>GM</>
+          )}
+        </button>
+        <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
+          Interaction with {GM_CONTRACT_ADDRESS.slice(0, 6)}... sponsored by Paymaster
+        </p>
+      </div>
     </div>
   );
 };
