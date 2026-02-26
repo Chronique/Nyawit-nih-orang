@@ -3,6 +3,7 @@
 
 import { alchemy } from "~/lib/alchemy";
 import { TokenBalanceType } from "alchemy-sdk";
+import { resolveTokenLogo } from "~/lib/resolve-token-logo";
 
 export interface MoralisToken {
   token_address: string;
@@ -52,6 +53,15 @@ export async function fetchMoralisTokens(address: string): Promise<MoralisToken[
       const metas = await Promise.all(
         chunk.map(t => alchemy.core.getTokenMetadata(t.contractAddress).catch(() => null))
       );
+
+      // Step 3: resolve logo dengan cascade (parallel per chunk)
+      // Alchemy logo → DexScreener. 1inch & TrustWallet di-handle komponen.
+      const logos = await Promise.all(
+        chunk.map((t, j) =>
+          resolveTokenLogo(t.contractAddress, metas[j]?.logo ?? null).catch(() => null)
+        )
+      );
+
       for (let j = 0; j < chunk.length; j++) {
         const token = chunk[j];
         const meta  = metas[j];
@@ -62,7 +72,7 @@ export async function fetchMoralisTokens(address: string): Promise<MoralisToken[
           balance:       BigInt(token.tokenBalance ?? "0").toString(),
           symbol:        meta.symbol   || "UNKNOWN",
           decimals:      meta.decimals || 18,
-          logo:          meta.logo     || null,
+          logo:          logos[j],        // ← resolved logo (Alchemy atau DexScreener)
           name:          meta.name     || "Unknown Token",
         });
       }
