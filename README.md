@@ -1,40 +1,44 @@
-# Nyawit (Dust Sweeper & Smart Vault)
+<h2 align="center">Nyawit</h2>
 ![License](https://img.shields.io/badge/License-MIT-green)
 [![Follow on X](https://img.shields.io/twitter/follow/adhichronique?style=social)](https://x.com/adhichronique)
 ---
-**Nyawit** is a Farcaster Mini-App built on the **Base** network. It helps users manage their crypto assets by aggregating "dust" (small token balances) into a Smart Account and providing tools to swap them into ETH or USDC efficiently.
+**Nyawit** is a Farcaster Mini-App built on the **Base** network,also accessible via the web. It helps users manage their crypto assets by aggregating "dust" (small token balances) into a Smart Account and providing tools to swap them into ETH or USDC efficiently.
 
-The app features a dual-system architecture that adapts to the user's environment, utilizing **ZeroDev (Kernel)** for standard web browsers and **Coinbase Smart Wallet** for a seamless Farcaster Mini-App experience.
 
-![Banner](./public/banner.png)
+
+
 
 
 
 ```bash
-Owner EOA  ──sign──▶  vault.executeBatch()
-                                 │
-                    ┌────────────▼─────────────┐
-                    │   Smart Account (Vault)  │
-                    │  msg.sender = vault ✓    │
-                    │                          │
-                    │  approve(router, max)    │
-                    │  swap(token→WETH)        │
-                    └──────────────────────────┘
-                                 │
-                    ┌────────────▼─────────────┐
-                    │    DEX (0x/Kyber/LI.FI)  │
-                    │    fromAddress = vault ✓ │
-                    │        taker = vault ✓   │
-                    └──────────────────────────┘
-                                 │
-                                 │
-                    ┌────────────▼─────────────┐
-                    │     Withdraw to EOA      │
-                    │                          │
-                    └──────────────────────────┘
+
+
+                                  Owner   ──sign──▶  vault.executeBatch()
+                                                               │
+                                                  ┌────────────▼─────────────┐
+                                                  │   Smart Account (Vault)  │
+                                                  │  msg.sender = vault ✓    │
+                                                  │                          │
+                                                  │  approve(router, max)    │
+                                                  │  swap(token→WETH)        │
+                                                  └──────────────────────────┘
+                                                               │
+                                                  ┌────────────▼─────────────┐
+                                                  │      DEX (LI.FI)         │
+                                                  │                          |
+                                                  │    fromAddress = vault ✓ |
+                                                  │        taker = vault ✓   |
+                                                  └──────────────────────────┘
+                                                               │
+                                                               │
+                                                  ┌────────────▼─────────────┐
+                                                  │     Withdraw to Owner    │
+                                                  │                          │
+                                                  └──────────────────────────┘
 
 
                           
+
 
 
 ```
@@ -52,7 +56,7 @@ Owner EOA  ──sign──▶  vault.executeBatch()
   - *View assets stored in your Smart Account.*
   - **Deposit**: Easily transfer assets from your EOA (Owner) to the Vault.
   - **Withdraw**: Transfer assets back to your main wallet.
-  - **Spam Filtering**: Automatically detects and sorts spam tokens to the bottom using Moralis data.
+  - **Spam Filtering**: Automatically detects and sorts spam tokens to the bottom using Alchemy data.
   - **Real-time Pricing**: Token prices fetched via GeckoTerminal.
 
 - **Interactive UI**:
@@ -68,9 +72,8 @@ Owner EOA  ──sign──▶  vault.executeBatch()
   - [Alchemy](https://github.com/alchemyplatform) (Alchemy)
 - **Data Providers**:
   - [Alchemy](https://www.alchemy.com/) (RPC & Token Balances)
-  - [Moralis](https://moralis.io/) (Owner Balances & Spam Detection)
   - [GeckoTerminal](https://www.geckoterminal.com/) (Price Feeds)
-- **Swap Aggregator**: [0x API](https://0x.org/)
+- **Swap Aggregator**: [Lifi](https://li.fi/)
 - **Icons**: [Iconoir](https://iconoir.com/) & Lucide
 
 ## ⚙️ Environment Variables
@@ -124,23 +127,28 @@ Open your browser: Navigate to http://localhost:3000 to see the app.
 ## 📖 Usage Guide
 1. **Deposit (Blusukan)**
 
-This tab allows you to activate Smart wallet.
+    This tab allows you to activate Smart wallet,view approval token,and send GM
 
 
 
 2. **Swap (Bakar Wilayah)**
-Select multiple "dust" tokens inside your Vault.
+    Select multiple "dust" tokens inside your Vault.
 
-Click "Sweep" to convert them all to ETH or USDC in one go.
+    Swap preview to see estimate price
 
-Leverages Account Abstraction for gas efficiency.
+    Leverages Account Abstraction for gas efficiency.
 
-3. **Vault (Panen)**
-View your aggregated assets.
 
-Withdraw assets back to your main wallet if needed.
+3. **Yiled Farming (Tanam)**
+    Users can deposite weth or usdc to earn Yield 
 
-Assets are paginated (10 items per page).
+
+4. **Vault (Panen)**
+    View your aggregated assets.
+
+    Withdraw assets back to your main wallet if needed.
+
+    Assets are paginated (10 items per page).
 ---
 ## ⚠️ Important Note
 This application is optimized for Base Mainnet. Please ensure your wallet is connected to the Base network.
