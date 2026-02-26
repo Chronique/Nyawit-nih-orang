@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
+import { getSmartAccountClient, getDirectVaultClient, publicClient } from "~/lib/smart-account";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address, formatEther, parseEther } from "viem";
 import { base } from "viem/chains";
 import { Copy, Wallet, Rocket, Check, Dollar, Refresh, Gas, NavArrowLeft, NavArrowRight, Upload, Flash } from "iconoir-react";
@@ -11,19 +11,19 @@ import { fetchMoralisTokens, type MoralisToken } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { useAppDialog } from "~/components/ui/app-dialog";
 
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const ITEMS_PER_PAGE = 10;
-const MAX_TOKEN_USD   = 3.0;
-const MIN_TOKEN_USD   = 0.001;
-const MAX_ETH_DEPOSIT = 0.005;
+const USDC_ADDRESS     = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const ITEMS_PER_PAGE   = 10;
+const MAX_ETH_DEPOSIT  = 0.005;
 const MAX_USDC_DEPOSIT = 10;
+const MIN_TOKEN_USD    = 0.001;
+const MAX_TOKEN_USD    = 3.0;
 
 const generatePagination = (current: number, total: number) => {
   if (total <= 5) return Array.from({ length: total }, (_, i) => i + 1);
   const pages: (number | string)[] = [1];
   if (current > 3) pages.push("...");
   let start = Math.max(2, current - 1);
-  let end = Math.min(total - 1, current + 1);
+  let end   = Math.min(total - 1, current + 1);
   if (current <= 3) end = 4;
   if (current >= total - 2) start = total - 3;
   for (let i = start; i <= end; i++) pages.push(i);
@@ -45,14 +45,20 @@ const TokenLogo = ({ token }: { token: any }) => {
 };
 
 interface VaultViewProps {
-  onGoToSwap?: (token: { contractAddress: string; symbol: string; formattedBal: string; decimals: number; rawBalance: string }) => void;
+  onGoToSwap?: (token: {
+    contractAddress: string;
+    symbol: string;
+    formattedBal: string;
+    decimals: number;
+    rawBalance: string;
+  }) => void;
 }
 
 export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
-  const { data: walletClient } = useWalletClient();
+  const { data: walletClient }             = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
-  const { switchChainAsync } = useSwitchChain();
-  const { confirm, prompt } = useAppDialog();
+  const { switchChainAsync }               = useSwitchChain();
+  const { confirm, prompt }                = useAppDialog();
 
   const [vaultAddress, setVaultAddress]               = useState<string | null>(null);
   const [ethBalance, setEthBalance]                   = useState("0");
@@ -72,11 +78,12 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
   const [ethWithdrawAmount, setEthWithdrawAmount]     = useState("");
   const [selectedOwnerTokens, setSelectedOwnerTokens] = useState<Set<string>>(new Set());
 
+  // ── Fetch vault data ───────────────────────────────────────────────────────
   const fetchVaultData = async () => {
     if (!walletClient) return;
     setLoading(true);
     try {
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getDirectVaultClient(walletClient);
       const addr   = client.account.address;
       const bal    = await publicClient.getBalance({ address: addr });
       const code   = await publicClient.getBytecode({ address: addr });
@@ -90,15 +97,17 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         .filter((t) => BigInt(t.balance) > 0n)
         .map((t) => ({
           contractAddress: t.token_address,
-          name:            t.name || "Unknown",
-          symbol:          t.symbol || "???",
-          logo:            t.logo || null,
+          name:            t.name     || "Unknown",
+          symbol:          t.symbol   || "???",
+          logo:            t.logo     || null,
           decimals:        t.decimals || 18,
           rawBalance:      t.balance,
           formattedBal:    formatUnits(BigInt(t.balance), t.decimals || 18),
         }));
 
-      const usdc = formatted.find((t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
+      const usdc = formatted.find(
+        (t: any) => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase()
+      );
       setUsdcBalance(usdc || null);
     } catch (e) {
       console.error(e);
@@ -107,6 +116,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Fetch owner wallet data ────────────────────────────────────────────────
   const fetchOwnerData = async () => {
     if (!ownerAddress) return;
     setLoadingOwnerTokens(true);
@@ -118,25 +128,37 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       setOwnerEthBalance(ethBal);
 
       const activeTokens = data.filter((t) => BigInt(t.balance) > 0n);
-      if (activeTokens.length === 0) { setOwnerTokens([]); return; }
+      if (activeTokens.length === 0) {
+        setOwnerTokens([]);
+        return;
+      }
 
-      const prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
-      setOwnerTokenPrices(prices);
+      // Fetch harga — best effort
+      let prices: Record<string, number> = {};
+      try {
+        prices = await fetchTokenPrices(activeTokens.map(t => t.token_address));
+        setOwnerTokenPrices(prices);
+      } catch {
+        setOwnerTokenPrices({});
+      }
 
-      const withValue = activeTokens.filter(t => {
+      // ── Filter: hanya dust ($0.001 – $3), token tanpa harga tetap tampil ──
+      const dustTokens = activeTokens.filter(t => {
         const bal   = parseFloat(formatUnits(BigInt(t.balance), t.decimals || 18));
-        const price = prices[t.token_address.toLowerCase()] || 0;
+        const price = prices[t.token_address.toLowerCase()] ?? 0;
         const usd   = bal * price;
+        if (price === 0) return true; // tidak ada harga → tetap tampil
         return usd >= MIN_TOKEN_USD && usd < MAX_TOKEN_USD;
       });
 
-      withValue.sort((a, b) => {
-        const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] || 0);
-        const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] || 0);
+      // Sort: nilai USD desc, token tanpa harga di belakang
+      dustTokens.sort((a, b) => {
+        const valA = parseFloat(formatUnits(BigInt(a.balance), a.decimals)) * (prices[a.token_address.toLowerCase()] ?? 0);
+        const valB = parseFloat(formatUnits(BigInt(b.balance), b.decimals)) * (prices[b.token_address.toLowerCase()] ?? 0);
         return valB - valA;
       });
 
-      setOwnerTokens(withValue);
+      setOwnerTokens(dustTokens);
       setCurrentOwnerPage(1);
     } catch (e) {
       console.error("Failed to fetch wallet tokens:", e);
@@ -145,8 +167,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  useEffect(() => { if (walletClient) fetchVaultData(); }, [walletClient]);
-  useEffect(() => { if (ownerAddress) fetchOwnerData(); }, [ownerAddress]);
+  useEffect(() => { if (walletClient)   fetchVaultData();  }, [walletClient]);
+  useEffect(() => { if (ownerAddress)   fetchOwnerData();  }, [ownerAddress]);
 
   const ensureNetwork = async () => {
     if (chainId !== base.id) {
@@ -159,6 +181,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Withdraw ETH ──────────────────────────────────────────────────────────
   const handleWithdrawETH = async () => {
     if (!walletClient || !ownerAddress || !vaultAddress || !ethWithdrawAmount) return;
     if (isNaN(Number(ethWithdrawAmount)) || Number(ethWithdrawAmount) <= 0) {
@@ -168,7 +191,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${ethWithdrawAmount} ETH...`);
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getDirectVaultClient(walletClient);
       const txHash = await client.sendUserOperation({
         calls: [{ to: ownerAddress as Address, value: parseEther(ethWithdrawAmount), data: "0x" }],
       });
@@ -184,6 +207,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Deposit ETH ───────────────────────────────────────────────────────────
   const handleDepositETH = async () => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
     const amount = parseFloat(ethDepositAmount);
@@ -195,14 +219,11 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       setToast({ msg: `Max ${MAX_ETH_DEPOSIT} ETH per deposit.`, type: "error" });
       return;
     }
-
-    // ✅ Custom dialog
     const ok = await confirm(`Deposit ${amount} ETH to vault?\n\nThis will be used as gas reserve.`, {
       title: "Deposit ETH",
       confirmText: "Deposit",
     });
     if (!ok) return;
-
     try {
       await ensureNetwork();
       setActionLoading(`Depositing ${amount} ETH to vault...`);
@@ -224,24 +245,20 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Withdraw ERC20 ────────────────────────────────────────────────────────
   const handleWithdrawToken = async (token: any) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
-
-    // ✅ Custom prompt
     const amount = await prompt(
       `Enter amount to withdraw:`,
       token.formattedBal,
       { title: `Withdraw ${token.symbol}`, placeholder: "e.g. 1.5", confirmText: "Withdraw" }
     );
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
-
-    // ✅ Custom confirm
     const ok = await confirm(`Withdraw ${amount} ${token.symbol} to your wallet?`, {
       title: "Confirm Withdrawal",
       confirmText: "Withdraw",
     });
     if (!ok) return;
-
     try {
       await ensureNetwork();
       setActionLoading(`Withdrawing ${token.symbol}...`);
@@ -250,7 +267,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         abi: erc20Abi, functionName: "transfer",
         args: [ownerAddress as Address, rawAmount],
       });
-      const client = await getSmartAccountClient(walletClient);
+      const client = await getDirectVaultClient(walletClient);
       const txHash = await client.sendUserOperation({
         calls: [{ to: token.contractAddress as Address, value: 0n, data: transferData }],
       });
@@ -264,9 +281,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Deposit single token ──────────────────────────────────────────────────
   const handleDeposit = async (token: MoralisToken) => {
     if (!walletClient || !ownerAddress || !vaultAddress) return;
-
     const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
     if (isUsdc) {
       const usdcAmount = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
@@ -275,14 +292,11 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         return;
       }
     }
-
-    // ✅ Custom confirm
     const ok = await confirm(`Deposit ${token.symbol} to vault?`, {
       title: "Confirm Deposit",
       confirmText: "Deposit",
     });
     if (!ok) return;
-
     try {
       await ensureNetwork();
       setActionLoading(`Depositing ${token.symbol}...`);
@@ -304,11 +318,10 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
+  // ── Batch deposit ─────────────────────────────────────────────────────────
   const handleBatchDeposit = async () => {
     const tokensToDeposit = ownerTokens.filter(t => selectedOwnerTokens.has(t.token_address));
     if (tokensToDeposit.length === 0) return;
-
-    // ✅ Custom confirm — gantikan window.confirm dengan warning soal multi-tx
     const ok = await confirm(
       tokensToDeposit.length > 1
         ? `You will sign ${tokensToDeposit.length} transactions one by one.`
@@ -320,15 +333,12 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
       }
     );
     if (!ok) return;
-
     try {
       await ensureNetwork();
       let successCount = 0;
-
       for (const token of tokensToDeposit) {
         try {
           setActionLoading(`[${successCount + 1}/${tokensToDeposit.length}] Depositing ${token.symbol}...`);
-
           const isUsdc = token.token_address.toLowerCase() === USDC_ADDRESS.toLowerCase();
           if (isUsdc) {
             const usdcAmt = parseFloat(formatUnits(BigInt(token.balance), token.decimals || 6));
@@ -337,7 +347,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               continue;
             }
           }
-
           const txHash = await walletClient!.writeContract({
             address:      token.token_address as Address,
             abi:          erc20Abi,
@@ -347,12 +356,10 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             account:      walletClient!.account!,
           });
           await publicClient.waitForTransactionReceipt({ hash: txHash });
-
           const newSet = new Set(selectedOwnerTokens);
           newSet.delete(token.token_address);
           setSelectedOwnerTokens(newSet);
           successCount++;
-
           setToast({ msg: `${token.symbol} deposited! (${successCount}/${tokensToDeposit.length})`, type: "success" });
         } catch (err: any) {
           console.error(`Failed to deposit ${token.symbol}:`, err);
@@ -361,7 +368,6 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
-
       if (successCount > 0) {
         setToast({ msg: `Done! ${successCount} token${successCount > 1 ? "s" : ""} deposited.`, type: "success" });
         await Promise.all([fetchVaultData(), fetchOwnerData()]);
@@ -388,8 +394,11 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
     }
   };
 
-  const currentOwnerTokens = ownerTokens.slice((currentOwnerPage - 1) * ITEMS_PER_PAGE, currentOwnerPage * ITEMS_PER_PAGE);
-  const totalOwnerPages    = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
+  const currentOwnerTokens = ownerTokens.slice(
+    (currentOwnerPage - 1) * ITEMS_PER_PAGE,
+    currentOwnerPage * ITEMS_PER_PAGE
+  );
+  const totalOwnerPages = Math.ceil(ownerTokens.length / ITEMS_PER_PAGE);
 
   return (
     <div className="pb-28 space-y-6 relative min-h-[50vh]">
@@ -404,14 +413,17 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
       )}
 
-      {/* HEADER CARD */}
+      {/* ── HEADER CARD ─────────────────────────────────────────────────────── */}
       <div className="p-5 bg-zinc-900 text-white rounded-2xl shadow-lg relative overflow-hidden">
         <div className={`absolute top-4 right-4 text-[10px] px-2 py-1 rounded-full border font-medium flex items-center gap-1 ${
-          isDeployed ? "bg-green-500/20 border-green-500 text-green-400" : "bg-orange-500/20 border-orange-500 text-orange-400"
+          isDeployed
+            ? "bg-green-500/20 border-green-500 text-green-400"
+            : "bg-orange-500/20 border-orange-500 text-orange-400"
         }`}>
           {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
           {isDeployed ? "Active" : "Inactive"}
         </div>
+
         <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
           <Wallet className="w-3 h-3" /> Smart Vault
         </div>
@@ -450,12 +462,15 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                 </button>
               </div>
             </div>
+
             {showEthDeposit && (
               <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
                 <div className="flex gap-2">
                   <input
-                    type="number" placeholder={`Amount (max ${MAX_ETH_DEPOSIT} ETH)`}
-                    value={ethDepositAmount} onChange={(e) => setEthDepositAmount(e.target.value)}
+                    type="number"
+                    placeholder={`Amount (max ${MAX_ETH_DEPOSIT} ETH)`}
+                    value={ethDepositAmount}
+                    onChange={(e) => setEthDepositAmount(e.target.value)}
                     max={MAX_ETH_DEPOSIT}
                     className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
                   />
@@ -477,12 +492,15 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                 </div>
               </div>
             )}
+
             {showEthWithdraw && (
               <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
                 <div className="flex gap-2">
                   <input
-                    type="number" placeholder="Amount (e.g. 0.01)"
-                    value={ethWithdrawAmount} onChange={(e) => setEthWithdrawAmount(e.target.value)}
+                    type="number"
+                    placeholder="Amount (e.g. 0.01)"
+                    value={ethWithdrawAmount}
+                    onChange={(e) => setEthWithdrawAmount(e.target.value)}
                     className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 placeholder-zinc-500"
                   />
                   <button
@@ -525,7 +543,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
         </div>
       </div>
 
-      {/* WALLET ASSETS */}
+      {/* ── WALLET ASSETS ───────────────────────────────────────────────────── */}
       <div>
         <div className="flex items-center justify-between px-1 mb-2">
           <div className="flex flex-col">
@@ -533,7 +551,7 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               <Wallet className="w-5 h-5 text-green-500" /> Wallet Assets
             </h3>
             <p className="text-[10px] text-zinc-500 mt-0.5">
-              Dust tokens only · value &lt; $3
+              Dust tokens · $0.001–$3 · no-price tokens included
             </p>
             {ownerTokens.length > 0 && (
               <button
@@ -557,11 +575,15 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
             <div className="text-center py-6 animate-pulse text-zinc-400 text-sm">Scanning wallet...</div>
           ) : ownerTokens.length === 0 ? (
             <div className="text-center py-6 text-zinc-400 text-sm border border-dashed border-zinc-700 rounded-xl">
-              No tokens in wallet.
+              No dust tokens in wallet.
             </div>
           ) : (
             currentOwnerTokens.map((token, i) => {
               const isSelected = selectedOwnerTokens.has(token.token_address);
+              const usdVal     = ownerTokenPrices[token.token_address.toLowerCase()]
+                ? parseFloat(formatUnits(BigInt(token.balance), token.decimals)) *
+                  ownerTokenPrices[token.token_address.toLowerCase()]
+                : null;
               return (
                 <div
                   key={i}
@@ -585,10 +607,8 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                       <div className="font-semibold text-sm truncate max-w-[100px]">{token.symbol}</div>
                       <div className="text-xs text-zinc-500">
                         {parseFloat(formatUnits(BigInt(token.balance), token.decimals)).toFixed(4)}
-                        {ownerTokenPrices[token.token_address.toLowerCase()] && (
-                          <span className="ml-1 text-zinc-400">
-                            · ${(parseFloat(formatUnits(BigInt(token.balance), token.decimals)) * ownerTokenPrices[token.token_address.toLowerCase()]).toFixed(2)}
-                          </span>
+                        {usdVal !== null && (
+                          <span className="ml-1 text-zinc-400">· ${usdVal.toFixed(2)}</span>
                         )}
                       </div>
                     </div>
@@ -614,7 +634,9 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
               className="w-full py-3 bg-green-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-green-500/20 flex items-center justify-center gap-2"
             >
               <Upload className="w-4 h-4" />
-              Deposit {selectedOwnerTokens.size === 1 ? "Selected Asset" : `Selected Assets (${selectedOwnerTokens.size})`}
+              Deposit {selectedOwnerTokens.size === 1
+                ? "Selected Asset"
+                : `Selected Assets (${selectedOwnerTokens.size})`}
             </button>
             {selectedOwnerTokens.size > 1 && (
               <p className="text-[9px] text-zinc-500 text-center mt-2 italic">
@@ -626,12 +648,37 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
 
         {totalOwnerPages > 1 && (
           <div className="flex justify-center items-center gap-1 mt-3">
-            <button onClick={() => setCurrentOwnerPage((p) => Math.max(1, p - 1))} disabled={currentOwnerPage === 1} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowLeft className="w-4 h-4" /></button>
+            <button
+              onClick={() => setCurrentOwnerPage((p) => Math.max(1, p - 1))}
+              disabled={currentOwnerPage === 1}
+              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
+            >
+              <NavArrowLeft className="w-4 h-4" />
+            </button>
             {generatePagination(currentOwnerPage, totalOwnerPages).map((page, i) =>
-              page === "..." ? <span key={i} className="px-2 text-zinc-400 text-sm">...</span> :
-              <button key={i} onClick={() => setCurrentOwnerPage(page as number)} className={`w-8 h-8 rounded-lg text-xs font-bold ${currentOwnerPage === page ? "bg-blue-600 text-white" : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"}`}>{page}</button>
+              page === "..." ? (
+                <span key={i} className="px-2 text-zinc-400 text-sm">...</span>
+              ) : (
+                <button
+                  key={i}
+                  onClick={() => setCurrentOwnerPage(page as number)}
+                  className={`w-8 h-8 rounded-lg text-xs font-bold ${
+                    currentOwnerPage === page
+                      ? "bg-blue-600 text-white"
+                      : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
+                  }`}
+                >
+                  {page}
+                </button>
+              )
             )}
-            <button onClick={() => setCurrentOwnerPage((p) => Math.min(totalOwnerPages, p + 1))} disabled={currentOwnerPage === totalOwnerPages} className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"><NavArrowRight className="w-4 h-4" /></button>
+            <button
+              onClick={() => setCurrentOwnerPage((p) => Math.min(totalOwnerPages, p + 1))}
+              disabled={currentOwnerPage === totalOwnerPages}
+              className="p-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 disabled:opacity-30"
+            >
+              <NavArrowRight className="w-4 h-4" />
+            </button>
           </div>
         )}
       </div>

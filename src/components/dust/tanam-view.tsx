@@ -16,6 +16,11 @@ const ETH_NATIVE   = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 const LIFI_API_URL = "https://li.quest/v1";
 const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 
+// FIX: Reserve dikurangi dari 0.0005 → 0.00001 ETH
+// Gas wrap dibayar paymaster, bukan dari ETH vault.
+// 0.00001 ETH hanya fallback kalau paymaster down.
+const GAS_RESERVE = 10000000000000n; // 0.00001 ETH
+
 const WETH_ABI = [
   { name: "deposit",  type: "function", stateMutability: "payable",     inputs: [],                                         outputs: [] },
   { name: "withdraw", type: "function", stateMutability: "nonpayable",  inputs: [{ name: "wad", type: "uint256" }],          outputs: [] },
@@ -156,34 +161,47 @@ export const TanamView = () => {
   useEffect(() => { fetchPositions(); fetchApyData(); }, [fetchPositions, fetchApyData]);
 
   // ── Wrap ETH → WETH ───────────────────────────────────────────────────────
+  // FIX: GAS_RESERVE dikurangi ke 0.00001 ETH karena gas dibayar paymaster.
+  // ETH vault hanya dipakai sebagai VALUE yang dikirim ke WETH.deposit(),
+  // bukan untuk bayar gas bundler — itu urusan paymaster.
   const handleWrap = async () => {
     if (!walletClient || !vaultAddress || ethBalance === 0n) return;
-    const GAS_RESERVE = 500000000000000n;
+
     const wrapAmount = ethBalance > GAS_RESERVE ? ethBalance - GAS_RESERVE : 0n;
-    if (wrapAmount === 0n) { setToast({ msg: "Not enough ETH to wrap (keeping reserve for gas).", type: "error" }); return; }
+    if (wrapAmount === 0n) {
+      setToast({ msg: "Not enough ETH to wrap (min 0.00001 ETH reserve kept).", type: "error" });
+      return;
+    }
     const display = parseFloat(formatUnits(wrapAmount, 18)).toFixed(6);
 
-    // ✅ Custom dialog
-    const ok = await confirm(`0.0005 ETH kept as gas reserve.`, {
-      title: `Wrap ${display} ETH → WETH?`,
-      confirmText: "Wrap",
-    });
+    const ok = await confirm(
+      `0.00001 ETH kept as fallback reserve. Gas is sponsored by paymaster.`,
+      {
+        title:       `Wrap ${display} ETH → WETH?`,
+        confirmText: "Wrap",
+      }
+    );
     if (!ok) return;
 
     setWrapping(true);
     setWethAction(`Wrapping ${display} ETH → WETH...`);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const client   = await getSmartAccountClient(walletClient);
       const wrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "deposit", args: [] });
-      const txHash = await client.sendUserOperation({ calls: [{ to: WETH_ADDRESS, value: wrapAmount, data: wrapData }] });
+      const txHash   = await client.sendUserOperation({
+        calls: [{ to: WETH_ADDRESS, value: wrapAmount, data: wrapData }],
+      });
       await client.waitForUserOperationReceipt({ hash: txHash });
       setToast({ msg: `✓ Wrapped ${display} ETH → WETH!`, type: "success" });
       await new Promise(r => setTimeout(r, 2000));
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Wrap failed: " + msg, type: "error" });
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Wrap failed: " + msg,
+        type: "error",
+      });
     } finally { setWrapping(false); setWethAction(""); }
   };
 
@@ -192,9 +210,8 @@ export const TanamView = () => {
     if (!walletClient || !vaultAddress || wethBalance === 0n) return;
     const display = parseFloat(formatUnits(wethBalance, 18)).toFixed(6);
 
-    // ✅ Custom dialog
     const ok = await confirm(`ETH will be in your Smart Vault (gas reserve).`, {
-      title: `Unwrap ${display} WETH → ETH?`,
+      title:       `Unwrap ${display} WETH → ETH?`,
       confirmText: "Unwrap",
     });
     if (!ok) return;
@@ -203,16 +220,21 @@ export const TanamView = () => {
     setWethAction(`Unwrapping ${display} WETH → ETH...`);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const client     = await getSmartAccountClient(walletClient);
       const unwrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBalance] });
-      const txHash = await client.sendUserOperation({ calls: [{ to: WETH_ADDRESS, value: 0n, data: unwrapData }] });
+      const txHash     = await client.sendUserOperation({
+        calls: [{ to: WETH_ADDRESS, value: 0n, data: unwrapData }],
+      });
       await client.waitForUserOperationReceipt({ hash: txHash });
       setToast({ msg: `✓ Unwrapped ${display} WETH → ETH!`, type: "success" });
       await new Promise(r => setTimeout(r, 2000));
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Unwrap failed: " + msg, type: "error" });
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Unwrap failed: " + msg,
+        type: "error",
+      });
     } finally { setUnwrapping(false); setWethAction(""); }
   };
 
@@ -223,9 +245,8 @@ export const TanamView = () => {
     if (swapAmount === 0n) { setToast({ msg: "No ETH in vault to swap.", type: "error" }); return; }
     const ethDisplay = parseFloat(formatUnits(swapAmount, 18)).toFixed(6);
 
-    // ✅ Custom dialog
     const ok = await confirm(`Swap ${ethDisplay} ETH → ${vault.asset} via LI.FI, then deposit to Morpho?`, {
-      title: `Swap & Deposit to ${vault.name}`,
+      title:       `Swap & Deposit to ${vault.name}`,
       confirmText: "Swap & Deposit",
     });
     if (!ok) return;
@@ -235,13 +256,17 @@ export const TanamView = () => {
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
-      const quote = await getLifiEthQuote(swapAmount.toString(), vault.assetAddress, vaultAddress, chainId);
+      const quote  = await getLifiEthQuote(swapAmount.toString(), vault.assetAddress, vaultAddress, chainId);
       const expectedOut = parseFloat(formatUnits(BigInt(quote.estimate.toAmount || "0"), vault.decimals)).toFixed(4);
       console.log(`[Tanam] ETH→${vault.asset} quote: ${ethDisplay} ETH → ~${expectedOut} ${vault.asset}`);
 
       setSwapProgress(`Swapping ETH → ${vault.asset}...`);
       const swapTx = await client.sendUserOperation({
-        calls: [{ to: quote.transactionRequest.to as Address, value: BigInt(quote.transactionRequest.value || swapAmount.toString()), data: quote.transactionRequest.data as `0x${string}` }],
+        calls: [{
+          to:    quote.transactionRequest.to as Address,
+          value: BigInt(quote.transactionRequest.value || swapAmount.toString()),
+          data:  quote.transactionRequest.data as `0x${string}`,
+        }],
       });
       await client.waitForUserOperationReceipt({ hash: swapTx });
 
@@ -257,14 +282,15 @@ export const TanamView = () => {
       }
 
       const depositDisplay = parseFloat(formatUnits(depositAmt, vault.decimals)).toFixed(4);
+
       setSwapProgress(`Approving ${vault.asset} for Morpho...`);
       const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, depositAmt] });
-      const approveTx = await client.sendUserOperation({ calls: [{ to: vault.assetAddress, value: 0n, data: approveData }] });
+      const approveTx   = await client.sendUserOperation({ calls: [{ to: vault.assetAddress, value: 0n, data: approveData }] });
       await client.waitForUserOperationReceipt({ hash: approveTx });
 
       setSwapProgress(`Depositing ${depositDisplay} ${vault.asset}...`);
       const depositData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "deposit", args: [depositAmt, vaultAddress] });
-      const depositTx = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }] });
+      const depositTx   = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }] });
       await client.waitForUserOperationReceipt({ hash: depositTx });
 
       setToast({ msg: `✓ Swapped ETH and deposited ${depositDisplay} ${vault.asset} to Morpho!`, type: "success" });
@@ -272,7 +298,10 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg, type: "error" });
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg,
+        type: "error",
+      });
     } finally { setSwapping(null); setSwapProgress(""); }
   };
 
@@ -280,13 +309,15 @@ export const TanamView = () => {
   const handleDeposit = async (vault: typeof MORPHO_VAULTS[number]) => {
     if (!walletClient || !vaultAddress) return;
     const rawBalance = vaultBalances[vault.id];
-    if (!rawBalance || BigInt(rawBalance) === 0n) { setToast({ msg: `No ${vault.asset} in vault to deposit.`, type: "error" }); return; }
+    if (!rawBalance || BigInt(rawBalance) === 0n) {
+      setToast({ msg: `No ${vault.asset} in vault to deposit.`, type: "error" });
+      return;
+    }
     const amount  = BigInt(rawBalance);
     const display = parseFloat(formatUnits(amount, vault.decimals)).toFixed(4);
 
-    // ✅ Custom dialog
     const ok = await confirm(`Funds will earn yield automatically.`, {
-      title: `Deposit ${display} ${vault.asset} to ${vault.name}?`,
+      title:       `Deposit ${display} ${vault.asset} to ${vault.name}?`,
       confirmText: "Deposit",
     });
     if (!ok) return;
@@ -295,6 +326,7 @@ export const TanamView = () => {
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       const client = await getSmartAccountClient(walletClient);
+
       const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, amount] });
       setToast({ msg: `Approving ${vault.asset}...`, type: "success" });
       const approveTx = await client.sendUserOperation({ calls: [{ to: vault.assetAddress, value: 0n, data: approveData }] });
@@ -304,12 +336,16 @@ export const TanamView = () => {
       setToast({ msg: `Depositing ${display} ${vault.asset}...`, type: "success" });
       const depositTx = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: depositData }] });
       await client.waitForUserOperationReceipt({ hash: depositTx });
+
       setToast({ msg: `✓ ${display} ${vault.asset} deposited to Morpho!`, type: "success" });
       await new Promise(r => setTimeout(r, 3000));
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg, type: "error" });
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg,
+        type: "error",
+      });
     } finally { setDepositing(null); }
   };
 
@@ -317,12 +353,14 @@ export const TanamView = () => {
   const handleWithdraw = async (vault: typeof MORPHO_VAULTS[number]) => {
     if (!walletClient || !vaultAddress) return;
     const pos = positions.find(p => p.vaultId === vault.id);
-    if (!pos || pos.shares === 0n) { setToast({ msg: `No ${vault.asset} position in Morpho.`, type: "error" }); return; }
+    if (!pos || pos.shares === 0n) {
+      setToast({ msg: `No ${vault.asset} position in Morpho.`, type: "error" });
+      return;
+    }
     const display = parseFloat(formatUnits(pos.assetsValue, vault.decimals)).toFixed(4);
 
-    // ✅ Custom dialog
     const ok = await confirm(`Funds will return to your Smart Vault.`, {
-      title: `Withdraw ${display} ${vault.asset} from Morpho?`,
+      title:       `Withdraw ${display} ${vault.asset} from Morpho?`,
       confirmText: "Withdraw",
     });
     if (!ok) return;
@@ -330,9 +368,9 @@ export const TanamView = () => {
     setWithdrawing(vault.id);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const client     = await getSmartAccountClient(walletClient);
       const redeemData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "redeem", args: [pos.shares, vaultAddress, vaultAddress] });
-      const txHash = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: redeemData }] });
+      const txHash     = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: redeemData }] });
       setToast({ msg: `Withdrawing ${display} ${vault.asset}...`, type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
       setToast({ msg: `✓ ${display} ${vault.asset} returned to vault!`, type: "success" });
@@ -340,7 +378,10 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg, type: "error" });
+      setToast({
+        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg,
+        type: "error",
+      });
     } finally { setWithdrawing(null); }
   };
 
@@ -367,7 +408,11 @@ export const TanamView = () => {
             <p className="text-xs text-green-300 mt-1">Deposit USDC or WETH from your vault to earn yield on Morpho Blue</p>
             <p className="text-[10px] text-green-500 mt-0.5">Auto-compounding · Withdraw anytime</p>
           </div>
-          <button onClick={() => { fetchPositions(); fetchApyData(); }} disabled={loading} className="p-2 rounded-lg bg-green-800/50 hover:bg-green-700/50">
+          <button
+            onClick={() => { fetchPositions(); fetchApyData(); }}
+            disabled={loading}
+            className="p-2 rounded-lg bg-green-800/50 hover:bg-green-700/50"
+          >
             <RefreshCw className={`w-4 h-4 text-green-300 ${loading ? "animate-spin" : ""}`} />
           </button>
         </div>
@@ -380,7 +425,9 @@ export const TanamView = () => {
                 if (!pos || pos.assetsValue === 0n) return null;
                 return (
                   <div key={vault.id} className="text-xs text-white">
-                    <span className="text-green-400 font-bold">{parseFloat(formatUnits(pos.assetsValue, vault.decimals)).toFixed(4)}</span>{" "}{vault.asset}
+                    <span className="text-green-400 font-bold">
+                      {parseFloat(formatUnits(pos.assetsValue, vault.decimals)).toFixed(4)}
+                    </span>{" "}{vault.asset}
                   </div>
                 );
               })}
@@ -408,16 +455,29 @@ export const TanamView = () => {
             </div>
           </div>
           <div className="flex gap-2">
-            <button onClick={handleWrap} disabled={!hasEth || wethBusy}
-              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-30 disabled:cursor-not-allowed">
-              {wrapping ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></> : <>ETH → WETH</>}
+            <button
+              onClick={handleWrap}
+              disabled={!hasEth || wethBusy}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {wrapping
+                ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
+                : <>ETH → WETH</>}
             </button>
-            <button onClick={handleUnwrap} disabled={!hasWeth || wethBusy}
-              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-50 disabled:opacity-30 disabled:cursor-not-allowed">
-              {unwrapping ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></> : <>WETH → ETH</>}
+            <button
+              onClick={handleUnwrap}
+              disabled={!hasWeth || wethBusy}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-50 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {unwrapping
+                ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{wethAction}</span></>
+                : <>WETH → ETH</>}
             </button>
           </div>
-          <p className="text-[10px] text-emerald-700 text-center">After unwrapping, ETH can be withdrawn from the Vault tab</p>
+          {/* FIX: pesan diupdate untuk reflect GAS_RESERVE baru */}
+          <p className="text-[10px] text-emerald-700 text-center">
+            Wraps all ETH minus 0.00001 reserve · Gas sponsored by paymaster
+          </p>
         </div>
       )}
 
@@ -426,7 +486,9 @@ export const TanamView = () => {
           <Zap className="w-4 h-4 text-blue-400 shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="text-xs font-bold text-blue-300">{ethDisplay} ETH in vault</div>
-            <div className="text-[10px] text-blue-200/70">Use "Swap &amp; Deposit" below to convert to WETH or USDC and earn yield</div>
+            <div className="text-[10px] text-blue-200/70">
+              Use "Swap &amp; Deposit" below to convert to WETH or USDC and earn yield
+            </div>
           </div>
         </div>
       )}
@@ -457,48 +519,80 @@ export const TanamView = () => {
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${colors.badge} flex items-center gap-0.5`}>
                           <TrendingUp className="w-2.5 h-2.5" />{apy.apy.toFixed(2)}% APY
                         </span>
-                      ) : <span className="text-[10px] text-zinc-500">APY loading...</span>}
+                      ) : (
+                        <span className="text-[10px] text-zinc-500">APY loading...</span>
+                      )}
                     </div>
                     <p className="text-[10px] text-zinc-500 mt-0.5">{vault.description}</p>
                   </div>
-                  <a href={vault.morphoUrl} target="_blank" rel="noopener noreferrer" className="text-[9px] text-zinc-500 hover:text-zinc-300 underline shrink-0">morpho.org ↗</a>
+                  <a
+                    href={vault.morphoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[9px] text-zinc-500 hover:text-zinc-300 underline shrink-0"
+                  >
+                    morpho.org ↗
+                  </a>
                 </div>
 
                 <div className="flex items-center justify-between text-xs bg-white/50 dark:bg-black/20 rounded-xl px-3 py-2">
-                  <div className="flex items-center gap-1.5 text-zinc-500"><Wallet className="w-3 h-3" /><span>In Smart Vault</span></div>
-                  <span className={`font-bold ${hasBal ? colors.text : "text-zinc-400"}`}>{balDisplay} {vault.asset}</span>
+                  <div className="flex items-center gap-1.5 text-zinc-500">
+                    <Wallet className="w-3 h-3" /><span>In Smart Vault</span>
+                  </div>
+                  <span className={`font-bold ${hasBal ? colors.text : "text-zinc-400"}`}>
+                    {balDisplay} {vault.asset}
+                  </span>
                 </div>
 
                 {hasPos && (
                   <div className="flex items-center justify-between text-xs bg-green-500/10 rounded-xl px-3 py-2 border border-green-500/20">
-                    <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-100"><Sprout className="w-3 h-3" strokeWidth={2.5} /><span>Earning at Morpho</span></div>
+                    <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-100">
+                      <Sprout className="w-3 h-3" strokeWidth={2.5} /><span>Earning at Morpho</span>
+                    </div>
                     <span className="font-bold text-zinc-800 dark:text-zinc-100">{posDisplay} {vault.asset}</span>
                   </div>
                 )}
 
                 <div className="flex gap-2 flex-wrap">
                   {hasEth && (
-                    <button onClick={() => handleSwapAndDeposit(vault)} disabled={busy}
-                      className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30 disabled:opacity-40 disabled:cursor-not-allowed">
-                      {swapping === vault.id ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{swapProgress || "Processing..."}</span></> : <><Zap className="w-3.5 h-3.5" /> Swap ETH → {vault.asset} &amp; Deposit</>}
+                    <button
+                      onClick={() => handleSwapAndDeposit(vault)}
+                      disabled={busy}
+                      className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {swapping === vault.id
+                        ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span className="text-xs">{swapProgress || "Processing..."}</span></>
+                        : <><Zap className="w-3.5 h-3.5" /> Swap ETH → {vault.asset} &amp; Deposit</>}
                     </button>
                   )}
                   {hasBal && (
-                    <button onClick={() => handleDeposit(vault)} disabled={busy}
-                      className={`flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors ${colors.text} bg-white dark:bg-zinc-900 border ${colors.border} hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed`}>
-                      {depositing === vault.id ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Depositing...</> : <><ArrowRight className="w-3.5 h-3.5" /> Deposit {vault.asset}</>}
+                    <button
+                      onClick={() => handleDeposit(vault)}
+                      disabled={busy}
+                      className={`flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors ${colors.text} bg-white dark:bg-zinc-900 border ${colors.border} hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed`}
+                    >
+                      {depositing === vault.id
+                        ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Depositing...</>
+                        : <><ArrowRight className="w-3.5 h-3.5" /> Deposit {vault.asset}</>}
                     </button>
                   )}
                   {hasPos && (
-                    <button onClick={() => handleWithdraw(vault)} disabled={busy}
-                      className="px-3 py-2.5 rounded-xl font-bold text-sm text-zinc-400 bg-zinc-100 dark:bg-zinc-800 border border-zinc-700 hover:text-zinc-200 hover:border-zinc-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                      {withdrawing === vault.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : "Withdraw"}
+                    <button
+                      onClick={() => handleWithdraw(vault)}
+                      disabled={busy}
+                      className="px-3 py-2.5 rounded-xl font-bold text-sm text-zinc-400 bg-zinc-100 dark:bg-zinc-800 border border-zinc-700 hover:text-zinc-200 hover:border-zinc-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {withdrawing === vault.id
+                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        : "Withdraw"}
                     </button>
                   )}
                 </div>
 
                 {!hasBal && !hasPos && !hasEth && (
-                  <p className="text-[10px] text-zinc-500 text-center">Sweep dust tokens to WETH first, then come back to deposit.</p>
+                  <p className="text-[10px] text-zinc-500 text-center">
+                    Sweep dust tokens to WETH first, then come back to deposit.
+                  </p>
                 )}
               </div>
             );
@@ -513,7 +607,9 @@ export const TanamView = () => {
           <div className="flex gap-2"><span className="text-green-500 shrink-0">2.</span><span>Unwrap WETH → ETH here if you want to withdraw, or deposit directly to Morpho</span></div>
           <div className="flex gap-2"><span className="text-green-500 shrink-0">3.</span><span>Yield accumulates automatically · Withdraw to vault anytime</span></div>
         </div>
-        <p className="text-[9px] text-zinc-600 pt-1">Powered by Morpho Blue · Swap via LI.FI · Non-custodial · Smart contract risk applies</p>
+        <p className="text-[9px] text-zinc-600 pt-1">
+          Powered by Morpho Blue · Swap via LI.FI · Non-custodial · Smart contract risk applies
+        </p>
       </div>
     </div>
   );

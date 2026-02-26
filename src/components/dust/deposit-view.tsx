@@ -4,12 +4,14 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
+  getSelfPayingSmartAccountClient,
   detectVaultAddress,
   deployVault,
   publicClient,
 } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { formatUnits, formatEther, encodeFunctionData, erc20Abi, type Address } from "viem";
+import { base } from "viem/chains";
 import { Rocket, Check, Copy, Refresh, Shield } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { useAppDialog } from "~/components/ui/app-dialog";
@@ -17,21 +19,63 @@ import { useAppDialog } from "~/components/ui/app-dialog";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
+
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
-  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
-  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
-  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" },
-  { label: "Permit2",                   address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
-  { label: "Uniswap v3 SwapRouter",     address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
-  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
-  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
-  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
-  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
-  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
-  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
-  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
+  { label: "LI.FI Diamond",           address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
+  { label: "0x ExchangeProxy",         address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
+  { label: "Odos Router v2",           address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
+  { label: "Paraswap Augustus v6",     address: "0x6A000F20005980200259B80c5102003040001068" },
+  // NOTE: Permit2 sengaja tidak di sini — ditangani terpisah via PERMIT2_ABI
+  { label: "Uniswap v3 SwapRouter",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+  { label: "Uniswap UniversalRouter",  address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "KyberSwap MetaAggregator", address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
+  { label: "KyberSwap Router v2",      address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
+  { label: "Aerodrome Router",         address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
+  { label: "Aerodrome Slipstream",     address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
+  { label: "BaseSwap Router",          address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
+  { label: "SwapBased Router",         address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
+
+const PERMIT2_SUB_SPENDERS: { label: string; address: Address }[] = [
+  { label: "Uniswap UniversalRouter (via Permit2)", address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "Uniswap v3 SwapRouter (via Permit2)",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+];
+
+const PERMIT2_ABI = [
+  {
+    name: "allowance",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "user",    type: "address" },
+      { name: "token",   type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [
+      { name: "amount",     type: "uint160" },
+      { name: "expiration", type: "uint48"  },
+      { name: "nonce",      type: "uint48"  },
+    ],
+  },
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token",      type: "address" },
+      { name: "spender",    type: "address" },
+      { name: "amount",     type: "uint160" },
+      { name: "expiration", type: "uint48"  },
+    ],
+    outputs: [],
+  },
+] as const;
+
+const GM_CONTRACT_ADDRESS = "0xce0274F873cDbC261ee684cAb428C4233bc20dC2";
+const GM_ABI = [
+  { name: "sayGM", type: "function", stateMutability: "nonpayable", inputs: [] },
+] as const;
 
 const ALLOWANCE_ABI = [
   {
@@ -46,24 +90,38 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
-interface ActiveApproval {
-  tokenAddress:   string;
-  tokenSymbol:    string;
-  spenderAddress: string;
-  spenderLabel:   string;
-  allowance:      bigint;
-}
+// ── GM Cooldown helpers ───────────────────────────────────────────────────────
+// Key localStorage per wallet agar cooldown tidak saling tumpuk antar user
+const getGmStorageKey = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
 
-const TokenLogo = ({ token }: { token: any }) => {
-  const [src, setSrc] = useState<string | null>(token.logo || null);
-  return (
-    <img
-      src={src || `https://tokens.1inch.io/${token.contractAddress}.png`}
-      className="w-8 h-8 rounded-full object-cover"
-      onError={() => setSrc(null)}
-    />
-  );
+// Tanggal UTC hari ini → "2026-02-26"
+const todayUTC = () => new Date().toISOString().slice(0, 10);
+
+// Milidetik tersisa hingga 00:00 UTC berikutnya
+const msUntilNextUTCMidnight = () => {
+  const now = new Date();
+  const next = new Date();
+  next.setUTCHours(24, 0, 0, 0); // besok 00:00:00.000 UTC
+  return next.getTime() - now.getTime();
 };
+
+// Format ms → "HH:MM:SS"
+const formatCountdown = (ms: number) => {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return [h, m, s].map(v => v.toString().padStart(2, "0")).join(":");
+};
+
+interface ActiveApproval {
+  tokenAddress:      string;
+  tokenSymbol:       string;
+  spenderAddress:    string;
+  spenderLabel:      string;
+  allowance:         bigint;
+  isPermit2Internal?: boolean;
+}
 
 export const DustDepositView = () => {
   const { data: walletClient }             = useWalletClient();
@@ -86,7 +144,84 @@ export const DustDepositView = () => {
   const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [revoking, setRevoking]                 = useState(false);
+  const [sendingGM, setSendingGM]               = useState(false);
 
+  // ── GM Cooldown state ─────────────────────────────────────────────────────
+  // gmDone: apakah user sudah GM hari ini (UTC)
+  // gmCountdown: string "HH:MM:SS" sisa waktu hingga reset
+  const [gmDone, setGmDone]           = useState(false);
+  const [gmCountdown, setGmCountdown] = useState("");
+
+  // Cek localStorage saat wallet connect / ownerAddress berubah
+  useEffect(() => {
+    if (!ownerAddress) return;
+    const key       = getGmStorageKey(ownerAddress);
+    const lastSent  = localStorage.getItem(key);
+    const alreadyGm = lastSent === todayUTC();
+    setGmDone(alreadyGm);
+  }, [ownerAddress]);
+
+  // Countdown tick — hanya jalan kalau gmDone = true
+  useEffect(() => {
+    if (!gmDone) { setGmCountdown(""); return; }
+
+    const tick = () => {
+      const remaining = msUntilNextUTCMidnight();
+      setGmCountdown(formatCountdown(remaining));
+
+      // Auto-reset saat jam 00:00 UTC tercapai
+      if (remaining <= 0) {
+        setGmDone(false);
+        if (ownerAddress) localStorage.removeItem(getGmStorageKey(ownerAddress));
+      }
+    };
+
+    tick(); // langsung tampilkan tanpa tunggu 1 detik
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [gmDone, ownerAddress]);
+
+  // ── GM — gasless via paymaster ────────────────────────────────────────────
+  const handleSayGM = async () => {
+    if (!walletClient || !isDeployed) {
+      setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
+      return;
+    }
+    // Guard: jangan kirim kalau sudah GM hari ini
+    if (gmDone) {
+      setToast({ msg: "You already said GM today! Come back after 00:00 UTC.", type: "error" });
+      return;
+    }
+
+    setSendingGM(true);
+    try {
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
+      const client = await getSmartAccountClient(walletClient);
+      const txHash = await client.sendUserOperation({
+        calls: [{
+          to:    GM_CONTRACT_ADDRESS as Address,
+          value: 0n,
+          data:  encodeFunctionData({ abi: GM_ABI, functionName: "sayGM" }),
+        }],
+      });
+      setToast({ msg: "Sending GM...", type: "success" });
+      await client.waitForUserOperationReceipt({ hash: txHash });
+
+      // ✅ GM sukses → simpan tanggal UTC hari ini ke localStorage
+      if (ownerAddress) {
+        localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
+      }
+      setGmDone(true);
+      setToast({ msg: "GM sent! See you tomorrow 👋", type: "success" });
+    } catch (e: any) {
+      const msg = e?.shortMessage || e?.message || "Unknown error";
+      setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM failed: " + msg, type: "error" });
+    } finally {
+      setSendingGM(false);
+    }
+  };
+
+  // ── Deploy confirm ────────────────────────────────────────────────────────
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
   useEffect(() => {
     if (deployConfirmed) {
@@ -97,6 +232,7 @@ export const DustDepositView = () => {
     }
   }, [deployConfirmed]);
 
+  // ── Detect vault ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!ownerAddress) return;
     detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
@@ -105,6 +241,7 @@ export const DustDepositView = () => {
     });
   }, [ownerAddress]);
 
+  // ── Fetch vault data ──────────────────────────────────────────────────────
   const fetchVaultData = useCallback(async () => {
     if (!vaultAddress) return;
     setLoading(true);
@@ -143,11 +280,13 @@ export const DustDepositView = () => {
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
 
+  // ── Fetch approvals ───────────────────────────────────────────────────────
   const fetchApprovals = async (vault: Address, tokens: any[]) => {
     if (tokens.length === 0) return;
     setLoadingApprovals(true);
     try {
       const found: ActiveApproval[] = [];
+
       await Promise.all(
         tokens.flatMap(token =>
           KNOWN_SPENDERS.map(async spender => {
@@ -157,6 +296,7 @@ export const DustDepositView = () => {
                 abi:          ALLOWANCE_ABI,
                 functionName: "allowance",
                 args:         [vault, spender.address],
+                blockTag:     "pending",
               });
               if (allowance > 0n) {
                 found.push({
@@ -171,50 +311,152 @@ export const DustDepositView = () => {
           })
         )
       );
+
+      await Promise.all(
+        tokens.flatMap(token =>
+          PERMIT2_SUB_SPENDERS.map(async subSpender => {
+            try {
+              const [amount] = await publicClient.readContract({
+                address:      PERMIT2_ADDRESS,
+                abi:          PERMIT2_ABI,
+                functionName: "allowance",
+                args:         [vault, token.contractAddress as Address, subSpender.address],
+                blockTag:     "pending",
+              });
+              if (amount > 0n) {
+                found.push({
+                  tokenAddress:      token.contractAddress,
+                  tokenSymbol:       token.symbol,
+                  spenderAddress:    subSpender.address,
+                  spenderLabel:      subSpender.label,
+                  allowance:         BigInt(amount),
+                  isPermit2Internal: true,
+                });
+              }
+            } catch { /* skip */ }
+          })
+        )
+      );
+
       setApprovals(found);
     } catch (e) {
-      console.error("[Revoke] Error checking approvals:", e);
+      console.error("[Revoke] Error:", e);
     } finally {
       setLoadingApprovals(false);
     }
   };
 
+  // ── Revoke ────────────────────────────────────────────────────────────────
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
-    // ✅ Custom dialog — gantikan window.confirm
     const ok = await confirm(
-      `This uses 1 transaction from your vault.`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked. \nSome tokens may not support revocation — they will be skipped.`,
       {
-        title: `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
-        variant: "warning",
+        title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
+        variant:     "warning",
         confirmText: "Revoke",
       }
     );
     if (!ok) return;
 
     setRevoking(true);
+
+    let client: Awaited<ReturnType<typeof getSmartAccountClient>>;
     try {
-      if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
-      const client = await getSmartAccountClient(walletClient);
+      client = await getSmartAccountClient(walletClient);
+    } catch {
+      client = await getSelfPayingSmartAccountClient(walletClient);
+    }
 
-      const revokeCalls = approvals.map(approval => ({
-        to:    approval.tokenAddress as Address,
-        value: 0n,
-        data:  encodeFunctionData({
-          abi:          erc20Abi,
-          functionName: "approve",
-          args:         [approval.spenderAddress as Address, 0n],
-        }),
-      }));
+    let successCount = 0;
+    const failedTokens: string[] = [];
 
-      const txHash = await client.sendUserOperation({ calls: revokeCalls });
-      setToast({ msg: `Revoking ${approvals.length} approval${approvals.length > 1 ? "s" : ""}...`, type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
+    try {
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      setToast({ msg: `✓ Revoked ${approvals.length} approval${approvals.length > 1 ? "s" : ""}!`, type: "success" });
-      setApprovals([]);
-      setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
+      for (const approval of approvals) {
+        setToast({
+          msg:  `Revoking ${approval.tokenSymbol} (${successCount + failedTokens.length + 1}/${approvals.length})...`,
+          type: "success",
+        });
+
+        try {
+          let txHash: string;
+
+          if (approval.isPermit2Internal) {
+            txHash = await client.sendUserOperation({
+              calls: [{
+                to:    PERMIT2_ADDRESS,
+                value: 0n,
+                data:  encodeFunctionData({
+                  abi:          PERMIT2_ABI,
+                  functionName: "approve",
+                  args:         [
+                    approval.tokenAddress  as Address,
+                    approval.spenderAddress as Address,
+                    0n,
+                    0,
+                  ],
+                }),
+              }],
+            });
+          } else {
+            try {
+              txHash = await client.sendUserOperation({
+                calls: [{
+                  to:    approval.tokenAddress as Address,
+                  value: 0n,
+                  data:  encodeFunctionData({
+                    abi: erc20Abi, functionName: "approve",
+                    args: [approval.spenderAddress as Address, 0n],
+                  }),
+                }],
+              });
+            } catch {
+              console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
+              txHash = await client.sendUserOperation({
+                calls: [{
+                  to:    approval.tokenAddress as Address,
+                  value: 0n,
+                  data:  encodeFunctionData({
+                    abi: erc20Abi, functionName: "approve",
+                    args: [approval.spenderAddress as Address, 1n],
+                  }),
+                }],
+              });
+            }
+          }
+
+          await client.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
+          successCount++;
+        } catch (tokenErr: any) {
+          console.error(`[Revoke] ✗ ${approval.tokenSymbol} failed:`, tokenErr?.message);
+          failedTokens.push(approval.tokenSymbol);
+        }
+      }
+
+      const failedAddresses = new Set(
+        approvals
+          .filter(a => failedTokens.includes(a.tokenSymbol))
+          .map(a => a.tokenAddress)
+      );
+      setApprovals(prev => prev.filter(a => failedAddresses.has(a.tokenAddress)));
+
+      if (successCount > 0 && failedTokens.length === 0) {
+        setToast({ msg: `✓ All ${successCount} approval${successCount > 1 ? "s" : ""} revoked!`, type: "success" });
+      } else if (successCount > 0) {
+        setToast({
+          msg:  `✓ ${successCount} revoked · ${failedTokens.length} skipped (${failedTokens.join(", ")} — token restriction)`,
+          type: "success",
+        });
+      } else {
+        setToast({ msg: `All tokens have revoke restriction. Cannot set allowance to 0.`, type: "error" });
+      }
+
+      if (successCount > 0) {
+        setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 8000);
+      }
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
       setToast({
@@ -226,10 +468,11 @@ export const DustDepositView = () => {
     }
   };
 
+  // ── Activate vault ────────────────────────────────────────────────────────
   const handleActivate = async () => {
     if (!walletClient) return;
     try {
-      if (chainId !== 8453) await switchChainAsync({ chainId: 8453 });
+      if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
       setActivating(true);
       setToast({ msg: "Confirm transaction in your wallet...", type: "success" });
       const txHash = await deployVault(walletClient);
@@ -245,6 +488,7 @@ export const DustDepositView = () => {
     }
   };
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
       <SimpleToast message={toast?.msg || null} type={toast?.type} onClose={() => setToast(null)} />
@@ -315,11 +559,11 @@ export const DustDepositView = () => {
 
       {/* REVOKE SECTION */}
       {isDeployed && (approvals.length > 0 || loadingApprovals) && (
-        <div className="rounded-2xl border border-yellow-500/30 bg-yellow-500/5 p-4 space-y-3">
+        <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <Shield className="w-4 h-4 text-yellow-400 shrink-0" />
+            <Shield className="w-4 h-4 text-red-400 shrink-0" />
             <div>
-              <p className="text-sm font-semibold text-yellow-300">
+              <p className="text-sm font-semibold text-black">
                 {loadingApprovals
                   ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
                   : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
@@ -336,12 +580,12 @@ export const DustDepositView = () => {
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
                 const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
-                const symbol = tokenApprovals[0].tokenSymbol;
+                const symbol = tokenApprovals[0]!.tokenSymbol;
                 return (
-                  <div key={tokenAddr} className="text-xs bg-yellow-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
+                  <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-yellow-200">{symbol}</span>
-                      <span className="text-zinc-400 text-[10px]">
+                      <span className="font-bold text-black">{symbol}</span>
+                      <span className="text-zinc-300 text-[10px]">
                         {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
                       </span>
                     </div>
@@ -358,17 +602,17 @@ export const DustDepositView = () => {
             onClick={handleRevokeAll}
             disabled={revoking || loadingApprovals || approvals.length === 0}
             className="w-full py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors
-              bg-yellow-500 hover:bg-yellow-400 text-black
+              bg-red-600 hover:bg-red-500 text-white
               disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
           >
             {revoking ? (
               <><Refresh className="w-4 h-4 animate-spin" /> Revoking...</>
             ) : (
-              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx</>
+              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx per token</>
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-            Smart vault batches all revokes into 1 transaction · {KNOWN_SPENDERS.length} spenders scanned
+            Gasless via paymaster · fallback vault ETH · {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
@@ -429,6 +673,37 @@ export const DustDepositView = () => {
           </p>
         </div>
       )}
+
+      {/* ── GM — Gasless via Paymaster ── */}
+      <div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
+        <button
+          onClick={handleSayGM}
+          disabled={sendingGM || !isDeployed || gmDone}
+          className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
+            bg-gradient-to-r from-blue-400 to-cyan-500 hover:from-blue-500 hover:to-cyan-600
+            hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-blue-500/30
+            disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
+        >
+          {sendingGM ? (
+            <><Refresh className="w-6 h-6 animate-spin" /> Sending GM...</>
+          ) : gmDone ? (
+            // Tampilkan countdown saat sudah GM hari ini
+            <span className="flex flex-col items-center gap-0.5 leading-tight">
+              <span className="text-base">GM sent today ✓</span>
+              <span className="text-xs font-mono font-normal opacity-80">
+                Next GM in {gmCountdown}
+              </span>
+            </span>
+          ) : (
+            <> GM</>
+          )}
+        </button>
+        <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
+          {gmDone
+            ? "Resets at 00:00 UTC · Once per day"
+            : `Sponsored by Paymaster · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
+        </p>
+      </div>
     </div>
   );
 };

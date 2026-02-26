@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient } from "~/lib/smart-account";
 import { fetchMoralisTokens } from "~/lib/moralis-data";
 import { fetchTokenPrices } from "~/lib/price";
 import { simulateBatchSwap, executeBatchSwap, type SimulationResult } from "~/lib/batch-swap";
@@ -11,6 +10,7 @@ import { base } from "viem/chains";
 import { Refresh, Flash, Check, ArrowRight, WarningTriangle } from "iconoir-react";
 import { SimpleToast } from "~/components/ui/simple-toast";
 import { useAppDialog } from "~/components/ui/app-dialog";
+import { getSmartAccountClient, getDirectVaultClient } from "~/lib/smart-account";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -109,7 +109,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
       formatted.sort((a, b) => b.valueUsd - a.valueUsd);
       setVaultTokens(formatted);
       setVaultPage(1);
-      const validDust = formatted.filter(t => t.valueUsd > 0.000001);
+      const validDust = formatted.filter(t => t.valueUsd > 0.000001 || t.priceUsd === 0);
       setTokens(validDust);
       return validDust;
     } catch (e: any) {
@@ -185,7 +185,7 @@ export const SwapView = ({ defaultFromToken, onTokenConsumed }: SwapViewProps) =
     if (!ok) return;
 
     try {
-      const client    = await getSmartAccountClient(walletClient);
+      const client    = await getDirectVaultClient(walletClient); 
       const ownerAddr = walletClient.account?.address as Address;
       const rawAmount = BigInt(Math.floor(parseFloat(amount) * 10 ** token.decimals));
       const data      = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ownerAddr, rawAmount] });
