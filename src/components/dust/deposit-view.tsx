@@ -19,11 +19,6 @@ import { useAppDialog } from "~/components/ui/app-dialog";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-// FIX: Permit2 dipisah dari KNOWN_SPENDERS karena punya 2 lapis allowance:
-//   1. ERC20 allowance  → token.approve(permit2, amount)   ← biasa, bisa 0
-//   2. Internal allowance → permit2.allowance(user, token, spender) ← beda ABI
-// Yang muncul di Tenderly = ERC20-nya (layer 1), dan sudah 0.
-// Yang masih "aktif" = internal Permit2-nya (layer 2), butuh revoke via Permit2 contract.
 const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
@@ -42,14 +37,11 @@ const KNOWN_SPENDERS: { label: string; address: Address }[] = [
   { label: "SwapBased Router",         address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
 
-// FIX: Sub-spender yang umum dipakai via Permit2 (Uniswap, dll)
-// Ini yang harus dicek & direvoke via Permit2 contract, bukan ERC20
 const PERMIT2_SUB_SPENDERS: { label: string; address: Address }[] = [
   { label: "Uniswap UniversalRouter (via Permit2)", address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
   { label: "Uniswap v3 SwapRouter (via Permit2)",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
 ];
 
-// FIX: ABI Permit2 untuk baca & revoke internal allowance
 const PERMIT2_ABI = [
   {
     name: "allowance",
@@ -98,7 +90,30 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
-// FIX: tambah flag isPermit2Internal untuk bedakan handling di revoke
+// ── GM Cooldown helpers ───────────────────────────────────────────────────────
+// Key localStorage per wallet agar cooldown tidak saling tumpuk antar user
+const getGmStorageKey = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
+
+// Tanggal UTC hari ini → "2026-02-26"
+const todayUTC = () => new Date().toISOString().slice(0, 10);
+
+// Milidetik tersisa hingga 00:00 UTC berikutnya
+const msUntilNextUTCMidnight = () => {
+  const now = new Date();
+  const next = new Date();
+  next.setUTCHours(24, 0, 0, 0); // besok 00:00:00.000 UTC
+  return next.getTime() - now.getTime();
+};
+
+// Format ms → "HH:MM:SS"
+const formatCountdown = (ms: number) => {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return [h, m, s].map(v => v.toString().padStart(2, "0")).join(":");
+};
+
 interface ActiveApproval {
   tokenAddress:      string;
   tokenSymbol:       string;
@@ -131,12 +146,53 @@ export const DustDepositView = () => {
   const [revoking, setRevoking]                 = useState(false);
   const [sendingGM, setSendingGM]               = useState(false);
 
+  // ── GM Cooldown state ─────────────────────────────────────────────────────
+  // gmDone: apakah user sudah GM hari ini (UTC)
+  // gmCountdown: string "HH:MM:SS" sisa waktu hingga reset
+  const [gmDone, setGmDone]           = useState(false);
+  const [gmCountdown, setGmCountdown] = useState("");
+
+  // Cek localStorage saat wallet connect / ownerAddress berubah
+  useEffect(() => {
+    if (!ownerAddress) return;
+    const key       = getGmStorageKey(ownerAddress);
+    const lastSent  = localStorage.getItem(key);
+    const alreadyGm = lastSent === todayUTC();
+    setGmDone(alreadyGm);
+  }, [ownerAddress]);
+
+  // Countdown tick — hanya jalan kalau gmDone = true
+  useEffect(() => {
+    if (!gmDone) { setGmCountdown(""); return; }
+
+    const tick = () => {
+      const remaining = msUntilNextUTCMidnight();
+      setGmCountdown(formatCountdown(remaining));
+
+      // Auto-reset saat jam 00:00 UTC tercapai
+      if (remaining <= 0) {
+        setGmDone(false);
+        if (ownerAddress) localStorage.removeItem(getGmStorageKey(ownerAddress));
+      }
+    };
+
+    tick(); // langsung tampilkan tanpa tunggu 1 detik
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [gmDone, ownerAddress]);
+
   // ── GM — gasless via paymaster ────────────────────────────────────────────
   const handleSayGM = async () => {
     if (!walletClient || !isDeployed) {
       setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
       return;
     }
+    // Guard: jangan kirim kalau sudah GM hari ini
+    if (gmDone) {
+      setToast({ msg: "You already said GM today! Come back after 00:00 UTC.", type: "error" });
+      return;
+    }
+
     setSendingGM(true);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
@@ -150,7 +206,13 @@ export const DustDepositView = () => {
       });
       setToast({ msg: "Sending GM...", type: "success" });
       await client.waitForUserOperationReceipt({ hash: txHash });
-      setToast({ msg: "GM sent!", type: "success" });
+
+      // ✅ GM sukses → simpan tanggal UTC hari ini ke localStorage
+      if (ownerAddress) {
+        localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
+      }
+      setGmDone(true);
+      setToast({ msg: "GM sent! See you tomorrow 👋", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
       setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM failed: " + msg, type: "error" });
@@ -225,7 +287,6 @@ export const DustDepositView = () => {
     try {
       const found: ActiveApproval[] = [];
 
-      // Step 1: Scan ERC20 allowance untuk KNOWN_SPENDERS (kecuali Permit2)
       await Promise.all(
         tokens.flatMap(token =>
           KNOWN_SPENDERS.map(async spender => {
@@ -235,7 +296,6 @@ export const DustDepositView = () => {
                 abi:          ALLOWANCE_ABI,
                 functionName: "allowance",
                 args:         [vault, spender.address],
-                // FIX: bypass RPC cache agar tidak dapat nilai stale setelah revoke
                 blockTag:     "pending",
               });
               if (allowance > 0n) {
@@ -252,10 +312,6 @@ export const DustDepositView = () => {
         )
       );
 
-      // Step 2: FIX — Scan Permit2 internal allowance secara terpisah.
-      // Ini yang muncul "sudah 0 di Tenderly" tapi masih aktif:
-      //   ERC20 allowance ke Permit2 = 0 ✓ (Tenderly baca ini)
-      //   Permit2 internal allowance = masih ada ✗ (butuh query ke Permit2 contract)
       await Promise.all(
         tokens.flatMap(token =>
           PERMIT2_SUB_SPENDERS.map(async subSpender => {
@@ -274,7 +330,7 @@ export const DustDepositView = () => {
                   spenderAddress:    subSpender.address,
                   spenderLabel:      subSpender.label,
                   allowance:         BigInt(amount),
-                  isPermit2Internal: true, // ← flag: revoke via Permit2 contract
+                  isPermit2Internal: true,
                 });
               }
             } catch { /* skip */ }
@@ -291,18 +347,6 @@ export const DustDepositView = () => {
   };
 
   // ── Revoke ────────────────────────────────────────────────────────────────
-  //
-  // Kenapa tidak batch:
-  //   Beberapa token (Towns, dll) revert saat approve(spender, 0).
-  //   Satu revert membatalkan seluruh batch.
-  //
-  // Solusi: kirim tiap approval sebagai UserOp terpisah.
-  //   Token yang revert → skip + laporkan.
-  //   Token lain tetap direvoke.
-  //
-  // FIX: Permit2 internal allowance di-revoke via Permit2.approve(token, spender, 0, 0)
-  //   bukan via ERC20.approve() — beda contract, beda ABI.
-  //
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
@@ -318,7 +362,6 @@ export const DustDepositView = () => {
 
     setRevoking(true);
 
-    // Dapatkan client sekali (sponsored dulu, fallback self-pay)
     let client: Awaited<ReturnType<typeof getSmartAccountClient>>;
     try {
       client = await getSmartAccountClient(walletClient);
@@ -342,9 +385,6 @@ export const DustDepositView = () => {
           let txHash: string;
 
           if (approval.isPermit2Internal) {
-            // FIX: Permit2 internal allowance → revoke via Permit2.approve(token, spender, 0, 0)
-            // amount=0 dan expiration=0 (expired immediately = effectively revoked)
-            console.log(`[Revoke] ${approval.tokenSymbol} is Permit2 internal, revoking via Permit2 contract...`);
             txHash = await client.sendUserOperation({
               calls: [{
                 to:    PERMIT2_ADDRESS,
@@ -355,14 +395,13 @@ export const DustDepositView = () => {
                   args:         [
                     approval.tokenAddress  as Address,
                     approval.spenderAddress as Address,
-                    0n, // amount = 0
-                    0,  // expiration = 0 → langsung expired
+                    0n,
+                    0,
                   ],
                 }),
               }],
             });
           } else {
-            // Standard ERC20 revoke: coba approve(spender, 0) dulu
             try {
               txHash = await client.sendUserOperation({
                 calls: [{
@@ -375,7 +414,6 @@ export const DustDepositView = () => {
                 }],
               });
             } catch {
-              // Fallback: approve(spender, 1) untuk token yang revert di approve(0)
               console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
               txHash = await client.sendUserOperation({
                 calls: [{
@@ -392,14 +430,12 @@ export const DustDepositView = () => {
 
           await client.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
           successCount++;
-          console.log(`[Revoke] ✓ ${approval.tokenSymbol} (${approval.isPermit2Internal ? "Permit2 internal" : "ERC20"}) revoked`);
         } catch (tokenErr: any) {
           console.error(`[Revoke] ✗ ${approval.tokenSymbol} failed:`, tokenErr?.message);
           failedTokens.push(approval.tokenSymbol);
         }
       }
 
-      // Hapus approvals yang berhasil direvoke dari state
       const failedAddresses = new Set(
         approvals
           .filter(a => failedTokens.includes(a.tokenSymbol))
@@ -419,7 +455,6 @@ export const DustDepositView = () => {
       }
 
       if (successCount > 0) {
-        // FIX: delay 8 detik agar RPC propagate, hindari hasil stale
         setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 8000);
       }
     } catch (e: any) {
@@ -639,24 +674,34 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* GM — Gasless via Paymaster */}
+      {/* ── GM — Gasless via Paymaster ── */}
       <div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
         <button
           onClick={handleSayGM}
-          disabled={sendingGM || !isDeployed}
+          disabled={sendingGM || !isDeployed || gmDone}
           className="w-full py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all
             bg-gradient-to-r from-blue-400 to-cyan-500 hover:from-blue-500 hover:to-cyan-600
             hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-blue-500/30
-            disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled:grayscale disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
         >
           {sendingGM ? (
             <><Refresh className="w-6 h-6 animate-spin" /> Sending GM...</>
+          ) : gmDone ? (
+            // Tampilkan countdown saat sudah GM hari ini
+            <span className="flex flex-col items-center gap-0.5 leading-tight">
+              <span className="text-base">GM sent today ✓</span>
+              <span className="text-xs font-mono font-normal opacity-80">
+                Next GM in {gmCountdown}
+              </span>
+            </span>
           ) : (
             <> GM</>
           )}
         </button>
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
-          Sponsored by Paymaster · {GM_CONTRACT_ADDRESS.slice(0, 6)}...{GM_CONTRACT_ADDRESS.slice(-4)}
+          {gmDone
+            ? "Resets at 00:00 UTC · Once per day"
+            : `Sponsored by Paymaster · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
         </p>
       </div>
     </div>
