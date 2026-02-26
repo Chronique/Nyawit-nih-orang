@@ -19,12 +19,19 @@ import { useAppDialog } from "~/components/ui/app-dialog";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
+// FIX: Permit2 dipisah dari KNOWN_SPENDERS karena punya 2 lapis allowance:
+//   1. ERC20 allowance  → token.approve(permit2, amount)   ← biasa, bisa 0
+//   2. Internal allowance → permit2.allowance(user, token, spender) ← beda ABI
+// Yang muncul di Tenderly = ERC20-nya (layer 1), dan sudah 0.
+// Yang masih "aktif" = internal Permit2-nya (layer 2), butuh revoke via Permit2 contract.
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
+
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
   { label: "LI.FI Diamond",           address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
   { label: "0x ExchangeProxy",         address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
   { label: "Odos Router v2",           address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
   { label: "Paraswap Augustus v6",     address: "0x6A000F20005980200259B80c5102003040001068" },
-  { label: "Permit2",                  address: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
+  // NOTE: Permit2 sengaja tidak di sini — ditangani terpisah via PERMIT2_ABI
   { label: "Uniswap v3 SwapRouter",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
   { label: "Uniswap UniversalRouter",  address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
   { label: "KyberSwap MetaAggregator", address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
@@ -34,6 +41,44 @@ const KNOWN_SPENDERS: { label: string; address: Address }[] = [
   { label: "BaseSwap Router",          address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
   { label: "SwapBased Router",         address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
+
+// FIX: Sub-spender yang umum dipakai via Permit2 (Uniswap, dll)
+// Ini yang harus dicek & direvoke via Permit2 contract, bukan ERC20
+const PERMIT2_SUB_SPENDERS: { label: string; address: Address }[] = [
+  { label: "Uniswap UniversalRouter (via Permit2)", address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "Uniswap v3 SwapRouter (via Permit2)",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+];
+
+// FIX: ABI Permit2 untuk baca & revoke internal allowance
+const PERMIT2_ABI = [
+  {
+    name: "allowance",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "user",    type: "address" },
+      { name: "token",   type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [
+      { name: "amount",     type: "uint160" },
+      { name: "expiration", type: "uint48"  },
+      { name: "nonce",      type: "uint48"  },
+    ],
+  },
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token",      type: "address" },
+      { name: "spender",    type: "address" },
+      { name: "amount",     type: "uint160" },
+      { name: "expiration", type: "uint48"  },
+    ],
+    outputs: [],
+  },
+] as const;
 
 const GM_CONTRACT_ADDRESS = "0xce0274F873cDbC261ee684cAb428C4233bc20dC2";
 const GM_ABI = [
@@ -53,12 +98,14 @@ const ALLOWANCE_ABI = [
   },
 ] as const;
 
+// FIX: tambah flag isPermit2Internal untuk bedakan handling di revoke
 interface ActiveApproval {
-  tokenAddress:   string;
-  tokenSymbol:    string;
-  spenderAddress: string;
-  spenderLabel:   string;
-  allowance:      bigint;
+  tokenAddress:      string;
+  tokenSymbol:       string;
+  spenderAddress:    string;
+  spenderLabel:      string;
+  allowance:         bigint;
+  isPermit2Internal?: boolean;
 }
 
 export const DustDepositView = () => {
@@ -177,6 +224,8 @@ export const DustDepositView = () => {
     setLoadingApprovals(true);
     try {
       const found: ActiveApproval[] = [];
+
+      // Step 1: Scan ERC20 allowance untuk KNOWN_SPENDERS (kecuali Permit2)
       await Promise.all(
         tokens.flatMap(token =>
           KNOWN_SPENDERS.map(async spender => {
@@ -186,6 +235,8 @@ export const DustDepositView = () => {
                 abi:          ALLOWANCE_ABI,
                 functionName: "allowance",
                 args:         [vault, spender.address],
+                // FIX: bypass RPC cache agar tidak dapat nilai stale setelah revoke
+                blockTag:     "pending",
               });
               if (allowance > 0n) {
                 found.push({
@@ -200,6 +251,37 @@ export const DustDepositView = () => {
           })
         )
       );
+
+      // Step 2: FIX — Scan Permit2 internal allowance secara terpisah.
+      // Ini yang muncul "sudah 0 di Tenderly" tapi masih aktif:
+      //   ERC20 allowance ke Permit2 = 0 ✓ (Tenderly baca ini)
+      //   Permit2 internal allowance = masih ada ✗ (butuh query ke Permit2 contract)
+      await Promise.all(
+        tokens.flatMap(token =>
+          PERMIT2_SUB_SPENDERS.map(async subSpender => {
+            try {
+              const [amount] = await publicClient.readContract({
+                address:      PERMIT2_ADDRESS,
+                abi:          PERMIT2_ABI,
+                functionName: "allowance",
+                args:         [vault, token.contractAddress as Address, subSpender.address],
+                blockTag:     "pending",
+              });
+              if (amount > 0n) {
+                found.push({
+                  tokenAddress:      token.contractAddress,
+                  tokenSymbol:       token.symbol,
+                  spenderAddress:    subSpender.address,
+                  spenderLabel:      subSpender.label,
+                  allowance:         BigInt(amount),
+                  isPermit2Internal: true, // ← flag: revoke via Permit2 contract
+                });
+              }
+            } catch { /* skip */ }
+          })
+        )
+      );
+
       setApprovals(found);
     } catch (e) {
       console.error("[Revoke] Error:", e);
@@ -218,11 +300,14 @@ export const DustDepositView = () => {
   //   Token yang revert → skip + laporkan.
   //   Token lain tetap direvoke.
   //
+  // FIX: Permit2 internal allowance di-revoke via Permit2.approve(token, spender, 0, 0)
+  //   bukan via ERC20.approve() — beda contract, beda ABI.
+  //
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked. \nSome tokens may not support revocation — they will be skipped..`,
+      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked. \nSome tokens may not support revocation — they will be skipped.`,
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
@@ -254,44 +339,67 @@ export const DustDepositView = () => {
         });
 
         try {
-          // Coba approve(spender, 0) dulu
           let txHash: string;
-          try {
+
+          if (approval.isPermit2Internal) {
+            // FIX: Permit2 internal allowance → revoke via Permit2.approve(token, spender, 0, 0)
+            // amount=0 dan expiration=0 (expired immediately = effectively revoked)
+            console.log(`[Revoke] ${approval.tokenSymbol} is Permit2 internal, revoking via Permit2 contract...`);
             txHash = await client.sendUserOperation({
               calls: [{
-                to:    approval.tokenAddress as Address,
+                to:    PERMIT2_ADDRESS,
                 value: 0n,
                 data:  encodeFunctionData({
-                  abi: erc20Abi, functionName: "approve",
-                  args: [approval.spenderAddress as Address, 0n],
+                  abi:          PERMIT2_ABI,
+                  functionName: "approve",
+                  args:         [
+                    approval.tokenAddress  as Address,
+                    approval.spenderAddress as Address,
+                    0n, // amount = 0
+                    0,  // expiration = 0 → langsung expired
+                  ],
                 }),
               }],
             });
-          } catch {
-            // Fallback: approve(spender, 1) untuk token yang revert di approve(0)
-            console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
-            txHash = await client.sendUserOperation({
-              calls: [{
-                to:    approval.tokenAddress as Address,
-                value: 0n,
-                data:  encodeFunctionData({
-                  abi: erc20Abi, functionName: "approve",
-                  args: [approval.spenderAddress as Address, 1n],
-                }),
-              }],
-            });
+          } else {
+            // Standard ERC20 revoke: coba approve(spender, 0) dulu
+            try {
+              txHash = await client.sendUserOperation({
+                calls: [{
+                  to:    approval.tokenAddress as Address,
+                  value: 0n,
+                  data:  encodeFunctionData({
+                    abi: erc20Abi, functionName: "approve",
+                    args: [approval.spenderAddress as Address, 0n],
+                  }),
+                }],
+              });
+            } catch {
+              // Fallback: approve(spender, 1) untuk token yang revert di approve(0)
+              console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
+              txHash = await client.sendUserOperation({
+                calls: [{
+                  to:    approval.tokenAddress as Address,
+                  value: 0n,
+                  data:  encodeFunctionData({
+                    abi: erc20Abi, functionName: "approve",
+                    args: [approval.spenderAddress as Address, 1n],
+                  }),
+                }],
+              });
+            }
           }
 
           await client.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
           successCount++;
-          console.log(`[Revoke] ✓ ${approval.tokenSymbol} revoked`);
+          console.log(`[Revoke] ✓ ${approval.tokenSymbol} (${approval.isPermit2Internal ? "Permit2 internal" : "ERC20"}) revoked`);
         } catch (tokenErr: any) {
           console.error(`[Revoke] ✗ ${approval.tokenSymbol} failed:`, tokenErr?.message);
           failedTokens.push(approval.tokenSymbol);
         }
       }
 
-      // Hapus approvals yang berhasil direvoke
+      // Hapus approvals yang berhasil direvoke dari state
       const failedAddresses = new Set(
         approvals
           .filter(a => failedTokens.includes(a.tokenSymbol))
@@ -311,7 +419,8 @@ export const DustDepositView = () => {
       }
 
       if (successCount > 0) {
-        setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 5000);
+        // FIX: delay 8 detik agar RPC propagate, hindari hasil stale
+        setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 8000);
       }
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
@@ -464,11 +573,11 @@ export const DustDepositView = () => {
             {revoking ? (
               <><Refresh className="w-4 h-4 animate-spin" /> Revoking...</>
             ) : (
-              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx</>
+              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx per token</>
             )}
           </button>
           <p className="text-[10px] text-zinc-500 text-center">
-          Gasless via paymaster · fallback vault ETH · {KNOWN_SPENDERS.length} spenders scanned
+            Gasless via paymaster · fallback vault ETH · {KNOWN_SPENDERS.length} spenders scanned
           </p>
         </div>
       )}
