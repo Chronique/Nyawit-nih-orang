@@ -1,7 +1,15 @@
 <h2 align="center">Nyawit</h2>
+
+
+
 ![License](https://img.shields.io/badge/License-MIT-green)
 [![Follow on X](https://img.shields.io/twitter/follow/adhichronique?style=social)](https://x.com/adhichronique)
+
+
 ---
+
+
+
 **Nyawit** is a Farcaster Mini-App built on the **Base** network,also accessible via the web. It helps users manage their crypto assets by aggregating "dust" (small token balances) into a Smart Account and providing tools to swap them into ETH or USDC efficiently.
 
 
