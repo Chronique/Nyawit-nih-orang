@@ -181,13 +181,25 @@ export const DustDepositView = () => {
     return () => clearInterval(timer);
   }, [gmDone, ownerAddress]);
 
-  // ── GM — gasless via paymaster ────────────────────────────────────────────
+  // ── GM — direct EOA transaction ──────────────────────────────────────────
+  //
+  // FIX: Sebelumnya pakai getSmartAccountClient + UserOperation (paymaster).
+  // Masalah:
+  //   1. Kalau walletClient adalah smart contract wallet (bukan EOA), tidak bisa
+  //      jadi signer untuk LightAccount — double-layered AA, tidak support.
+  //   2. Wallet seperti Aloha tidak bisa pretty-display EIP-712 UserOp signature,
+  //      jadi muncul garbled binary text di confirmation screen.
+  //
+  // Solusi: pakai walletClient.writeContract langsung dari EOA.
+  //   - Gas di Base ~$0.0001, tidak signifikan.
+  //   - Works dengan semua wallet (EOA, Coinbase, MetaMask, Aloha, dll).
+  //   - Confirmation screen normal — tampil sebagai transaksi biasa.
+  //
   const handleSayGM = async () => {
     if (!walletClient || !isDeployed) {
       setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
       return;
     }
-    // Guard: jangan kirim kalau sudah GM hari ini
     if (gmDone) {
       setToast({ msg: "You already said GM today! Come back after 00:00 UTC.", type: "error" });
       return;
@@ -196,18 +208,20 @@ export const DustDepositView = () => {
     setSendingGM(true);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
-      const txHash = await client.sendUserOperation({
-        calls: [{
-          to:    GM_CONTRACT_ADDRESS as Address,
-          value: 0n,
-          data:  encodeFunctionData({ abi: GM_ABI, functionName: "sayGM" }),
-        }],
-      });
-      setToast({ msg: "Sending GM...", type: "success" });
-      await client.waitForUserOperationReceipt({ hash: txHash });
 
-      // ✅ GM sukses → simpan tanggal UTC hari ini ke localStorage
+      // Direct EOA tx — no smart account, no UserOp, no garbled signature
+      const txHash = await walletClient.writeContract({
+        address:      GM_CONTRACT_ADDRESS as Address,
+        abi:          GM_ABI,
+        functionName: "sayGM",
+        chain:        base,
+        account:      walletClient.account!,
+      });
+
+      setToast({ msg: "Sending GM...", type: "success" });
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      // Simpan tanggal UTC hari ini ke localStorage
       if (ownerAddress) {
         localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
       }
@@ -674,7 +688,7 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* ── GM — Gasless via Paymaster ── */}
+      {/* ── GM — Direct EOA Transaction ── */}
       <div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
         <button
           onClick={handleSayGM}
@@ -701,7 +715,7 @@ export const DustDepositView = () => {
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
           {gmDone
             ? "Resets at 00:00 UTC · Once per day"
-            : `Sponsored by Paymaster · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
+            : `On-chain · Base · ~$0.0001 gas · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
         </p>
       </div>
     </div>
