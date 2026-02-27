@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import {
   getSmartAccountClient,
-  getSelfPayingSmartAccountClient,
+  getDirectVaultClient,           // ← FIX: bukan getSelfPayingSmartAccountClient
   detectVaultAddress,
   deployVault,
   publicClient,
@@ -17,8 +17,7 @@ import { SimpleToast } from "~/components/ui/simple-toast";
 import { useAppDialog } from "~/components/ui/app-dialog";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
+const USDC_ADDRESS    = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
@@ -43,88 +42,64 @@ const PERMIT2_SUB_SPENDERS: { label: string; address: Address }[] = [
 
 const PERMIT2_ABI = [
   {
-    name: "allowance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "user",    type: "address" },
-      { name: "token",   type: "address" },
-      { name: "spender", type: "address" },
-    ],
-    outputs: [
-      { name: "amount",     type: "uint160" },
-      { name: "expiration", type: "uint48"  },
-      { name: "nonce",      type: "uint48"  },
-    ],
+    name: "allowance", type: "function", stateMutability: "view",
+    inputs:  [{ name: "user", type: "address" }, { name: "token", type: "address" }, { name: "spender", type: "address" }],
+    outputs: [{ name: "amount", type: "uint160" }, { name: "expiration", type: "uint48" }, { name: "nonce", type: "uint48" }],
   },
   {
-    name: "approve",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "token",      type: "address" },
-      { name: "spender",    type: "address" },
-      { name: "amount",     type: "uint160" },
-      { name: "expiration", type: "uint48"  },
-    ],
+    name: "approve", type: "function", stateMutability: "nonpayable",
+    inputs:  [{ name: "token", type: "address" }, { name: "spender", type: "address" }, { name: "amount", type: "uint160" }, { name: "expiration", type: "uint48" }],
     outputs: [],
   },
 ] as const;
 
 const GM_CONTRACT_ADDRESS = "0xce0274F873cDbC261ee684cAb428C4233bc20dC2";
-const GM_ABI = [
-  { name: "sayGM", type: "function", stateMutability: "nonpayable", inputs: [] },
-] as const;
+const GM_ABI = [{ name: "sayGM", type: "function", stateMutability: "nonpayable", inputs: [] }] as const;
 
 const ALLOWANCE_ABI = [
   {
-    name: "allowance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "owner",   type: "address" },
-      { name: "spender", type: "address" },
-    ],
+    name: "allowance", type: "function", stateMutability: "view",
+    inputs:  [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
   },
 ] as const;
 
 // ── GM Cooldown helpers ───────────────────────────────────────────────────────
-const getGmStorageKey  = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
-const todayUTC         = () => new Date().toISOString().slice(0, 10);
-const msUntilNextUTCMidnight = () => {
-  const next = new Date();
-  next.setUTCHours(24, 0, 0, 0);
-  return next.getTime() - Date.now();
-};
-const formatCountdown = (ms: number) => {
+const getGmStorageKey        = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
+const todayUTC               = () => new Date().toISOString().slice(0, 10);
+const msUntilNextUTCMidnight = () => { const n = new Date(); n.setUTCHours(24, 0, 0, 0); return n.getTime() - Date.now(); };
+const formatCountdown        = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
-  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
-    .map(v => v.toString().padStart(2, "0")).join(":");
+  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60].map(v => v.toString().padStart(2, "0")).join(":");
 };
 
 // ── Hybrid vault client factory ───────────────────────────────────────────────
 //
-// Sama seperti TanamView: cek bytecode ownerAddress.
-//   - Bytecode kosong → EOA → pakai paymaster (sponsored)
-//   - Bytecode ada    → SC wallet → self-pay (user bayar gas)
+// ROOT CAUSE validateUserOp reverted:
+//   SC wallet → getSelfPayingSmartAccountClient → toLightSmartAccount(SC wallet signer)
+//   → UserOp dikirim → LightAccount.validateUserOp() REVERT ❌
+//   Sebab: toLightSmartAccount expect ECDSA signer (EOA), bukan ERC-1271 (SC wallet)
 //
-// Dipakai untuk handleRevokeAll — operasi vault yang butuh UserOp.
-// GM tidak butuh ini karena pakai writeContract langsung (works semua wallet).
+// FIX: getDirectVaultClient untuk SC wallet
+//   SC wallet → walletClient.writeContract(vault.execute(dest, value, data))
+//   → LightAccount v2 _requireFromEntryPointOrOwner(): caller = SC wallet = owner ✅
+//   → Tidak ada UserOp → tidak ada validateUserOp → tidak ada signature issue
+//
+// EOA → getSmartAccountClient → paymaster sponsored, tetap gratis ✅
 //
 async function getVaultClient(walletClient: any, ownerAddress: string) {
   try {
     const code          = await publicClient.getBytecode({ address: ownerAddress as Address });
     const isSmartWallet = !!code && code !== "0x";
     if (isSmartWallet) {
-      console.log("[DustDeposit] Owner is smart wallet → self-pay client");
-      return { client: await getSelfPayingSmartAccountClient(walletClient), isSponsored: false };
+      console.log("[DustDeposit] Owner is SC wallet → direct vault.execute() as owner");
+      return { client: await getDirectVaultClient(walletClient), isSponsored: false };
     }
     console.log("[DustDeposit] Owner is EOA → sponsored (paymaster) client");
     return { client: await getSmartAccountClient(walletClient), isSponsored: true };
   } catch (e) {
-    console.warn("[DustDeposit] Wallet type detection failed, fallback to self-pay:", e);
-    return { client: await getSelfPayingSmartAccountClient(walletClient), isSponsored: false };
+    console.warn("[DustDeposit] Detection failed, fallback to sponsored:", e);
+    return { client: await getSmartAccountClient(walletClient), isSponsored: true };
   }
 }
 
@@ -154,16 +129,17 @@ export const DustDepositView = () => {
   const [activating, setActivating]             = useState(false);
   const [deployTxHash, setDeployTxHash]         = useState<`0x${string}` | undefined>();
   const [toast, setToast]                       = useState<{ msg: string; type: "success" | "error" } | null>(null);
-
   const [approvals, setApprovals]               = useState<ActiveApproval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [revoking, setRevoking]                 = useState(false);
   const [sendingGM, setSendingGM]               = useState(false);
-
-  // ── Hybrid wallet type detection ──────────────────────────────────────────
-  // isOwnerSmartWallet: dipakai untuk UI hints (pesan gas di footer/dialog)
   const [isOwnerSmartWallet, setIsOwnerSmartWallet] = useState(false);
 
+  // ── GM Cooldown state ─────────────────────────────────────────────────────
+  const [gmDone, setGmDone]           = useState(false);
+  const [gmCountdown, setGmCountdown] = useState("");
+
+  // Detect wallet type
   useEffect(() => {
     if (!ownerAddress) return;
     publicClient.getBytecode({ address: ownerAddress as Address })
@@ -171,14 +147,9 @@ export const DustDepositView = () => {
       .catch(() => setIsOwnerSmartWallet(false));
   }, [ownerAddress]);
 
-  // ── GM Cooldown state ─────────────────────────────────────────────────────
-  const [gmDone, setGmDone]           = useState(false);
-  const [gmCountdown, setGmCountdown] = useState("");
-
   useEffect(() => {
     if (!ownerAddress) return;
-    const lastSent = localStorage.getItem(getGmStorageKey(ownerAddress));
-    setGmDone(lastSent === todayUTC());
+    setGmDone(localStorage.getItem(getGmStorageKey(ownerAddress)) === todayUTC());
   }, [ownerAddress]);
 
   useEffect(() => {
@@ -186,84 +157,45 @@ export const DustDepositView = () => {
     const tick = () => {
       const remaining = msUntilNextUTCMidnight();
       setGmCountdown(formatCountdown(remaining));
-      if (remaining <= 0) {
-        setGmDone(false);
-        if (ownerAddress) localStorage.removeItem(getGmStorageKey(ownerAddress));
-      }
+      if (remaining <= 0) { setGmDone(false); if (ownerAddress) localStorage.removeItem(getGmStorageKey(ownerAddress)); }
     };
     tick();
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [gmDone, ownerAddress]);
 
-  // ── GM ────────────────────────────────────────────────────────────────────
-  //
-  // GM pakai walletClient.writeContract langsung — TIDAK melalui UserOp/paymaster.
-  // Ini bekerja untuk semua jenis wallet (EOA, Coinbase Smart Wallet, Aloha, dll).
-  //
-  // Kenapa tidak pakai paymaster?
-  //   - GM bukan operasi vault → tidak perlu LightAccount sebagai executor
-  //   - Smart contract wallet tidak bisa jadi signer LightAccount (nested AA)
-  //   - Gas di Base ~$0.0001, diabaikan
-  //   - walletClient.writeContract langsung = confirmation screen bersih di semua wallet
-  //
+  // ── GM — direct walletClient.writeContract (works semua wallet) ───────────
   const handleSayGM = async () => {
-    if (!walletClient || !isDeployed) {
-      setToast({ msg: "Please activate your Smart Wallet first!", type: "error" });
-      return;
-    }
-    if (gmDone) {
-      setToast({ msg: "You already said GM today! Come back after 00:00 UTC.", type: "error" });
-      return;
-    }
-
+    if (!walletClient || !isDeployed) { setToast({ msg: "Please activate your Smart Wallet first!", type: "error" }); return; }
+    if (gmDone) { setToast({ msg: "You already said GM today! Come back after 00:00 UTC.", type: "error" }); return; }
     setSendingGM(true);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-
-      // Direct tx dari wallet user — works EOA maupun SC wallet
       const txHash = await walletClient.writeContract({
-        address:      GM_CONTRACT_ADDRESS as Address,
-        abi:          GM_ABI,
-        functionName: "sayGM",
-        chain:        base,
-        account:      walletClient.account!,
+        address: GM_CONTRACT_ADDRESS as Address, abi: GM_ABI, functionName: "sayGM",
+        chain: base, account: walletClient.account!,
       });
-
       setToast({ msg: "Sending GM...", type: "success" });
       await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      if (ownerAddress) {
-        localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
-      }
+      if (ownerAddress) localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
       setGmDone(true);
       setToast({ msg: "GM sent! See you tomorrow 👋", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
       setToast({ msg: msg.includes("rejected") ? "Cancelled." : "GM failed: " + msg, type: "error" });
-    } finally {
-      setSendingGM(false);
-    }
+    } finally { setSendingGM(false); }
   };
 
   // ── Deploy confirm ────────────────────────────────────────────────────────
   const { isSuccess: deployConfirmed } = useWaitForTransactionReceipt({ hash: deployTxHash });
   useEffect(() => {
-    if (deployConfirmed) {
-      setIsDeployed(true);
-      setActivating(false);
-      setToast({ msg: "Smart Wallet activated! 🎉", type: "success" });
-      fetchVaultData();
-    }
+    if (deployConfirmed) { setIsDeployed(true); setActivating(false); setToast({ msg: "Smart Wallet activated! 🎉", type: "success" }); fetchVaultData(); }
   }, [deployConfirmed]);
 
   // ── Detect vault ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!ownerAddress) return;
-    detectVaultAddress(ownerAddress as Address).then(({ address, version }) => {
-      setVaultAddress(address);
-      setVaultVersion(version);
-    });
+    detectVaultAddress(ownerAddress as Address).then(({ address, version }) => { setVaultAddress(address); setVaultVersion(version); });
   }, [ownerAddress]);
 
   // ── Fetch vault data ──────────────────────────────────────────────────────
@@ -278,29 +210,19 @@ export const DustDepositView = () => {
       const deployed = !!code && code !== "0x";
       setIsDeployed(deployed);
       setEthBalance(formatEther(ethBal));
-
       const moralisTokens = await fetchMoralisTokens(vaultAddress);
-      const formatted = moralisTokens
-        .filter(t => BigInt(t.balance) > 0n)
-        .map(t => ({
-          contractAddress: t.token_address,
-          symbol:          t.symbol || "???",
-          logo:            t.logo || null,
-          decimals:        t.decimals || 18,
-          formattedBal:    formatUnits(BigInt(t.balance), t.decimals || 18),
-        }));
-
+      const formatted = moralisTokens.filter(t => BigInt(t.balance) > 0n).map(t => ({
+        contractAddress: t.token_address, symbol: t.symbol || "???",
+        logo: t.logo || null, decimals: t.decimals || 18,
+        formattedBal: formatUnits(BigInt(t.balance), t.decimals || 18),
+      }));
       const usdc = formatted.find(t => t.contractAddress.toLowerCase() === USDC_ADDRESS.toLowerCase());
       setUsdcBalance(usdc ? parseFloat(usdc.formattedBal).toFixed(2) : "0");
       setDustTokens(formatted.filter(t => t.contractAddress.toLowerCase() !== USDC_ADDRESS.toLowerCase()));
       setAllVaultTokens(formatted);
-
       if (deployed) fetchApprovals(vaultAddress, formatted);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
   }, [vaultAddress]);
 
   useEffect(() => { fetchVaultData(); }, [fetchVaultData]);
@@ -311,65 +233,34 @@ export const DustDepositView = () => {
     setLoadingApprovals(true);
     try {
       const found: ActiveApproval[] = [];
-      await Promise.all(
-        tokens.flatMap(token =>
-          KNOWN_SPENDERS.map(async spender => {
-            try {
-              const allowance = await publicClient.readContract({
-                address:      token.contractAddress as Address,
-                abi:          ALLOWANCE_ABI,
-                functionName: "allowance",
-                args:         [vault, spender.address],
-                blockTag:     "pending",
-              });
-              if (allowance > 0n) {
-                found.push({
-                  tokenAddress:   token.contractAddress,
-                  tokenSymbol:    token.symbol,
-                  spenderAddress: spender.address,
-                  spenderLabel:   spender.label,
-                  allowance,
-                });
-              }
-            } catch { /* skip */ }
-          })
-        )
-      );
-      await Promise.all(
-        tokens.flatMap(token =>
-          PERMIT2_SUB_SPENDERS.map(async subSpender => {
-            try {
-              const [amount] = await publicClient.readContract({
-                address:      PERMIT2_ADDRESS,
-                abi:          PERMIT2_ABI,
-                functionName: "allowance",
-                args:         [vault, token.contractAddress as Address, subSpender.address],
-                blockTag:     "pending",
-              });
-              if (amount > 0n) {
-                found.push({
-                  tokenAddress:      token.contractAddress,
-                  tokenSymbol:       token.symbol,
-                  spenderAddress:    subSpender.address,
-                  spenderLabel:      subSpender.label,
-                  allowance:         BigInt(amount),
-                  isPermit2Internal: true,
-                });
-              }
-            } catch { /* skip */ }
-          })
-        )
-      );
+      await Promise.all(tokens.flatMap(token => KNOWN_SPENDERS.map(async spender => {
+        try {
+          const allowance = await publicClient.readContract({
+            address: token.contractAddress as Address, abi: ALLOWANCE_ABI,
+            functionName: "allowance", args: [vault, spender.address], blockTag: "pending",
+          });
+          if (allowance > 0n) found.push({ tokenAddress: token.contractAddress, tokenSymbol: token.symbol, spenderAddress: spender.address, spenderLabel: spender.label, allowance });
+        } catch { /* skip */ }
+      })));
+      await Promise.all(tokens.flatMap(token => PERMIT2_SUB_SPENDERS.map(async subSpender => {
+        try {
+          const [amount] = await publicClient.readContract({
+            address: PERMIT2_ADDRESS, abi: PERMIT2_ABI, functionName: "allowance",
+            args: [vault, token.contractAddress as Address, subSpender.address], blockTag: "pending",
+          });
+          if (amount > 0n) found.push({
+            tokenAddress: token.contractAddress, tokenSymbol: token.symbol,
+            spenderAddress: subSpender.address, spenderLabel: subSpender.label,
+            allowance: BigInt(amount), isPermit2Internal: true,
+          });
+        } catch { /* skip */ }
+      })));
       setApprovals(found);
-    } catch (e) {
-      console.error("[Revoke] Error:", e);
-    } finally {
-      setLoadingApprovals(false);
-    }
+    } catch (e) { console.error("[Revoke] Error:", e); }
+    finally { setLoadingApprovals(false); }
   };
 
-  // ── Revoke ────────────────────────────────────────────────────────────────
-  // Pakai getVaultClient → auto-detect EOA (paymaster) vs SC wallet (self-pay)
+  // ── Revoke — pakai getVaultClient (auto-detect EOA vs SC wallet) ──────────
   const handleRevokeAll = async () => {
     if (!walletClient || !vaultAddress || !ownerAddress || approvals.length === 0) return;
 
@@ -377,22 +268,16 @@ export const DustDepositView = () => {
       [
         `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked.`,
         isOwnerSmartWallet
-          ? "Gas will be charged from your wallet (smart wallet detected)."
+          ? "Gas ~$0.0001 charged from your SC wallet (direct tx, no paymaster)."
           : "Gas is sponsored by paymaster.",
         "Some tokens may not support revocation — they will be skipped.",
       ].join("\n"),
-      {
-        title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
-        variant:     "warning",
-        confirmText: "Revoke",
-      }
+      { title: `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`, variant: "warning", confirmText: "Revoke" }
     );
     if (!ok) return;
 
     setRevoking(true);
-
-    // Hybrid: auto-detect jenis wallet, tidak perlu try/catch manual lagi
-    const { client, isSponsored } = await getVaultClient(walletClient, ownerAddress);
+    const { client } = await getVaultClient(walletClient, ownerAddress);
 
     let successCount = 0;
     const failedTokens: string[] = [];
@@ -401,53 +286,25 @@ export const DustDepositView = () => {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
       for (const approval of approvals) {
-        setToast({
-          msg:  `Revoking ${approval.tokenSymbol} (${successCount + failedTokens.length + 1}/${approvals.length})...`,
-          type: "success",
-        });
-
+        setToast({ msg: `Revoking ${approval.tokenSymbol} (${successCount + failedTokens.length + 1}/${approvals.length})...`, type: "success" });
         try {
           let txHash: string;
-
           if (approval.isPermit2Internal) {
             txHash = await client.sendUserOperation({
-              calls: [{
-                to:   PERMIT2_ADDRESS,
-                value: 0n,
-                data: encodeFunctionData({
-                  abi:          PERMIT2_ABI,
-                  functionName: "approve",
-                  args:         [approval.tokenAddress as Address, approval.spenderAddress as Address, 0n, 0],
-                }),
-              }],
+              calls: [{ to: PERMIT2_ADDRESS, value: 0n, data: encodeFunctionData({ abi: PERMIT2_ABI, functionName: "approve", args: [approval.tokenAddress as Address, approval.spenderAddress as Address, 0n, 0] }) }],
             });
           } else {
             try {
               txHash = await client.sendUserOperation({
-                calls: [{
-                  to:   approval.tokenAddress as Address,
-                  value: 0n,
-                  data: encodeFunctionData({
-                    abi: erc20Abi, functionName: "approve",
-                    args: [approval.spenderAddress as Address, 0n],
-                  }),
-                }],
+                calls: [{ to: approval.tokenAddress as Address, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [approval.spenderAddress as Address, 0n] }) }],
               });
             } catch {
               console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
               txHash = await client.sendUserOperation({
-                calls: [{
-                  to:   approval.tokenAddress as Address,
-                  value: 0n,
-                  data: encodeFunctionData({
-                    abi: erc20Abi, functionName: "approve",
-                    args: [approval.spenderAddress as Address, 1n],
-                  }),
-                }],
+                calls: [{ to: approval.tokenAddress as Address, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [approval.spenderAddress as Address, 1n] }) }],
               });
             }
           }
-
           await client.waitForUserOperationReceipt({ hash: txHash as `0x${string}` });
           successCount++;
         } catch (tokenErr: any) {
@@ -456,34 +313,21 @@ export const DustDepositView = () => {
         }
       }
 
-      const failedAddresses = new Set(
-        approvals.filter(a => failedTokens.includes(a.tokenSymbol)).map(a => a.tokenAddress)
-      );
+      const failedAddresses = new Set(approvals.filter(a => failedTokens.includes(a.tokenSymbol)).map(a => a.tokenAddress));
       setApprovals(prev => prev.filter(a => failedAddresses.has(a.tokenAddress)));
 
       if (successCount > 0 && failedTokens.length === 0) {
         setToast({ msg: `✓ All ${successCount} approval${successCount > 1 ? "s" : ""} revoked!`, type: "success" });
       } else if (successCount > 0) {
-        setToast({
-          msg:  `✓ ${successCount} revoked · ${failedTokens.length} skipped (${failedTokens.join(", ")} — token restriction)`,
-          type: "success",
-        });
+        setToast({ msg: `✓ ${successCount} revoked · ${failedTokens.length} skipped (${failedTokens.join(", ")} — token restriction)`, type: "success" });
       } else {
         setToast({ msg: `All tokens have revoke restriction. Cannot set allowance to 0.`, type: "error" });
       }
-
-      if (successCount > 0) {
-        setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 8000);
-      }
+      if (successCount > 0) setTimeout(() => fetchApprovals(vaultAddress, allVaultTokens), 8000);
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Revoke failed: " + msg,
-        type: "error",
-      });
-    } finally {
-      setRevoking(false);
-    }
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Revoke failed: " + msg, type: "error" });
+    } finally { setRevoking(false); }
   };
 
   // ── Activate vault ────────────────────────────────────────────────────────
@@ -498,10 +342,7 @@ export const DustDepositView = () => {
       setToast({ msg: "Activation sent! Waiting for confirmation...", type: "success" });
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown error";
-      setToast({
-        msg:  msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Activation error: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Activation error: " + msg, type: "error" });
       setActivating(false);
     }
   };
@@ -517,19 +358,11 @@ export const DustDepositView = () => {
           <span className="text-xs text-zinc-500 font-medium uppercase tracking-wide">Smart Vault</span>
           <div className="flex items-center gap-2">
             {vaultVersion && (
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-                vaultVersion === "v1"
-                  ? "text-zinc-400 border-zinc-600 bg-zinc-800"
-                  : "text-blue-400 border-blue-600 bg-blue-900/30"
-              }`}>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${vaultVersion === "v1" ? "text-zinc-400 border-zinc-600 bg-zinc-800" : "text-blue-400 border-blue-600 bg-blue-900/30"}`}>
                 Light Account {vaultVersion === "v1" ? "v1.1" : "v2.0"}
               </span>
             )}
-            <div className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-full border ${
-              isDeployed
-                ? "text-green-400 border-green-500/40 bg-green-500/10"
-                : "text-orange-400 border-orange-500/40 bg-orange-500/10"
-            }`}>
+            <div className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-full border ${isDeployed ? "text-green-400 border-green-500/40 bg-green-500/10" : "text-orange-400 border-orange-500/40 bg-orange-500/10"}`}>
               {isDeployed ? <Check className="w-3 h-3" /> : <Rocket className="w-3 h-3" />}
               {isDeployed ? "Active" : "Inactive"}
             </div>
@@ -538,23 +371,10 @@ export const DustDepositView = () => {
 
         <div className="flex items-center gap-2">
           <code className="text-sm font-mono flex-1 truncate text-zinc-700 dark:text-zinc-300">
-            {vaultAddress
-              ? `${vaultAddress.slice(0, 10)}...${vaultAddress.slice(-8)}`
-              : "Deriving address..."}
+            {vaultAddress ? `${vaultAddress.slice(0, 10)}...${vaultAddress.slice(-8)}` : "Deriving address..."}
           </code>
-          <button
-            onClick={() => vaultAddress && navigator.clipboard.writeText(vaultAddress)}
-            className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400"
-          >
-            <Copy className="w-4 h-4" />
-          </button>
-          <button
-            onClick={fetchVaultData}
-            disabled={loading}
-            className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400"
-          >
-            <Refresh className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          <button onClick={() => vaultAddress && navigator.clipboard.writeText(vaultAddress)} className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400"><Copy className="w-4 h-4" /></button>
+          <button onClick={fetchVaultData} disabled={loading} className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400"><Refresh className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} /></button>
         </div>
 
         <div className="grid grid-cols-2 gap-2 pt-1">
@@ -569,9 +389,7 @@ export const DustDepositView = () => {
         </div>
 
         {dustTokens.length > 0 && (
-          <div className="text-xs text-zinc-400 text-center">
-            {dustTokens.length} dust token{dustTokens.length > 1 ? "s" : ""} in vault
-          </div>
+          <div className="text-xs text-zinc-400 text-center">{dustTokens.length} dust token{dustTokens.length > 1 ? "s" : ""} in vault</div>
         )}
       </div>
 
@@ -582,14 +400,10 @@ export const DustDepositView = () => {
             <Shield className="w-4 h-4 text-red-400 shrink-0" />
             <div>
               <p className="text-sm font-semibold text-black">
-                {loadingApprovals
-                  ? `Scanning ${KNOWN_SPENDERS.length} spenders...`
-                  : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
+                {loadingApprovals ? `Scanning ${KNOWN_SPENDERS.length} spenders...` : `${approvals.length} Active Approval${approvals.length > 1 ? "s" : ""} Found`}
               </p>
               <p className="text-xs text-zinc-400 mt-0.5">
-                {loadingApprovals
-                  ? "Checking allowances across all known DEX routers on Base..."
-                  : "DEX routers can still spend your vault tokens. Revoke to secure your funds."}
+                {loadingApprovals ? "Checking allowances across all known DEX routers on Base..." : "DEX routers can still spend your vault tokens. Revoke to secure your funds."}
               </p>
             </div>
           </div>
@@ -598,18 +412,13 @@ export const DustDepositView = () => {
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
                 const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
-                const symbol         = tokenApprovals[0]!.tokenSymbol;
                 return (
                   <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-black">{symbol}</span>
-                      <span className="text-zinc-300 text-[10px]">
-                        {tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}
-                      </span>
+                      <span className="font-bold text-black">{tokenApprovals[0]!.tokenSymbol}</span>
+                      <span className="text-zinc-300 text-[10px]">{tokenApprovals.length} spender{tokenApprovals.length > 1 ? "s" : ""}</span>
                     </div>
-                    <div className="text-[10px] text-zinc-500 truncate">
-                      {tokenApprovals.map(a => a.spenderLabel).join(" · ")}
-                    </div>
+                    <div className="text-[10px] text-zinc-500 truncate">{tokenApprovals.map(a => a.spenderLabel).join(" · ")}</div>
                   </div>
                 );
               })}
@@ -619,21 +428,13 @@ export const DustDepositView = () => {
           <button
             onClick={handleRevokeAll}
             disabled={revoking || loadingApprovals || approvals.length === 0}
-            className="w-full py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors
-              bg-red-600 hover:bg-red-500 text-white
-              disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
+            className="w-full py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors bg-red-600 hover:bg-red-500 text-white disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
           >
-            {revoking ? (
-              <><Refresh className="w-4 h-4 animate-spin" /> Revoking...</>
-            ) : (
-              <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx per token</>
-            )}
+            {revoking ? <><Refresh className="w-4 h-4 animate-spin" /> Revoking...</> : <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx per token</>}
           </button>
-
-          {/* Footer gas hint — ikut deteksi wallet type */}
           <p className="text-[10px] text-zinc-500 text-center">
             {isOwnerSmartWallet
-              ? `Gas charged from your wallet (SC wallet) · ${KNOWN_SPENDERS.length} spenders scanned`
+              ? `Direct tx · Gas ~$0.0001 · ${KNOWN_SPENDERS.length} spenders scanned`
               : `Gasless via paymaster · ${KNOWN_SPENDERS.length} spenders scanned`}
           </p>
         </div>
@@ -642,9 +443,7 @@ export const DustDepositView = () => {
       {isDeployed && !loadingApprovals && approvals.length === 0 && allVaultTokens.length > 0 && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-500/5 border border-green-500/20">
           <Shield className="w-3.5 h-3.5 text-green-400 shrink-0" />
-          <p className="text-xs text-green-400">
-            No active approvals found across {KNOWN_SPENDERS.length} spenders. Vault is clean.
-          </p>
+          <p className="text-xs text-green-400">No active approvals found across {KNOWN_SPENDERS.length} spenders. Vault is clean.</p>
         </div>
       )}
 
@@ -652,30 +451,16 @@ export const DustDepositView = () => {
         <div className="rounded-2xl border border-orange-500/30 bg-orange-500/5 p-4 space-y-3">
           <div className="space-y-1">
             <p className="text-sm font-semibold text-orange-300">Smart Wallet not yet active.</p>
-            <p className="text-xs text-zinc-400">
-              Activate your Smart Vault to enable batch swaps and token management.
-              Gas fee is paid from your connected wallet — no deposit required.
-            </p>
+            <p className="text-xs text-zinc-400">Activate your Smart Vault to enable batch swaps and token management. Gas fee is paid from your connected wallet.</p>
           </div>
           <div className="text-xs text-blue-300 bg-blue-400/10 border border-blue-400/20 rounded-lg px-3 py-2">
             ℹ Gas will be charged from your wallet ({ownerAddress?.slice(0, 6)}...{ownerAddress?.slice(-4)})
           </div>
-          <button
-            onClick={handleActivate}
-            disabled={activating}
-            className="w-full py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors
-              bg-orange-500 hover:bg-orange-400 text-white
-              disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed"
-          >
-            {activating ? (
-              <><Refresh className="w-4 h-4 animate-spin" /> Deploying Vault...</>
-            ) : (
-              <><Rocket className="w-4 h-4" /> Activate Smart Wallet</>
-            )}
+          <button onClick={handleActivate} disabled={activating}
+            className="w-full py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors bg-orange-500 hover:bg-orange-400 text-white disabled:bg-zinc-700 disabled:text-zinc-500 disabled:cursor-not-allowed">
+            {activating ? <><Refresh className="w-4 h-4 animate-spin" /> Deploying Vault...</> : <><Rocket className="w-4 h-4" /> Activate Smart Wallet</>}
           </button>
-          <p className="text-[10px] text-zinc-500 text-center">
-            One-time setup · Gas paid from your EOA wallet
-          </p>
+          <p className="text-[10px] text-zinc-500 text-center">One-time setup · Gas paid from your EOA wallet</p>
         </div>
       )}
 
@@ -683,16 +468,9 @@ export const DustDepositView = () => {
         <div className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4 space-y-2">
           <p className="text-sm font-semibold text-green-400 flex items-center gap-2">
             <Check className="w-4 h-4" /> Smart Wallet Active
-            {vaultVersion && (
-              <span className="text-[9px] font-normal text-green-600">
-                ({vaultVersion === "v1" ? "Light Account v1.1" : "Light Account v2.0"})
-              </span>
-            )}
+            {vaultVersion && <span className="text-[9px] font-normal text-green-600">({vaultVersion === "v1" ? "Light Account v1.1" : "Light Account v2.0"})</span>}
           </p>
-          <p className="text-xs text-zinc-400">
-            Send dust tokens to the vault address above.
-            Once received, batch swap everything from the Swap tab.
-          </p>
+          <p className="text-xs text-zinc-400">Send dust tokens to the vault address above. Once received, batch swap everything from the Swap tab.</p>
         </div>
       )}
 
@@ -711,22 +489,14 @@ export const DustDepositView = () => {
           ) : gmDone ? (
             <span className="flex flex-col items-center gap-0.5 leading-tight">
               <span className="text-base">GM sent today ✓</span>
-              <span className="text-xs font-mono font-normal opacity-80">
-                Next GM in {gmCountdown}
-              </span>
+              <span className="text-xs font-mono font-normal opacity-80">Next GM in {gmCountdown}</span>
             </span>
-          ) : (
-            <> GM</>
-          )}
+          ) : <> GM</>}
         </button>
-
-        {/* Footer GM — ikut deteksi wallet type */}
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
           {gmDone
             ? "Resets at 00:00 UTC · Once per day"
-            : isOwnerSmartWallet
-              ? `On-chain · Base · ~$0.0001 gas (SC wallet) · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`
-              : `On-chain · Base · ~$0.0001 gas · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
+            : `On-chain · Base · ~$0.0001 gas · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
         </p>
       </div>
     </div>
