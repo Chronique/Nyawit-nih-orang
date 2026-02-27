@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useWalletClient, useAccount, useSwitchChain } from "wagmi";
-import { getSmartAccountClient, publicClient } from "~/lib/smart-account";
+import { getSmartAccountClient, getSelfPayingSmartAccountClient, publicClient } from "~/lib/smart-account";
 import { detectVaultAddress } from "~/lib/smart-account";
 import { formatUnits, encodeFunctionData, erc20Abi, type Address } from "viem";
 import { base } from "viem/chains";
@@ -16,15 +16,12 @@ const ETH_NATIVE   = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 const LIFI_API_URL = "https://li.quest/v1";
 const LIFI_API_KEY = process.env.NEXT_PUBLIC_LIFI_API_KEY || "";
 
-// FIX: Reserve dikurangi dari 0.0005 → 0.00001 ETH
-// Gas wrap dibayar paymaster, bukan dari ETH vault.
-// 0.00001 ETH hanya fallback kalau paymaster down.
-const GAS_RESERVE = 10000000000000n; // 0.00001 ETH
+const GAS_RESERVE = 10000000000000n; // 0.00001 ETH fallback reserve
 
 const WETH_ABI = [
-  { name: "deposit",  type: "function", stateMutability: "payable",     inputs: [],                                         outputs: [] },
-  { name: "withdraw", type: "function", stateMutability: "nonpayable",  inputs: [{ name: "wad", type: "uint256" }],          outputs: [] },
-  { name: "balanceOf",type: "function", stateMutability: "view",        inputs: [{ name: "account", type: "address" }],      outputs: [{ name: "", type: "uint256" }] },
+  { name: "deposit",   type: "function", stateMutability: "payable",    inputs: [],                                    outputs: [] },
+  { name: "withdraw",  type: "function", stateMutability: "nonpayable", inputs: [{ name: "wad", type: "uint256" }],    outputs: [] },
+  { name: "balanceOf", type: "function", stateMutability: "view",       inputs: [{ name: "account", type: "address" }],outputs: [{ name: "", type: "uint256" }] },
 ] as const;
 
 const MORPHO_VAULTS = [
@@ -53,10 +50,10 @@ const MORPHO_VAULTS = [
 ] as const;
 
 const ERC4626_ABI = [
-  { name: "deposit",        type: "function", stateMutability: "nonpayable", inputs: [{ name: "assets",  type: "uint256" }, { name: "receiver", type: "address" }],                                         outputs: [{ name: "shares", type: "uint256" }] },
-  { name: "redeem",         type: "function", stateMutability: "nonpayable", inputs: [{ name: "shares",  type: "uint256" }, { name: "receiver", type: "address" }, { name: "owner", type: "address" }],     outputs: [{ name: "assets", type: "uint256" }] },
-  { name: "balanceOf",      type: "function", stateMutability: "view",       inputs: [{ name: "account", type: "address" }],                                                                                 outputs: [{ name: "", type: "uint256" }] },
-  { name: "convertToAssets",type: "function", stateMutability: "view",       inputs: [{ name: "shares",  type: "uint256" }],                                                                                 outputs: [{ name: "assets", type: "uint256" }] },
+  { name: "deposit",         type: "function", stateMutability: "nonpayable", inputs: [{ name: "assets", type: "uint256" }, { name: "receiver", type: "address" }],                                      outputs: [{ name: "shares", type: "uint256" }] },
+  { name: "redeem",          type: "function", stateMutability: "nonpayable", inputs: [{ name: "shares", type: "uint256" }, { name: "receiver", type: "address" }, { name: "owner", type: "address" }], outputs: [{ name: "assets", type: "uint256" }] },
+  { name: "balanceOf",       type: "function", stateMutability: "view",       inputs: [{ name: "account", type: "address" }],                                                                             outputs: [{ name: "", type: "uint256" }] },
+  { name: "convertToAssets", type: "function", stateMutability: "view",       inputs: [{ name: "shares",  type: "uint256" }],                                                                             outputs: [{ name: "assets", type: "uint256" }] },
 ] as const;
 
 const MORPHO_API = "https://blue-api.morpho.org/graphql";
@@ -66,9 +63,51 @@ interface VaultApy      { vaultId: string; apy: number | null; totalAssets: stri
 interface LifiQuote     { transactionRequest: { to: string; data: string; value: string }; estimate: { approvalAddress: string; toAmount: string }; }
 
 const colorMap = {
-  blue:   { bg: "bg-blue-50 dark:bg-blue-900/20",    border: "border-blue-200 dark:border-blue-800",    text: "text-blue-600 dark:text-blue-300",    badge: "bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-200"    },
+  blue:   { bg: "bg-blue-50 dark:bg-blue-900/20",     border: "border-blue-200 dark:border-blue-800",     text: "text-blue-600 dark:text-blue-300",     badge: "bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-200"     },
   indigo: { bg: "bg-indigo-50 dark:bg-indigo-900/20", border: "border-indigo-200 dark:border-indigo-800", text: "text-indigo-600 dark:text-indigo-300", badge: "bg-indigo-100 dark:bg-indigo-800 text-indigo-700 dark:text-indigo-200" },
 };
+
+// ── Hybrid wallet client factory ──────────────────────────────────────────────
+//
+// Masalah: getSmartAccountClient(walletClient) expect signer berupa EOA.
+// Kalau user pakai smart contract wallet (Coinbase Smart Wallet, Safe, dll)
+// sebagai signer, akan error karena nested AA tidak support.
+//
+// Solusi: cek bytecode ownerAddress di chain.
+//   - Bytecode kosong ("0x" / undefined) → EOA → pakai paymaster (sponsored)
+//   - Bytecode ada → Smart Contract Wallet → pakai self-pay (user bayar gas sendiri)
+//
+// Self-pay di Base masih murah (~$0.001), jadi tidak masalah untuk user SC wallet.
+//
+async function getVaultClient(walletClient: any, ownerAddress: string) {
+  try {
+    const code = await publicClient.getBytecode({ address: ownerAddress as Address });
+    const isSmartWallet = !!code && code !== "0x";
+
+    if (isSmartWallet) {
+      // SC wallet sebagai owner → tidak bisa pakai paymaster, self-pay
+      console.log("[TanamView] Owner is smart wallet, using self-paying client");
+      return {
+        client:     await getSelfPayingSmartAccountClient(walletClient),
+        isSponsored: false,
+      };
+    } else {
+      // EOA → pakai paymaster sponsored
+      console.log("[TanamView] Owner is EOA, using sponsored (paymaster) client");
+      return {
+        client:     await getSmartAccountClient(walletClient),
+        isSponsored: true,
+      };
+    }
+  } catch (e) {
+    // Fallback ke self-pay kalau deteksi gagal
+    console.warn("[TanamView] Wallet type detection failed, fallback to self-pay:", e);
+    return {
+      client:     await getSelfPayingSmartAccountClient(walletClient),
+      isSponsored: false,
+    };
+  }
+}
 
 async function getLifiEthQuote(ethAmount: string, toToken: string, fromAddress: string, chainId: number): Promise<LifiQuote> {
   const params = new URLSearchParams({
@@ -89,7 +128,7 @@ async function getLifiEthQuote(ethAmount: string, toToken: string, fromAddress: 
 }
 
 export const TanamView = () => {
-  const { data: walletClient }              = useWalletClient();
+  const { data: walletClient }             = useWalletClient();
   const { address: ownerAddress, chainId } = useAccount();
   const { switchChainAsync }               = useSwitchChain();
   const { confirm }                        = useAppDialog();
@@ -110,15 +149,23 @@ export const TanamView = () => {
   const [wethAction, setWethAction]       = useState("");
   const [toast, setToast]                 = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
+  // Track apakah owner EOA atau SC wallet (untuk info UI)
+  const [isOwnerSmartWallet, setIsOwnerSmartWallet] = useState(false);
+
   useEffect(() => {
     if (!ownerAddress) return;
     detectVaultAddress(ownerAddress as Address).then(({ address }) => setVaultAddress(address));
+
+    // Detect owner wallet type untuk UI hint
+    publicClient.getBytecode({ address: ownerAddress as Address })
+      .then(code => setIsOwnerSmartWallet(!!code && code !== "0x"))
+      .catch(() => setIsOwnerSmartWallet(false));
   }, [ownerAddress]);
 
   const fetchApyData = useCallback(async () => {
     try {
       const query = `{ vaults(where: { chainId_in: [8453] }, first: 20) { items { address state { apy totalAssets } } } }`;
-      const res = await fetch(MORPHO_API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
+      const res   = await fetch(MORPHO_API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
       if (!res.ok) return;
       const json  = await res.json();
       const items = json?.data?.vaults?.items || [];
@@ -136,8 +183,10 @@ export const TanamView = () => {
       const [posResults, tokenData, ethBal, wethBal] = await Promise.all([
         Promise.all(MORPHO_VAULTS.map(async vault => {
           try {
-            const shares = await publicClient.readContract({ address: vault.vaultAddress, abi: ERC4626_ABI, functionName: "balanceOf", args: [vaultAddress] });
-            const assetsValue = shares > 0n ? await publicClient.readContract({ address: vault.vaultAddress, abi: ERC4626_ABI, functionName: "convertToAssets", args: [shares] }) : 0n;
+            const shares      = await publicClient.readContract({ address: vault.vaultAddress, abi: ERC4626_ABI, functionName: "balanceOf",       args: [vaultAddress] });
+            const assetsValue = shares > 0n
+              ? await publicClient.readContract({ address: vault.vaultAddress, abi: ERC4626_ABI, functionName: "convertToAssets", args: [shares] })
+              : 0n;
             return { vaultId: vault.id, shares, assetsValue } as VaultPosition;
           } catch { return { vaultId: vault.id, shares: 0n, assetsValue: 0n } as VaultPosition; }
         })),
@@ -161,11 +210,8 @@ export const TanamView = () => {
   useEffect(() => { fetchPositions(); fetchApyData(); }, [fetchPositions, fetchApyData]);
 
   // ── Wrap ETH → WETH ───────────────────────────────────────────────────────
-  // FIX: GAS_RESERVE dikurangi ke 0.00001 ETH karena gas dibayar paymaster.
-  // ETH vault hanya dipakai sebagai VALUE yang dikirim ke WETH.deposit(),
-  // bukan untuk bayar gas bundler — itu urusan paymaster.
   const handleWrap = async () => {
-    if (!walletClient || !vaultAddress || ethBalance === 0n) return;
+    if (!walletClient || !vaultAddress || !ownerAddress || ethBalance === 0n) return;
 
     const wrapAmount = ethBalance > GAS_RESERVE ? ethBalance - GAS_RESERVE : 0n;
     if (wrapAmount === 0n) {
@@ -175,11 +221,10 @@ export const TanamView = () => {
     const display = parseFloat(formatUnits(wrapAmount, 18)).toFixed(6);
 
     const ok = await confirm(
-      `0.00001 ETH kept as fallback reserve. Gas is sponsored by paymaster.`,
-      {
-        title:       `Wrap ${display} ETH → WETH?`,
-        confirmText: "Wrap",
-      }
+      isOwnerSmartWallet
+        ? `Gas will be charged from your wallet (smart wallet detected).`
+        : `0.00001 ETH kept as fallback reserve. Gas is sponsored by paymaster.`,
+      { title: `Wrap ${display} ETH → WETH?`, confirmText: "Wrap" }
     );
     if (!ok) return;
 
@@ -187,9 +232,9 @@ export const TanamView = () => {
     setWethAction(`Wrapping ${display} ETH → WETH...`);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client   = await getSmartAccountClient(walletClient);
-      const wrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "deposit", args: [] });
-      const txHash   = await client.sendUserOperation({
+      const { client } = await getVaultClient(walletClient, ownerAddress);
+      const wrapData   = encodeFunctionData({ abi: WETH_ABI, functionName: "deposit", args: [] });
+      const txHash     = await client.sendUserOperation({
         calls: [{ to: WETH_ADDRESS, value: wrapAmount, data: wrapData }],
       });
       await client.waitForUserOperationReceipt({ hash: txHash });
@@ -198,29 +243,28 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Wrap failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Wrap failed: " + msg, type: "error" });
     } finally { setWrapping(false); setWethAction(""); }
   };
 
   // ── Unwrap WETH → ETH ─────────────────────────────────────────────────────
   const handleUnwrap = async () => {
-    if (!walletClient || !vaultAddress || wethBalance === 0n) return;
+    if (!walletClient || !vaultAddress || !ownerAddress || wethBalance === 0n) return;
     const display = parseFloat(formatUnits(wethBalance, 18)).toFixed(6);
 
-    const ok = await confirm(`ETH will be in your Smart Vault (gas reserve).`, {
-      title:       `Unwrap ${display} WETH → ETH?`,
-      confirmText: "Unwrap",
-    });
+    const ok = await confirm(
+      isOwnerSmartWallet
+        ? `Gas will be charged from your wallet (smart wallet detected).`
+        : `ETH will be in your Smart Vault (gas reserve).`,
+      { title: `Unwrap ${display} WETH → ETH?`, confirmText: "Unwrap" }
+    );
     if (!ok) return;
 
     setUnwrapping(true);
     setWethAction(`Unwrapping ${display} WETH → ETH...`);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client     = await getSmartAccountClient(walletClient);
+      const { client } = await getVaultClient(walletClient, ownerAddress);
       const unwrapData = encodeFunctionData({ abi: WETH_ABI, functionName: "withdraw", args: [wethBalance] });
       const txHash     = await client.sendUserOperation({
         calls: [{ to: WETH_ADDRESS, value: 0n, data: unwrapData }],
@@ -231,32 +275,31 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Unwrap failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Unwrap failed: " + msg, type: "error" });
     } finally { setUnwrapping(false); setWethAction(""); }
   };
 
   // ── Swap ETH → asset via LI.FI, then deposit ─────────────────────────────
   const handleSwapAndDeposit = async (vault: typeof MORPHO_VAULTS[number]) => {
-    if (!walletClient || !vaultAddress || !chainId) return;
+    if (!walletClient || !vaultAddress || !ownerAddress || !chainId) return;
     const swapAmount = ethBalance;
     if (swapAmount === 0n) { setToast({ msg: "No ETH in vault to swap.", type: "error" }); return; }
     const ethDisplay = parseFloat(formatUnits(swapAmount, 18)).toFixed(6);
 
-    const ok = await confirm(`Swap ${ethDisplay} ETH → ${vault.asset} via LI.FI, then deposit to Morpho?`, {
-      title:       `Swap & Deposit to ${vault.name}`,
-      confirmText: "Swap & Deposit",
-    });
+    const ok = await confirm(
+      isOwnerSmartWallet
+        ? `Gas will be charged from your wallet (smart wallet detected).`
+        : `Swap ${ethDisplay} ETH → ${vault.asset} via LI.FI, then deposit to Morpho?`,
+      { title: `Swap & Deposit to ${vault.name}`, confirmText: "Swap & Deposit" }
+    );
     if (!ok) return;
 
     setSwapping(vault.id);
     setSwapProgress("Getting quote...");
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
-      const quote  = await getLifiEthQuote(swapAmount.toString(), vault.assetAddress, vaultAddress, chainId);
+      const { client } = await getVaultClient(walletClient, ownerAddress);
+      const quote      = await getLifiEthQuote(swapAmount.toString(), vault.assetAddress, vaultAddress, chainId);
       const expectedOut = parseFloat(formatUnits(BigInt(quote.estimate.toAmount || "0"), vault.decimals)).toFixed(4);
       console.log(`[Tanam] ETH→${vault.asset} quote: ${ethDisplay} ETH → ~${expectedOut} ${vault.asset}`);
 
@@ -298,16 +341,13 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Swap & deposit failed: " + msg, type: "error" });
     } finally { setSwapping(null); setSwapProgress(""); }
   };
 
   // ── Deposit existing ERC20 balance ────────────────────────────────────────
   const handleDeposit = async (vault: typeof MORPHO_VAULTS[number]) => {
-    if (!walletClient || !vaultAddress) return;
+    if (!walletClient || !vaultAddress || !ownerAddress) return;
     const rawBalance = vaultBalances[vault.id];
     if (!rawBalance || BigInt(rawBalance) === 0n) {
       setToast({ msg: `No ${vault.asset} in vault to deposit.`, type: "error" });
@@ -316,16 +356,18 @@ export const TanamView = () => {
     const amount  = BigInt(rawBalance);
     const display = parseFloat(formatUnits(amount, vault.decimals)).toFixed(4);
 
-    const ok = await confirm(`Funds will earn yield automatically.`, {
-      title:       `Deposit ${display} ${vault.asset} to ${vault.name}?`,
-      confirmText: "Deposit",
-    });
+    const ok = await confirm(
+      isOwnerSmartWallet
+        ? `Gas will be charged from your wallet (smart wallet detected).`
+        : `Funds will earn yield automatically.`,
+      { title: `Deposit ${display} ${vault.asset} to ${vault.name}?`, confirmText: "Deposit" }
+    );
     if (!ok) return;
 
     setDepositing(vault.id);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client = await getSmartAccountClient(walletClient);
+      const { client } = await getVaultClient(walletClient, ownerAddress);
 
       const approveData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [vault.vaultAddress, amount] });
       setToast({ msg: `Approving ${vault.asset}...`, type: "success" });
@@ -342,16 +384,13 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Deposit failed: " + msg, type: "error" });
     } finally { setDepositing(null); }
   };
 
   // ── Withdraw: redeem all shares ───────────────────────────────────────────
   const handleWithdraw = async (vault: typeof MORPHO_VAULTS[number]) => {
-    if (!walletClient || !vaultAddress) return;
+    if (!walletClient || !vaultAddress || !ownerAddress) return;
     const pos = positions.find(p => p.vaultId === vault.id);
     if (!pos || pos.shares === 0n) {
       setToast({ msg: `No ${vault.asset} position in Morpho.`, type: "error" });
@@ -359,16 +398,18 @@ export const TanamView = () => {
     }
     const display = parseFloat(formatUnits(pos.assetsValue, vault.decimals)).toFixed(4);
 
-    const ok = await confirm(`Funds will return to your Smart Vault.`, {
-      title:       `Withdraw ${display} ${vault.asset} from Morpho?`,
-      confirmText: "Withdraw",
-    });
+    const ok = await confirm(
+      isOwnerSmartWallet
+        ? `Gas will be charged from your wallet (smart wallet detected).`
+        : `Funds will return to your Smart Vault.`,
+      { title: `Withdraw ${display} ${vault.asset} from Morpho?`, confirmText: "Withdraw" }
+    );
     if (!ok) return;
 
     setWithdrawing(vault.id);
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
-      const client     = await getSmartAccountClient(walletClient);
+      const { client } = await getVaultClient(walletClient, ownerAddress);
       const redeemData = encodeFunctionData({ abi: ERC4626_ABI, functionName: "redeem", args: [pos.shares, vaultAddress, vaultAddress] });
       const txHash     = await client.sendUserOperation({ calls: [{ to: vault.vaultAddress, value: 0n, data: redeemData }] });
       setToast({ msg: `Withdrawing ${display} ${vault.asset}...`, type: "success" });
@@ -378,10 +419,7 @@ export const TanamView = () => {
       await fetchPositions();
     } catch (e: any) {
       const msg = e?.shortMessage || e?.message || "Unknown";
-      setToast({
-        msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg,
-        type: "error",
-      });
+      setToast({ msg: msg.includes("rejected") || msg.includes("denied") ? "Cancelled." : "Withdraw failed: " + msg, type: "error" });
     } finally { setWithdrawing(null); }
   };
 
@@ -406,7 +444,13 @@ export const TanamView = () => {
               <Sprout className="w-4 h-4 text-green-400" strokeWidth={2.5} /> Yield — Morpho
             </h3>
             <p className="text-xs text-green-300 mt-1">Deposit USDC or WETH from your vault to earn yield on Morpho Blue</p>
-            <p className="text-[10px] text-green-500 mt-0.5">Auto-compounding · Withdraw anytime</p>
+            <p className="text-[10px] text-green-500 mt-0.5">
+              Auto-compounding · Withdraw anytime
+              {/* Gas mode indicator */}
+              {isOwnerSmartWallet
+                ? " · Gas: self-pay (SC wallet)"
+                : " · Gas: sponsored"}
+            </p>
           </div>
           <button
             onClick={() => { fetchPositions(); fetchApyData(); }}
@@ -474,9 +518,10 @@ export const TanamView = () => {
                 : <>WETH → ETH</>}
             </button>
           </div>
-          {/* FIX: pesan diupdate untuk reflect GAS_RESERVE baru */}
           <p className="text-[10px] text-emerald-700 text-center">
-            Wraps all ETH minus 0.00001 reserve · Gas sponsored by paymaster
+            {isOwnerSmartWallet
+              ? "Gas charged from your wallet · Smart wallet detected"
+              : "Wraps all ETH minus 0.00001 reserve · Gas sponsored by paymaster"}
           </p>
         </div>
       )}

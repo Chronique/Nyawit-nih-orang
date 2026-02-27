@@ -22,19 +22,18 @@ const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 const KNOWN_SPENDERS: { label: string; address: Address }[] = [
-  { label: "LI.FI Diamond",           address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
-  { label: "0x ExchangeProxy",         address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
-  { label: "Odos Router v2",           address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
-  { label: "Paraswap Augustus v6",     address: "0x6A000F20005980200259B80c5102003040001068" },
-  // NOTE: Permit2 sengaja tidak di sini — ditangani terpisah via PERMIT2_ABI
-  { label: "Uniswap v3 SwapRouter",   address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
-  { label: "Uniswap UniversalRouter",  address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
-  { label: "KyberSwap MetaAggregator", address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
-  { label: "KyberSwap Router v2",      address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
-  { label: "Aerodrome Router",         address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
-  { label: "Aerodrome Slipstream",     address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
-  { label: "BaseSwap Router",          address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
-  { label: "SwapBased Router",         address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
+  { label: "LI.FI Diamond",            address: "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EAe" },
+  { label: "0x ExchangeProxy",          address: "0xDef1C0ded9bec7F1a1670819833240f027b25EfF" },
+  { label: "Odos Router v2",            address: "0x19cEeAd7105607Cd444F5ad10dd51356436095a1" },
+  { label: "Paraswap Augustus v6",      address: "0x6A000F20005980200259B80c5102003040001068" },
+  { label: "Uniswap v3 SwapRouter",    address: "0x2626664c2603336E57B271c5C0b26F421741e481" },
+  { label: "Uniswap UniversalRouter",   address: "0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC" },
+  { label: "KyberSwap MetaAggregator",  address: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5" },
+  { label: "KyberSwap Router v2",       address: "0x617Dee16B86534a5d792A4d7A62FB491B544111E" },
+  { label: "Aerodrome Router",          address: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" },
+  { label: "Aerodrome Slipstream",      address: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5" },
+  { label: "BaseSwap Router",           address: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86" },
+  { label: "SwapBased Router",          address: "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066" },
 ];
 
 const PERMIT2_SUB_SPENDERS: { label: string; address: Address }[] = [
@@ -91,35 +90,50 @@ const ALLOWANCE_ABI = [
 ] as const;
 
 // ── GM Cooldown helpers ───────────────────────────────────────────────────────
-// Key localStorage per wallet agar cooldown tidak saling tumpuk antar user
-const getGmStorageKey = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
-
-// Tanggal UTC hari ini → "2026-02-26"
-const todayUTC = () => new Date().toISOString().slice(0, 10);
-
-// Milidetik tersisa hingga 00:00 UTC berikutnya
+const getGmStorageKey  = (address: string) => `gm_last_sent_${address.toLowerCase()}`;
+const todayUTC         = () => new Date().toISOString().slice(0, 10);
 const msUntilNextUTCMidnight = () => {
-  const now = new Date();
   const next = new Date();
-  next.setUTCHours(24, 0, 0, 0); // besok 00:00:00.000 UTC
-  return next.getTime() - now.getTime();
+  next.setUTCHours(24, 0, 0, 0);
+  return next.getTime() - Date.now();
+};
+const formatCountdown = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
+    .map(v => v.toString().padStart(2, "0")).join(":");
 };
 
-// Format ms → "HH:MM:SS"
-const formatCountdown = (ms: number) => {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  return [h, m, s].map(v => v.toString().padStart(2, "0")).join(":");
-};
+// ── Hybrid vault client factory ───────────────────────────────────────────────
+//
+// Sama seperti TanamView: cek bytecode ownerAddress.
+//   - Bytecode kosong → EOA → pakai paymaster (sponsored)
+//   - Bytecode ada    → SC wallet → self-pay (user bayar gas)
+//
+// Dipakai untuk handleRevokeAll — operasi vault yang butuh UserOp.
+// GM tidak butuh ini karena pakai writeContract langsung (works semua wallet).
+//
+async function getVaultClient(walletClient: any, ownerAddress: string) {
+  try {
+    const code          = await publicClient.getBytecode({ address: ownerAddress as Address });
+    const isSmartWallet = !!code && code !== "0x";
+    if (isSmartWallet) {
+      console.log("[DustDeposit] Owner is smart wallet → self-pay client");
+      return { client: await getSelfPayingSmartAccountClient(walletClient), isSponsored: false };
+    }
+    console.log("[DustDeposit] Owner is EOA → sponsored (paymaster) client");
+    return { client: await getSmartAccountClient(walletClient), isSponsored: true };
+  } catch (e) {
+    console.warn("[DustDeposit] Wallet type detection failed, fallback to self-pay:", e);
+    return { client: await getSelfPayingSmartAccountClient(walletClient), isSponsored: false };
+  }
+}
 
 interface ActiveApproval {
-  tokenAddress:      string;
-  tokenSymbol:       string;
-  spenderAddress:    string;
-  spenderLabel:      string;
-  allowance:         bigint;
+  tokenAddress:       string;
+  tokenSymbol:        string;
+  spenderAddress:     string;
+  spenderLabel:       string;
+  allowance:          bigint;
   isPermit2Internal?: boolean;
 }
 
@@ -146,54 +160,52 @@ export const DustDepositView = () => {
   const [revoking, setRevoking]                 = useState(false);
   const [sendingGM, setSendingGM]               = useState(false);
 
+  // ── Hybrid wallet type detection ──────────────────────────────────────────
+  // isOwnerSmartWallet: dipakai untuk UI hints (pesan gas di footer/dialog)
+  const [isOwnerSmartWallet, setIsOwnerSmartWallet] = useState(false);
+
+  useEffect(() => {
+    if (!ownerAddress) return;
+    publicClient.getBytecode({ address: ownerAddress as Address })
+      .then(code => setIsOwnerSmartWallet(!!code && code !== "0x"))
+      .catch(() => setIsOwnerSmartWallet(false));
+  }, [ownerAddress]);
+
   // ── GM Cooldown state ─────────────────────────────────────────────────────
-  // gmDone: apakah user sudah GM hari ini (UTC)
-  // gmCountdown: string "HH:MM:SS" sisa waktu hingga reset
   const [gmDone, setGmDone]           = useState(false);
   const [gmCountdown, setGmCountdown] = useState("");
 
-  // Cek localStorage saat wallet connect / ownerAddress berubah
   useEffect(() => {
     if (!ownerAddress) return;
-    const key       = getGmStorageKey(ownerAddress);
-    const lastSent  = localStorage.getItem(key);
-    const alreadyGm = lastSent === todayUTC();
-    setGmDone(alreadyGm);
+    const lastSent = localStorage.getItem(getGmStorageKey(ownerAddress));
+    setGmDone(lastSent === todayUTC());
   }, [ownerAddress]);
 
-  // Countdown tick — hanya jalan kalau gmDone = true
   useEffect(() => {
     if (!gmDone) { setGmCountdown(""); return; }
-
     const tick = () => {
       const remaining = msUntilNextUTCMidnight();
       setGmCountdown(formatCountdown(remaining));
-
-      // Auto-reset saat jam 00:00 UTC tercapai
       if (remaining <= 0) {
         setGmDone(false);
         if (ownerAddress) localStorage.removeItem(getGmStorageKey(ownerAddress));
       }
     };
-
-    tick(); // langsung tampilkan tanpa tunggu 1 detik
+    tick();
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [gmDone, ownerAddress]);
 
-  // ── GM — direct EOA transaction ──────────────────────────────────────────
+  // ── GM ────────────────────────────────────────────────────────────────────
   //
-  // FIX: Sebelumnya pakai getSmartAccountClient + UserOperation (paymaster).
-  // Masalah:
-  //   1. Kalau walletClient adalah smart contract wallet (bukan EOA), tidak bisa
-  //      jadi signer untuk LightAccount — double-layered AA, tidak support.
-  //   2. Wallet seperti Aloha tidak bisa pretty-display EIP-712 UserOp signature,
-  //      jadi muncul garbled binary text di confirmation screen.
+  // GM pakai walletClient.writeContract langsung — TIDAK melalui UserOp/paymaster.
+  // Ini bekerja untuk semua jenis wallet (EOA, Coinbase Smart Wallet, Aloha, dll).
   //
-  // Solusi: pakai walletClient.writeContract langsung dari EOA.
-  //   - Gas di Base ~$0.0001, tidak signifikan.
-  //   - Works dengan semua wallet (EOA, Coinbase, MetaMask, Aloha, dll).
-  //   - Confirmation screen normal — tampil sebagai transaksi biasa.
+  // Kenapa tidak pakai paymaster?
+  //   - GM bukan operasi vault → tidak perlu LightAccount sebagai executor
+  //   - Smart contract wallet tidak bisa jadi signer LightAccount (nested AA)
+  //   - Gas di Base ~$0.0001, diabaikan
+  //   - walletClient.writeContract langsung = confirmation screen bersih di semua wallet
   //
   const handleSayGM = async () => {
     if (!walletClient || !isDeployed) {
@@ -209,7 +221,7 @@ export const DustDepositView = () => {
     try {
       if (chainId !== base.id) await switchChainAsync({ chainId: base.id });
 
-      // Direct EOA tx — no smart account, no UserOp, no garbled signature
+      // Direct tx dari wallet user — works EOA maupun SC wallet
       const txHash = await walletClient.writeContract({
         address:      GM_CONTRACT_ADDRESS as Address,
         abi:          GM_ABI,
@@ -221,7 +233,6 @@ export const DustDepositView = () => {
       setToast({ msg: "Sending GM...", type: "success" });
       await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-      // Simpan tanggal UTC hari ini ke localStorage
       if (ownerAddress) {
         localStorage.setItem(getGmStorageKey(ownerAddress), todayUTC());
       }
@@ -300,7 +311,6 @@ export const DustDepositView = () => {
     setLoadingApprovals(true);
     try {
       const found: ActiveApproval[] = [];
-
       await Promise.all(
         tokens.flatMap(token =>
           KNOWN_SPENDERS.map(async spender => {
@@ -325,7 +335,6 @@ export const DustDepositView = () => {
           })
         )
       );
-
       await Promise.all(
         tokens.flatMap(token =>
           PERMIT2_SUB_SPENDERS.map(async subSpender => {
@@ -351,7 +360,6 @@ export const DustDepositView = () => {
           })
         )
       );
-
       setApprovals(found);
     } catch (e) {
       console.error("[Revoke] Error:", e);
@@ -361,11 +369,18 @@ export const DustDepositView = () => {
   };
 
   // ── Revoke ────────────────────────────────────────────────────────────────
+  // Pakai getVaultClient → auto-detect EOA (paymaster) vs SC wallet (self-pay)
   const handleRevokeAll = async () => {
-    if (!walletClient || !vaultAddress || approvals.length === 0) return;
+    if (!walletClient || !vaultAddress || !ownerAddress || approvals.length === 0) return;
 
     const ok = await confirm(
-      `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked. \nSome tokens may not support revocation — they will be skipped.`,
+      [
+        `${approvals.length} approval${approvals.length > 1 ? "s" : ""} will be revoked.`,
+        isOwnerSmartWallet
+          ? "Gas will be charged from your wallet (smart wallet detected)."
+          : "Gas is sponsored by paymaster.",
+        "Some tokens may not support revocation — they will be skipped.",
+      ].join("\n"),
       {
         title:       `Revoke ${approvals.length} approval${approvals.length > 1 ? "s" : ""}?`,
         variant:     "warning",
@@ -376,12 +391,8 @@ export const DustDepositView = () => {
 
     setRevoking(true);
 
-    let client: Awaited<ReturnType<typeof getSmartAccountClient>>;
-    try {
-      client = await getSmartAccountClient(walletClient);
-    } catch {
-      client = await getSelfPayingSmartAccountClient(walletClient);
-    }
+    // Hybrid: auto-detect jenis wallet, tidak perlu try/catch manual lagi
+    const { client, isSponsored } = await getVaultClient(walletClient, ownerAddress);
 
     let successCount = 0;
     const failedTokens: string[] = [];
@@ -401,17 +412,12 @@ export const DustDepositView = () => {
           if (approval.isPermit2Internal) {
             txHash = await client.sendUserOperation({
               calls: [{
-                to:    PERMIT2_ADDRESS,
+                to:   PERMIT2_ADDRESS,
                 value: 0n,
-                data:  encodeFunctionData({
+                data: encodeFunctionData({
                   abi:          PERMIT2_ABI,
                   functionName: "approve",
-                  args:         [
-                    approval.tokenAddress  as Address,
-                    approval.spenderAddress as Address,
-                    0n,
-                    0,
-                  ],
+                  args:         [approval.tokenAddress as Address, approval.spenderAddress as Address, 0n, 0],
                 }),
               }],
             });
@@ -419,9 +425,9 @@ export const DustDepositView = () => {
             try {
               txHash = await client.sendUserOperation({
                 calls: [{
-                  to:    approval.tokenAddress as Address,
+                  to:   approval.tokenAddress as Address,
                   value: 0n,
-                  data:  encodeFunctionData({
+                  data: encodeFunctionData({
                     abi: erc20Abi, functionName: "approve",
                     args: [approval.spenderAddress as Address, 0n],
                   }),
@@ -431,9 +437,9 @@ export const DustDepositView = () => {
               console.warn(`[Revoke] ${approval.tokenSymbol} revert on approve(0), trying approve(1)...`);
               txHash = await client.sendUserOperation({
                 calls: [{
-                  to:    approval.tokenAddress as Address,
+                  to:   approval.tokenAddress as Address,
                   value: 0n,
-                  data:  encodeFunctionData({
+                  data: encodeFunctionData({
                     abi: erc20Abi, functionName: "approve",
                     args: [approval.spenderAddress as Address, 1n],
                   }),
@@ -451,9 +457,7 @@ export const DustDepositView = () => {
       }
 
       const failedAddresses = new Set(
-        approvals
-          .filter(a => failedTokens.includes(a.tokenSymbol))
-          .map(a => a.tokenAddress)
+        approvals.filter(a => failedTokens.includes(a.tokenSymbol)).map(a => a.tokenAddress)
       );
       setApprovals(prev => prev.filter(a => failedAddresses.has(a.tokenAddress)));
 
@@ -594,7 +598,7 @@ export const DustDepositView = () => {
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
               {Array.from(new Set(approvals.map(a => a.tokenAddress))).map(tokenAddr => {
                 const tokenApprovals = approvals.filter(a => a.tokenAddress === tokenAddr);
-                const symbol = tokenApprovals[0]!.tokenSymbol;
+                const symbol         = tokenApprovals[0]!.tokenSymbol;
                 return (
                   <div key={tokenAddr} className="text-xs bg-red-500/10 rounded-lg px-2.5 py-1.5 space-y-0.5">
                     <div className="flex items-center justify-between">
@@ -625,8 +629,12 @@ export const DustDepositView = () => {
               <><Shield className="w-4 h-4" /> Revoke All ({approvals.length}) — 1 tx per token</>
             )}
           </button>
+
+          {/* Footer gas hint — ikut deteksi wallet type */}
           <p className="text-[10px] text-zinc-500 text-center">
-            Gasless via paymaster · fallback vault ETH · {KNOWN_SPENDERS.length} spenders scanned
+            {isOwnerSmartWallet
+              ? `Gas charged from your wallet (SC wallet) · ${KNOWN_SPENDERS.length} spenders scanned`
+              : `Gasless via paymaster · ${KNOWN_SPENDERS.length} spenders scanned`}
           </p>
         </div>
       )}
@@ -688,7 +696,7 @@ export const DustDepositView = () => {
         </div>
       )}
 
-      {/* ── GM — Direct EOA Transaction ── */}
+      {/* ── GM ── */}
       <div className="pt-4 mt-6 border-t border-zinc-100 dark:border-zinc-800">
         <button
           onClick={handleSayGM}
@@ -701,7 +709,6 @@ export const DustDepositView = () => {
           {sendingGM ? (
             <><Refresh className="w-6 h-6 animate-spin" /> Sending GM...</>
           ) : gmDone ? (
-            // Tampilkan countdown saat sudah GM hari ini
             <span className="flex flex-col items-center gap-0.5 leading-tight">
               <span className="text-base">GM sent today ✓</span>
               <span className="text-xs font-mono font-normal opacity-80">
@@ -712,10 +719,14 @@ export const DustDepositView = () => {
             <> GM</>
           )}
         </button>
+
+        {/* Footer GM — ikut deteksi wallet type */}
         <p className="text-[10px] text-zinc-500 text-center mt-2 italic">
           {gmDone
             ? "Resets at 00:00 UTC · Once per day"
-            : `On-chain · Base · ~$0.0001 gas · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
+            : isOwnerSmartWallet
+              ? `On-chain · Base · ~$0.0001 gas (SC wallet) · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`
+              : `On-chain · Base · ~$0.0001 gas · ${GM_CONTRACT_ADDRESS.slice(0, 6)}...${GM_CONTRACT_ADDRESS.slice(-4)}`}
         </p>
       </div>
     </div>
