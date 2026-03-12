@@ -495,6 +495,21 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
 
             {showEthWithdraw && (
               <div className="mt-3 pt-3 border-t border-zinc-700 animate-in slide-in-from-top-2 duration-200">
+                <div className="flex gap-1.5 mb-2">
+                  {[50, 100].map((pct) => (
+                  <button
+                  key={pct}
+                  onClick={() => {
+                  const val = parseFloat(ethBalance) * pct / 100;
+                  setEthWithdrawAmount(val.toFixed(6));
+                  }}
+                  className="flex-1 py-1.5 bg-zinc-700 hover:bg-zinc-600 border border-zinc-600 rounded-lg text-xs font-bold text-zinc-200"
+                  >
+                  {pct}%
+                  </button>
+                  ))}
+                </div>
+                
                 <div className="flex gap-2">
                   <input
                     type="number"
