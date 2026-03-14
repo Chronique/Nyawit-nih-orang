@@ -500,9 +500,10 @@ export const VaultView = ({ onGoToSwap }: VaultViewProps) => {
                   <button
                   key={pct}
                   onClick={() => {
-                  const val = parseFloat(ethBalance) * pct / 100;
+                  const raw = parseFloat(ethBalance) * pct / 100;
+                  const val = pct === 100 ? Math.max(0, raw - 0.000001) : raw;
                   setEthWithdrawAmount(val.toFixed(6));
-                  }}
+                }}
                   className="flex-1 py-1.5 bg-zinc-700 hover:bg-zinc-600 border border-zinc-600 rounded-lg text-xs font-bold text-zinc-200"
                   >
                   {pct}%
